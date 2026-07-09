@@ -1,13 +1,25 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 
 import { createRepository } from "@/db/repository";
+import type { DbClient } from "@/db/client";
 import { chats } from "@/db/schema";
-import { createTestDb } from "@/test/db";
+import { createTestDbHandle, type TestDbHandle } from "@/test/db";
 
 describe("repository", () => {
+  let testDb: TestDbHandle;
+  let db: DbClient;
+
+  beforeEach(() => {
+    testDb = createTestDbHandle();
+    db = testDb.db;
+  });
+
+  afterEach(() => {
+    testDb.close();
+  });
+
   it("creates and lists agent connections", async () => {
-    const db = createTestDb();
     const repository = createRepository(db);
 
     const created = await repository.createAgentConnection({
@@ -32,14 +44,12 @@ describe("repository", () => {
   });
 
   it("returns null for a missing agent connection", async () => {
-    const db = createTestDb();
     const repository = createRepository(db);
 
     await expect(repository.getAgentConnection("agent_missing")).resolves.toBeNull();
   });
 
   it("updates agent health independently of connection details", async () => {
-    const db = createTestDb();
     const repository = createRepository(db);
     const created = await repository.createAgentConnection({
       name: "Billing Agent",
@@ -73,7 +83,6 @@ describe("repository", () => {
   });
 
   it("throws when updating missing records", async () => {
-    const db = createTestDb();
     const repository = createRepository(db);
 
     await expect(repository.updateAgentHealth("agent_missing", { status: "healthy" })).rejects.toThrow(
@@ -85,7 +94,6 @@ describe("repository", () => {
   });
 
   it("stores chat session state separately from message history", async () => {
-    const db = createTestDb();
     const repository = createRepository(db);
     const agent = await repository.createAgentConnection({
       name: "Support Agent",
@@ -126,7 +134,6 @@ describe("repository", () => {
   });
 
   it("orders indexed messages before messages without event indexes", async () => {
-    const db = createTestDb();
     const repository = createRepository(db);
     const agent = await repository.createAgentConnection({
       name: "Support Agent",
@@ -148,7 +155,6 @@ describe("repository", () => {
   });
 
   it("fails fast on corrupted stored chat session state", async () => {
-    const db = createTestDb();
     const repository = createRepository(db);
     const agent = await repository.createAgentConnection({
       name: "Support Agent",

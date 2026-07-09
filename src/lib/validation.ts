@@ -28,6 +28,13 @@ export function normalizeAgentBaseUrl(input: string): string {
 }
 
 const nonEmptyTrimmedString = z.string().trim().min(1);
+const httpHeaderNameSchema = z
+  .string()
+  .trim()
+  .optional()
+  .refine((value) => value === undefined || /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(value), {
+    message: "Header name must be a valid HTTP header name",
+  });
 
 const agentBaseUrlSchema = z.string().transform((value, ctx) => {
   try {
@@ -48,7 +55,7 @@ export const createAgentConnectionSchema = z
     baseUrl: agentBaseUrlSchema,
     authType: authTypeSchema.default("none"),
     bearerToken: z.string().optional(),
-    headerName: z.string().trim().optional(),
+    headerName: httpHeaderNameSchema,
     headerValue: z.string().optional(),
   })
   .superRefine((value, ctx) => {
