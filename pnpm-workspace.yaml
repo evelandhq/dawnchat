@@ -1,0 +1,10 @@
+allowBuilds:
+  # Native SQLite bindings required by the local Drizzle/better-sqlite3 database.
+  better-sqlite3: true
+  # Required by Vitest/Vite tooling and transitive build-time bundling.
+  esbuild: true
+  # Native image dependency used by Next.js image optimization when present.
+  sharp: true
+minimumReleaseAgeExclude:
+  # Eve is pinned to the version verified for the default HTTP API contract.
+  - eve@0.22.1
