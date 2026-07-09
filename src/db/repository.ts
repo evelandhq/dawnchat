@@ -6,6 +6,7 @@ import { createId } from "@/lib/ids";
 import {
   agentConnections,
   chats,
+  events,
   type AgentConnectionStatus,
   type AuthType,
   type ChatStatus,
@@ -29,6 +30,9 @@ export type Chat = Omit<typeof chats.$inferSelect, "sessionStateJson"> & {
   sessionState: SessionState | null;
 };
 export type Message = typeof messages.$inferSelect;
+export type EveEvent = Omit<typeof events.$inferSelect, "payloadJson"> & {
+  payload: unknown;
+};
 
 export type CreateAgentConnectionInput = {
   name: string;
@@ -54,16 +58,27 @@ export type AppendMessageInput = {
   eventIndex?: number | null;
 };
 
+export type AppendEventInput = {
+  chatId: string;
+  eventIndex: number;
+  type: string;
+  payload: unknown;
+};
+
 export type Repository = {
   createAgentConnection(input: CreateAgentConnectionInput): Promise<AgentConnection>;
   listAgentConnections(): Promise<AgentConnection[]>;
   getAgentConnection(id: string): Promise<AgentConnection | null>;
   updateAgentHealth(id: string, input: UpdateAgentHealthInput): Promise<AgentConnection>;
   createChat(input: CreateChatInput): Promise<Chat>;
+  listChats(): Promise<Chat[]>;
   getChat(id: string): Promise<Chat | null>;
   appendMessage(input: AppendMessageInput): Promise<Message>;
   listMessages(chatId: string): Promise<Message[]>;
-  updateChatSessionState(chatId: string, state: SessionState): Promise<Chat>;
+  appendEvent(input: AppendEventInput): Promise<EveEvent>;
+  listEvents(chatId: string): Promise<EveEvent[]>;
+  updateChatSessionState(chatId: string, state: SessionState, status?: ChatStatus): Promise<Chat>;
+  updateChatStatus(chatId: string, status: ChatStatus): Promise<Chat>;
 };
 
 function parseSessionState(sessionStateJson: string | null): SessionState | null {
@@ -82,6 +97,22 @@ function mapChat(row: typeof chats.$inferSelect): Chat {
   return {
     ...row,
     sessionState: parseSessionState(row.sessionStateJson),
+  };
+}
+
+function parseEventPayload(payloadJson: string): unknown {
+  try {
+    return JSON.parse(payloadJson);
+  } catch {
+    throw new Error("Stored Eve event payload is invalid");
+  }
+}
+
+function mapEvent(row: typeof events.$inferSelect): EveEvent {
+  const { payloadJson, ...rest } = row;
+  return {
+    ...rest,
+    payload: parseEventPayload(payloadJson),
   };
 }
 
@@ -148,6 +179,11 @@ export function createRepository(db: RepositoryDb): Repository {
       return mapChat(created);
     },
 
+    async listChats() {
+      const rows = await db.select().from(chats).orderBy(asc(chats.createdAt), asc(chats.id));
+      return rows.map(mapChat);
+    },
+
     async getChat(id) {
       const row = db.select().from(chats).where(eq(chats.id, id)).get();
       return row ? mapChat(row) : null;
@@ -174,13 +210,51 @@ export function createRepository(db: RepositoryDb): Repository {
         .orderBy(sql`${messages.eventIndex} IS NULL`, asc(messages.eventIndex), asc(messages.createdAt), asc(messages.id));
     },
 
-    async updateChatSessionState(chatId, state) {
+    async appendEvent(input) {
+      const record: typeof events.$inferInsert = {
+        id: createId("evt"),
+        chatId: input.chatId,
+        eventIndex: input.eventIndex,
+        type: input.type,
+        payloadJson: JSON.stringify(input.payload),
+        createdAt: new Date(),
+      };
+
+      return mapEvent(db.insert(events).values(record).returning().get());
+    },
+
+    async listEvents(chatId) {
+      const rows = await db
+        .select()
+        .from(events)
+        .where(eq(events.chatId, chatId))
+        .orderBy(asc(events.eventIndex), asc(events.id));
+      return rows.map(mapEvent);
+    },
+
+    async updateChatSessionState(chatId, state, status) {
       const updated = db
         .update(chats)
         .set({
           sessionStateJson: JSON.stringify(state),
+          ...(status ? { status } : {}),
           updatedAt: new Date(),
         })
+        .where(eq(chats.id, chatId))
+        .returning()
+        .get();
+
+      if (!updated) {
+        throw new Error(`Chat not found: ${chatId}`);
+      }
+
+      return mapChat(updated);
+    },
+
+    async updateChatStatus(chatId, status) {
+      const updated = db
+        .update(chats)
+        .set({ status, updatedAt: new Date() })
         .where(eq(chats.id, chatId))
         .returning()
         .get();

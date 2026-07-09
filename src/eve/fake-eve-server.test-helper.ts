@@ -12,6 +12,8 @@ export interface CapturedEveRequest {
 export interface FakeEveServerOptions {
   readonly omitContinuationTokenOnContinue?: boolean;
   readonly redirectHealthTo?: string;
+  readonly failCreateSession?: boolean;
+  readonly streamEvents?: readonly unknown[];
 }
 
 export interface FakeEveServer {
@@ -80,6 +82,11 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
       }
 
       if (request.method === "POST" && url.pathname === "/eve/v1/session") {
+        if (options.failCreateSession) {
+          writeJson(response, 500, { error: "Failed to create fake session" });
+          return;
+        }
+
         const id = nextSessionId++;
         writeJson(response, 200, { ok: true, sessionId: `ses_${id}`, continuationToken: `eve:${id}` });
         return;
@@ -97,17 +104,20 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
 
       const streamMatch = url.pathname.match(/^\/eve\/v1\/session\/(ses_\d+)\/stream$/);
       if (request.method === "GET" && streamMatch) {
-        writeNdjson(response, [
-          {
-            type: "message.appended",
-            data: { messageDelta: "Hello", messageSoFar: "Hello", sequence: 1, stepIndex: 0, turnId: "turn_1" },
-          },
-          {
-            type: "message.completed",
-            data: { message: "Hello", finishReason: "stop", sequence: 2, stepIndex: 0, turnId: "turn_1" },
-          },
-          { type: "session.waiting", data: { wait: "next-user-message" } },
-        ]);
+        writeNdjson(
+          response,
+          options.streamEvents ?? [
+            {
+              type: "message.appended",
+              data: { messageDelta: "Hello", messageSoFar: "Hello", sequence: 1, stepIndex: 0, turnId: "turn_1" },
+            },
+            {
+              type: "message.completed",
+              data: { message: "Hello", finishReason: "stop", sequence: 2, stepIndex: 0, turnId: "turn_1" },
+            },
+            { type: "session.waiting", data: { wait: "next-user-message" } },
+          ],
+        );
         return;
       }
 
