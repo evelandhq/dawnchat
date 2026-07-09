@@ -1,4 +1,5 @@
 import Link from "next/link";
+import type { Route } from "next";
 import type { ReactNode } from "react";
 
 export function AppShell({ children }: { children: ReactNode }): React.ReactElement {
@@ -11,7 +12,7 @@ export function AppShell({ children }: { children: ReactNode }): React.ReactElem
           </Link>
           <nav aria-label="Main navigation" style={{ display: "flex", gap: "0.75rem" }}>
             <Link href="/agents">Agents</Link>
-            <a href="/chats">Chats</a>
+            <Link href={"/chats" as Route}>Chats</Link>
           </nav>
         </div>
       </header>
