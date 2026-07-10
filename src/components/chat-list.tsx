@@ -4,6 +4,12 @@ import Link from "next/link";
 import type { Route } from "next";
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
+import { ArrowUp, Sparkles } from "lucide-react";
+
+import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
+import { NativeSelect } from "@/components/native-select";
+import { StatusBadge } from "@/components/status-badge";
 
 export type ChatListSummary = {
   id: string;
@@ -41,6 +47,7 @@ export function ChatList({ chats, agents }: ChatListProps): React.ReactElement {
   const [message, setMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const recentChats = useMemo(() => [...chats].reverse(), [chats]);
 
   async function onSubmit(event: React.FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -65,6 +72,7 @@ export function ChatList({ chats, agents }: ChatListProps): React.ReactElement {
         return;
       }
       router.push(`/chats/${body.chat.id}` as Route);
+      router.refresh();
     } catch {
       setError("Unable to start chat.");
     } finally {
@@ -73,64 +81,97 @@ export function ChatList({ chats, agents }: ChatListProps): React.ReactElement {
   }
 
   return (
-    <section style={{ display: "grid", gap: "1.5rem" }}>
-      <div>
-        <h1>Chats</h1>
-        <p>Review previous Eve conversations or start a new chat with a healthy agent.</p>
+    <section className="mx-auto flex w-full max-w-2xl flex-col gap-12 px-6 py-10 sm:py-16">
+      <h1 className="sr-only">Chats</h1>
+
+      <div className="space-y-6">
+        <div className="space-y-3 text-center">
+          <div className="bg-primary text-primary-foreground mx-auto flex size-12 items-center justify-center rounded-2xl">
+            <Sparkles className="size-6" />
+          </div>
+          <h2 className="text-2xl font-semibold tracking-tight">What can Eve help with?</h2>
+          <p className="text-muted-foreground text-sm">
+            Review previous Eve conversations or start a new chat with a healthy agent.
+          </p>
+        </div>
+
+        {healthyAgents.length === 0 ? (
+          <p className="text-muted-foreground rounded-xl border border-dashed px-6 py-10 text-center text-sm">
+            No healthy agents are available. Check an agent before starting a chat.
+          </p>
+        ) : (
+          <form
+            onSubmit={onSubmit}
+            className="border-border/60 bg-muted/30 focus-within:border-border flex flex-col gap-2 rounded-3xl border p-3 shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08)] transition-colors"
+          >
+            <Label htmlFor="new-chat-message" className="sr-only">
+              First message
+            </Label>
+            <textarea
+              id="new-chat-message"
+              value={message}
+              onChange={(event) => setMessage(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                  event.preventDefault();
+                  event.currentTarget.form?.requestSubmit();
+                }
+              }}
+              rows={3}
+              placeholder="Send a message..."
+              className="placeholder:text-muted-foreground/80 max-h-48 w-full resize-none bg-transparent px-2.5 py-1 text-base outline-none"
+            />
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <Label htmlFor="new-chat-agent" className="text-muted-foreground text-xs">
+                  Agent
+                </Label>
+                <NativeSelect
+                  id="new-chat-agent"
+                  value={agentId}
+                  onChange={(event) => setAgentId(event.target.value)}
+                  className="h-7 w-auto rounded-full border-transparent bg-transparent pr-7 text-xs font-medium"
+                >
+                  {healthyAgents.map((agent) => (
+                    <option key={agent.id} value={agent.id}>
+                      {agent.name}
+                    </option>
+                  ))}
+                </NativeSelect>
+              </div>
+              <Button type="submit" size="sm" disabled={isSubmitting} className="rounded-full">
+                <ArrowUp />
+                {isSubmitting ? "Starting…" : "Start chat"}
+              </Button>
+            </div>
+          </form>
+        )}
+        {error ? (
+          <p role="alert" className="text-destructive text-center text-sm">
+            {error}
+          </p>
+        ) : null}
       </div>
 
-      <form onSubmit={onSubmit} style={{ display: "grid", gap: "0.75rem", border: "1px solid #d1d5db", borderRadius: "0.5rem", padding: "1rem" }}>
-        <h2>Start a new chat</h2>
-        {healthyAgents.length === 0 ? (
-          <p>No healthy agents are available. Check an agent before starting a chat.</p>
+      <div className="space-y-3">
+        <h2 className="text-muted-foreground text-sm font-medium">Chat history</h2>
+        {recentChats.length === 0 ? (
+          <p className="text-muted-foreground rounded-xl border border-dashed px-6 py-10 text-center text-sm">
+            No chats yet.
+          </p>
         ) : (
-          <>
-            <label style={{ display: "grid", gap: "0.25rem" }}>
-              Agent
-              <select value={agentId} onChange={(event) => setAgentId(event.target.value)}>
-                {healthyAgents.map((agent) => (
-                  <option key={agent.id} value={agent.id}>
-                    {agent.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label style={{ display: "grid", gap: "0.25rem" }}>
-              First message
-              <textarea value={message} onChange={(event) => setMessage(event.target.value)} rows={4} />
-            </label>
-            <button type="submit" disabled={isSubmitting}>
-              {isSubmitting ? "Starting…" : "Start chat"}
-            </button>
-          </>
-        )}
-        {error ? <p role="alert">{error}</p> : null}
-      </form>
-
-      <div style={{ display: "grid", gap: "0.75rem" }}>
-        <h2>Chat history</h2>
-        {chats.length === 0 ? (
-          <p>No chats yet.</p>
-        ) : (
-          <ul style={{ display: "grid", gap: "0.75rem", listStyle: "none", padding: 0 }}>
-            {chats.map((chat) => (
-              <li key={chat.id} style={{ border: "1px solid #d1d5db", borderRadius: "0.5rem", padding: "1rem" }}>
-                <h3>{chat.title}</h3>
-                <dl style={{ display: "grid", gap: "0.25rem" }}>
-                  <div>
-                    <dt>Agent</dt>
-                    <dd>{chat.agentName}</dd>
-                  </div>
-                  <div>
-                    <dt>Status</dt>
-                    <dd>{chat.status}</dd>
-                  </div>
-                  <div>
-                    <dt>Last message</dt>
-                    <dd>{chat.lastMessage ?? "No messages yet."}</dd>
-                  </div>
-                </dl>
-                <Link href={`/chats/${chat.id}` as Route}>Open {chat.title}</Link>
+          <ul className="grid list-none gap-2 p-0">
+            {recentChats.map((chat) => (
+              <li key={chat.id} className="hover:bg-accent/50 relative rounded-xl border p-4 transition-colors">
+                <div className="flex items-center justify-between gap-3">
+                  <Link href={`/chats/${chat.id}` as Route} className="truncate font-medium after:absolute after:inset-0">
+                    <span className="sr-only">Open </span>
+                    {chat.title}
+                  </Link>
+                  <StatusBadge status={chat.status} />
+                </div>
+                <p className="text-muted-foreground mt-1 text-sm">{chat.agentName}</p>
+                <p className="text-muted-foreground mt-1 truncate text-sm">{chat.lastMessage ?? "No messages yet."}</p>
               </li>
             ))}
           </ul>

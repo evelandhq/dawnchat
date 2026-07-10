@@ -1,6 +1,16 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
+import {
+  AssistantRuntimeProvider,
+  useExternalStoreRuntime,
+  type AppendMessage,
+  type ThreadMessageLike,
+} from "@assistant-ui/react";
+
+import { Thread } from "@/components/assistant-ui/thread";
+import { StatusBadge } from "@/components/status-badge";
 
 export type ChatThreadSummary = {
   id: string;
@@ -32,32 +42,53 @@ type SendMessageResponse = {
   error?: string;
 };
 
+const convertMessage = (message: ChatThreadMessage): ThreadMessageLike => ({
+  id: message.id,
+  role: message.role,
+  content: [{ type: "text", text: message.content }],
+  createdAt: new Date(message.createdAt),
+});
+
 export function ChatThread({ chat: initialChat, messages: initialMessages }: ChatThreadProps): React.ReactElement {
+  const router = useRouter();
   const [chat, setChat] = useState(initialChat);
   const [messages, setMessages] = useState(initialMessages);
-  const [message, setMessage] = useState("");
+  const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  async function onSubmit(event: React.FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault();
-    setError(null);
-
-    const trimmedMessage = message.trim();
-    if (!trimmedMessage) {
-      setError("Enter a message.");
+  async function onNew(message: AppendMessage): Promise<void> {
+    const text = message.content
+      .filter((part): part is { type: "text"; text: string } => part.type === "text")
+      .map((part) => part.text)
+      .join("\n")
+      .trim();
+    if (!text) {
       return;
     }
 
-    setIsSubmitting(true);
+    setError(null);
+    const previous = messages;
+    setMessages([
+      ...previous,
+      {
+        id: `optimistic_${Date.now()}`,
+        chatId: chat.id,
+        role: "user",
+        content: text,
+        eventIndex: null,
+        createdAt: new Date().toISOString(),
+      },
+    ]);
+    setIsRunning(true);
     try {
       const response = await fetch(`/api/chats/${chat.id}/messages`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ message: trimmedMessage }),
+        body: JSON.stringify({ message: text }),
       });
       const body = (await response.json()) as SendMessageResponse;
       if (!response.ok || !body.messages) {
+        setMessages(previous);
         setError(body.error ?? "Unable to send message.");
         return;
       }
@@ -65,54 +96,46 @@ export function ChatThread({ chat: initialChat, messages: initialMessages }: Cha
         setChat({ ...body.chat, agentName: chat.agentName });
       }
       setMessages(body.messages);
-      setMessage("");
+      router.refresh();
     } catch {
+      setMessages(previous);
       setError("Unable to send message.");
     } finally {
-      setIsSubmitting(false);
+      setIsRunning(false);
     }
   }
 
+  const runtime = useExternalStoreRuntime<ChatThreadMessage>({
+    messages,
+    setMessages: (next) => setMessages([...next]),
+    convertMessage,
+    onNew,
+    isRunning,
+    isDisabled: chat.status !== "active",
+  });
+
   return (
-    <section style={{ display: "grid", gap: "1.5rem" }}>
-      <header style={{ display: "grid", gap: "0.5rem" }}>
-        <h1>{chat.title}</h1>
-        <dl style={{ display: "flex", gap: "1rem", flexWrap: "wrap" }}>
-          <div>
-            <dt>Agent</dt>
-            <dd>{chat.agentName}</dd>
-          </div>
-          <div>
-            <dt>Status</dt>
-            <dd>{chat.status}</dd>
-          </div>
-        </dl>
+    <section className="flex h-full min-h-0 flex-col">
+      <header className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b px-4 py-3 sm:px-6">
+        <h1 className="truncate text-base font-semibold">{chat.title}</h1>
+        <span className="text-muted-foreground text-sm">{chat.agentName}</span>
+        <StatusBadge status={chat.status} />
       </header>
-
-      <div aria-label="Thread" style={{ display: "grid", gap: "0.75rem" }}>
-        {messages.length === 0 ? (
-          <p>No messages yet.</p>
-        ) : (
-          messages.map((threadMessage) => (
-            <article key={threadMessage.id} style={{ border: "1px solid #d1d5db", borderRadius: "0.5rem", padding: "1rem" }}>
-              <strong>{threadMessage.role === "assistant" ? chat.agentName : threadMessage.role}</strong>
-              <p>{threadMessage.content}</p>
-            </article>
-          ))
-        )}
+      <div className="min-h-0 flex-1">
+        <AssistantRuntimeProvider runtime={runtime}>
+          <Thread />
+        </AssistantRuntimeProvider>
       </div>
-
-      <form onSubmit={onSubmit} style={{ display: "grid", gap: "0.75rem" }}>
-        <label style={{ display: "grid", gap: "0.25rem" }}>
-          Message
-          <textarea value={message} onChange={(event) => setMessage(event.target.value)} rows={4} />
-        </label>
-        <button type="submit" disabled={isSubmitting || chat.status !== "active"}>
-          {isSubmitting ? "Sending…" : "Send"}
-        </button>
-        {chat.status !== "active" ? <p>This chat is {chat.status}; new messages are disabled.</p> : null}
-        {error ? <p role="alert">{error}</p> : null}
-      </form>
+      {chat.status !== "active" ? (
+        <p className="text-muted-foreground border-t px-4 py-2 text-center text-sm">
+          This chat is {chat.status}; new messages are disabled.
+        </p>
+      ) : null}
+      {error ? (
+        <p role="alert" className="text-destructive border-t px-4 py-2 text-center text-sm">
+          {error}
+        </p>
+      ) : null}
     </section>
   );
 }

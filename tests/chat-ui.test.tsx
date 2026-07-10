@@ -11,10 +11,12 @@ import { setDbClientForTests } from "@/db/provider";
 import { createTestDbHandle, type TestDbHandle } from "@/test/db";
 
 const pushMock = vi.fn();
+const refreshMock = vi.fn();
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
     push: pushMock,
+    refresh: refreshMock,
   }),
 }));
 

@@ -1,4 +1,9 @@
 import Link from "next/link";
+import { Bot, Plus } from "lucide-react";
+
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { StatusBadge } from "@/components/status-badge";
 
 export type AgentListItem = {
   id: string;
@@ -26,41 +31,56 @@ function authLabel(authType: AgentListItem["authType"]): string {
 
 export function AgentList({ agents }: AgentListProps): React.ReactElement {
   return (
-    <section style={{ display: "grid", gap: "1rem" }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "1rem" }}>
-        <div>
-          <h1>Agents</h1>
-          <p>Register Eve agents that chats can connect to.</p>
+    <section className="mx-auto w-full max-w-5xl space-y-6 p-6">
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div className="space-y-1">
+          <h1 className="text-2xl font-semibold tracking-tight">Agents</h1>
+          <p className="text-muted-foreground text-sm">Register Eve agents that chats can connect to.</p>
         </div>
-        <Link href="/agents/new">Connect an agent</Link>
+        <Button asChild>
+          <Link href="/agents/new">
+            <Plus />
+            Connect an agent
+          </Link>
+        </Button>
       </div>
 
       {agents.length === 0 ? (
-        <p>No agents connected yet.</p>
+        <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed px-6 py-16 text-center">
+          <div className="bg-muted text-muted-foreground flex size-12 items-center justify-center rounded-full">
+            <Bot className="size-6" />
+          </div>
+          <p className="text-muted-foreground text-sm">No agents connected yet.</p>
+        </div>
       ) : (
-        <ul style={{ display: "grid", gap: "0.75rem", listStyle: "none", padding: 0 }}>
+        <ul className="grid list-none gap-4 p-0 sm:grid-cols-2 xl:grid-cols-3">
           {agents.map((agent) => (
-            <li key={agent.id} style={{ border: "1px solid #d1d5db", borderRadius: "0.5rem", padding: "1rem" }}>
-              <h2>{agent.name}</h2>
-              <p>{agent.baseUrl}</p>
-              <dl style={{ display: "grid", gap: "0.25rem" }}>
-                <div>
-                  <dt>Status</dt>
-                  <dd>{agent.status}</dd>
-                </div>
-                <div>
-                  <dt>Auth Type</dt>
-                  <dd>{authLabel(agent.authType)}</dd>
-                </div>
-                <div>
-                  <dt>Auth</dt>
-                  <dd>{agent.hasAuth ? "Auth configured" : "No auth configured"}</dd>
-                </div>
-                <div>
-                  <dt>Last checked</dt>
-                  <dd>{agent.lastCheckedAt ?? "Never"}</dd>
-                </div>
-              </dl>
+            <li key={agent.id}>
+              <Card className="h-full">
+                <CardHeader>
+                  <CardTitle className="flex items-center justify-between gap-2">
+                    <span className="truncate">{agent.name}</span>
+                    <StatusBadge status={agent.status} />
+                  </CardTitle>
+                  <CardDescription className="truncate font-mono text-xs">{agent.baseUrl}</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <dl className="grid gap-2 text-sm">
+                    <div className="flex items-center justify-between gap-4">
+                      <dt className="text-muted-foreground">Auth Type</dt>
+                      <dd>{authLabel(agent.authType)}</dd>
+                    </div>
+                    <div className="flex items-center justify-between gap-4">
+                      <dt className="text-muted-foreground">Auth</dt>
+                      <dd>{agent.hasAuth ? "Auth configured" : "No auth configured"}</dd>
+                    </div>
+                    <div className="flex items-center justify-between gap-4">
+                      <dt className="text-muted-foreground">Last checked</dt>
+                      <dd className="truncate">{agent.lastCheckedAt ?? "Never"}</dd>
+                    </div>
+                  </dl>
+                </CardContent>
+              </Card>
             </li>
           ))}
         </ul>

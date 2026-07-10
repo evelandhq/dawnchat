@@ -3,6 +3,11 @@
 import { type FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { NativeSelect } from "@/components/native-select";
+
 type AuthType = "none" | "bearer" | "header";
 
 type FormErrors = Partial<Record<"name" | "baseUrl" | "bearerToken" | "headerName" | "headerValue" | "submit", string>>;
@@ -18,6 +23,17 @@ function isValidHttpUrl(value: string): boolean {
 
 function isValidHttpHeaderName(value: string): boolean {
   return /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(value);
+}
+
+function FieldError({ message }: { message: string | undefined }): React.ReactElement | null {
+  if (!message) {
+    return null;
+  }
+  return (
+    <p role="alert" className="text-destructive text-sm">
+      {message}
+    </p>
+  );
 }
 
 export function AgentConnectionForm(): React.ReactElement {
@@ -106,28 +122,28 @@ export function AgentConnectionForm(): React.ReactElement {
   }
 
   return (
-    <form onSubmit={handleSubmit} style={{ display: "grid", gap: "1rem", maxWidth: "36rem" }} noValidate>
-      <div style={{ display: "grid", gap: "0.35rem" }}>
-        <label htmlFor="agent-name">Name</label>
-        <input id="agent-name" name="name" value={name} onChange={(event) => setName(event.target.value)} />
-        {errors.name ? <p role="alert">{errors.name}</p> : null}
+    <form onSubmit={handleSubmit} className="grid gap-5" noValidate>
+      <div className="grid gap-2">
+        <Label htmlFor="agent-name">Name</Label>
+        <Input id="agent-name" name="name" value={name} onChange={(event) => setName(event.target.value)} />
+        <FieldError message={errors.name} />
       </div>
 
-      <div style={{ display: "grid", gap: "0.35rem" }}>
-        <label htmlFor="agent-base-url">Base URL</label>
-        <input
+      <div className="grid gap-2">
+        <Label htmlFor="agent-base-url">Base URL</Label>
+        <Input
           id="agent-base-url"
           name="baseUrl"
           placeholder="https://eve.example.com"
           value={baseUrl}
           onChange={(event) => setBaseUrl(event.target.value)}
         />
-        {errors.baseUrl ? <p role="alert">{errors.baseUrl}</p> : null}
+        <FieldError message={errors.baseUrl} />
       </div>
 
-      <div style={{ display: "grid", gap: "0.35rem" }}>
-        <label htmlFor="agent-auth-type">Auth Type</label>
-        <select
+      <div className="grid gap-2">
+        <Label htmlFor="agent-auth-type">Auth Type</Label>
+        <NativeSelect
           id="agent-auth-type"
           name="authType"
           value={authType}
@@ -136,54 +152,54 @@ export function AgentConnectionForm(): React.ReactElement {
           <option value="none">None</option>
           <option value="bearer">Bearer Token</option>
           <option value="header">Custom Header</option>
-        </select>
+        </NativeSelect>
       </div>
 
       {authType === "bearer" ? (
-        <div style={{ display: "grid", gap: "0.35rem" }}>
-          <label htmlFor="agent-bearer-token">Bearer Token</label>
-          <input
+        <div className="grid gap-2">
+          <Label htmlFor="agent-bearer-token">Bearer Token</Label>
+          <Input
             id="agent-bearer-token"
             name="bearerToken"
             type="password"
             value={bearerToken}
             onChange={(event) => setBearerToken(event.target.value)}
           />
-          {errors.bearerToken ? <p role="alert">{errors.bearerToken}</p> : null}
+          <FieldError message={errors.bearerToken} />
         </div>
       ) : null}
 
       {authType === "header" ? (
         <>
-          <div style={{ display: "grid", gap: "0.35rem" }}>
-            <label htmlFor="agent-header-name">Header Name</label>
-            <input
+          <div className="grid gap-2">
+            <Label htmlFor="agent-header-name">Header Name</Label>
+            <Input
               id="agent-header-name"
               name="headerName"
               value={headerName}
               onChange={(event) => setHeaderName(event.target.value)}
             />
-            {errors.headerName ? <p role="alert">{errors.headerName}</p> : null}
+            <FieldError message={errors.headerName} />
           </div>
-          <div style={{ display: "grid", gap: "0.35rem" }}>
-            <label htmlFor="agent-header-value">Header Value</label>
-            <input
+          <div className="grid gap-2">
+            <Label htmlFor="agent-header-value">Header Value</Label>
+            <Input
               id="agent-header-value"
               name="headerValue"
               type="password"
               value={headerValue}
               onChange={(event) => setHeaderValue(event.target.value)}
             />
-            {errors.headerValue ? <p role="alert">{errors.headerValue}</p> : null}
+            <FieldError message={errors.headerValue} />
           </div>
         </>
       ) : null}
 
-      {errors.submit ? <p role="alert">{errors.submit}</p> : null}
+      <FieldError message={errors.submit} />
 
-      <button type="submit" disabled={isSubmitting}>
+      <Button type="submit" disabled={isSubmitting} className="justify-self-start">
         {isSubmitting ? "Registering…" : "Register agent"}
-      </button>
+      </Button>
     </form>
   );
 }
