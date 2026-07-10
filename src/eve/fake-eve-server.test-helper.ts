@@ -14,6 +14,8 @@ export interface FakeEveServerOptions {
   readonly redirectHealthTo?: string;
   readonly failCreateSession?: boolean;
   readonly streamEvents?: readonly unknown[];
+  /** Emit stream events without ending the response, like eve 0.18.x agents. */
+  readonly holdStreamOpen?: boolean;
 }
 
 export interface FakeEveServer {
@@ -37,7 +39,7 @@ function writeJson(response: ServerResponse, statusCode: number, body: unknown):
   response.end(JSON.stringify(body));
 }
 
-function writeNdjson(response: ServerResponse, events: readonly unknown[]): void {
+function writeNdjson(response: ServerResponse, events: readonly unknown[], holdOpen = false): void {
   response.writeHead(200, {
     "content-type": "application/x-ndjson; charset=utf-8",
     "x-eve-stream-format": "ndjson",
@@ -47,7 +49,9 @@ function writeNdjson(response: ServerResponse, events: readonly unknown[]): void
   for (const event of events) {
     response.write(`${JSON.stringify(event)}\n`);
   }
-  response.end();
+  if (!holdOpen) {
+    response.end();
+  }
 }
 
 export async function startFakeEveServer(options: FakeEveServerOptions = {}): Promise<FakeEveServer> {
@@ -117,6 +121,7 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
             },
             { type: "session.waiting", data: { wait: "next-user-message" } },
           ],
+          options.holdStreamOpen,
         );
         return;
       }
@@ -148,5 +153,7 @@ async function closeServer(server: Server): Promise<void> {
   }
 
   server.close();
+  // Held-open NDJSON streams would otherwise keep the server alive forever.
+  server.closeAllConnections();
   await once(server, "close");
 }

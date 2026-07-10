@@ -127,6 +127,14 @@ describe("Eve client connector", () => {
     expect(server.requests[0].body).toMatchObject({ message: "Hello Eve" });
   });
 
+  it("finishes the turn on a terminal session event even when the agent holds the stream open", async () => {
+    const server = await fakeServer({ holdStreamOpen: true });
+
+    const updates = await collect(sendEveTurn(connection(server.baseUrl), null, "Hello Eve"));
+
+    expect(updates.map((update) => update.type)).toEqual(["message.appended", "message.completed", "session.waiting"]);
+  }, 10000);
+
   it("sends bearer auth to the remote Eve agent on health, info, session, and stream requests", async () => {
     const server = await fakeServer();
     const authedConnection = connection(server.baseUrl, {
