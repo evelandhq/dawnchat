@@ -36,14 +36,14 @@ describe("Chat API", () => {
   const servers: FakeEveServer[] = [];
   let testDb: TestDbHandle;
 
-  beforeEach(() => {
-    testDb = createTestDbHandle();
+  beforeEach(async () => {
+    testDb = await createTestDbHandle();
     setDbClientForTests(testDb.db);
   });
 
   afterEach(async () => {
     setDbClientForTests(null);
-    testDb.close();
+    await testDb.close();
     await Promise.all(servers.splice(0).map((server) => server.close()));
   });
 

@@ -1,21 +1,18 @@
-import Database from "better-sqlite3";
-import { drizzle, type BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
+import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
+import { Pool } from "pg";
 
 import { schema } from "@/db/schema";
 
-function normalizeSqliteFilename(databaseUrl: string): string {
-  if (databaseUrl.startsWith("file:")) {
-    return databaseUrl.slice("file:".length);
+export type DbClient = NodePgDatabase<typeof schema> & { readonly $client: Pool };
+
+export function createDbClient(databaseUrl = process.env.DATABASE_URL): DbClient {
+  if (!databaseUrl) {
+    throw new Error("DATABASE_URL is required (see docs/local-development.md)");
   }
 
-  return databaseUrl;
-}
-
-export type DbClient = BetterSQLite3Database<typeof schema> & { readonly $client: Database.Database };
-
-export function createDbClient(databaseUrl = process.env.DATABASE_URL ?? "file:./eve-chats.sqlite"): DbClient {
-  const sqlite = new Database(normalizeSqliteFilename(databaseUrl));
-  sqlite.pragma("foreign_keys = ON");
-
-  return drizzle(sqlite, { schema }) as DbClient;
+  const pool = new Pool({
+    connectionString: databaseUrl,
+    connectionTimeoutMillis: 5_000,
+  });
+  return drizzle(pool, { schema }) as DbClient;
 }

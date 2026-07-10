@@ -1,5 +1,5 @@
 import { asc, eq, sql } from "drizzle-orm";
-import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
+import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { z } from "zod";
 
 import { createId } from "@/lib/ids";
@@ -15,7 +15,7 @@ import {
   schema,
 } from "@/db/schema";
 
-export type RepositoryDb = BetterSQLite3Database<typeof schema>;
+export type RepositoryDb = NodePgDatabase<typeof schema>;
 
 export type SessionState = z.infer<typeof sessionStateSchema>;
 
@@ -132,7 +132,8 @@ export function createRepository(db: RepositoryDb): Repository {
         updatedAt: now,
       };
 
-      return db.insert(agentConnections).values(record).returning().get();
+      const [created] = await db.insert(agentConnections).values(record).returning();
+      return created;
     },
 
     async listAgentConnections() {
@@ -140,12 +141,13 @@ export function createRepository(db: RepositoryDb): Repository {
     },
 
     async getAgentConnection(id) {
-      return db.select().from(agentConnections).where(eq(agentConnections.id, id)).get() ?? null;
+      const [agent] = await db.select().from(agentConnections).where(eq(agentConnections.id, id)).limit(1);
+      return agent ?? null;
     },
 
     async updateAgentHealth(id, input) {
       const hasLastCheckedAt = Object.hasOwn(input, "lastCheckedAt");
-      const updated = db
+      const [updated] = await db
         .update(agentConnections)
         .set({
           status: input.status,
@@ -153,8 +155,7 @@ export function createRepository(db: RepositoryDb): Repository {
           updatedAt: new Date(),
         })
         .where(eq(agentConnections.id, id))
-        .returning()
-        .get();
+        .returning();
 
       if (!updated) {
         throw new Error(`Agent connection not found: ${id}`);
@@ -175,7 +176,7 @@ export function createRepository(db: RepositoryDb): Repository {
         updatedAt: now,
       };
 
-      const created = db.insert(chats).values(record).returning().get();
+      const [created] = await db.insert(chats).values(record).returning();
       return mapChat(created);
     },
 
@@ -185,7 +186,7 @@ export function createRepository(db: RepositoryDb): Repository {
     },
 
     async getChat(id) {
-      const row = db.select().from(chats).where(eq(chats.id, id)).get();
+      const [row] = await db.select().from(chats).where(eq(chats.id, id)).limit(1);
       return row ? mapChat(row) : null;
     },
 
@@ -199,7 +200,8 @@ export function createRepository(db: RepositoryDb): Repository {
         createdAt: new Date(),
       };
 
-      return db.insert(messages).values(record).returning().get();
+      const [created] = await db.insert(messages).values(record).returning();
+      return created;
     },
 
     async listMessages(chatId) {
@@ -220,7 +222,8 @@ export function createRepository(db: RepositoryDb): Repository {
         createdAt: new Date(),
       };
 
-      return mapEvent(db.insert(events).values(record).returning().get());
+      const [created] = await db.insert(events).values(record).returning();
+      return mapEvent(created);
     },
 
     async listEvents(chatId) {
@@ -233,7 +236,7 @@ export function createRepository(db: RepositoryDb): Repository {
     },
 
     async updateChatSessionState(chatId, state, status) {
-      const updated = db
+      const [updated] = await db
         .update(chats)
         .set({
           sessionStateJson: JSON.stringify(state),
@@ -241,8 +244,7 @@ export function createRepository(db: RepositoryDb): Repository {
           updatedAt: new Date(),
         })
         .where(eq(chats.id, chatId))
-        .returning()
-        .get();
+        .returning();
 
       if (!updated) {
         throw new Error(`Chat not found: ${chatId}`);
@@ -252,12 +254,11 @@ export function createRepository(db: RepositoryDb): Repository {
     },
 
     async updateChatStatus(chatId, status) {
-      const updated = db
+      const [updated] = await db
         .update(chats)
         .set({ status, updatedAt: new Date() })
         .where(eq(chats.id, chatId))
-        .returning()
-        .get();
+        .returning();
 
       if (!updated) {
         throw new Error(`Chat not found: ${chatId}`);

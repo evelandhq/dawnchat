@@ -142,14 +142,14 @@ describe("AgentConnectionForm", () => {
 describe("AgentsPage data loading", () => {
   let testDb: TestDbHandle;
 
-  beforeEach(() => {
-    testDb = createTestDbHandle();
+  beforeEach(async () => {
+    testDb = await createTestDbHandle();
     setDbClientForTests(testDb.db);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     setDbClientForTests(null);
-    testDb.close();
+    await testDb.close();
   });
 
   it("loads redacted agents directly from the repository without server-side fetch", async () => {

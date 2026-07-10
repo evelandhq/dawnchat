@@ -13,30 +13,35 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
+    "db:up": "docker compose up -d --wait postgres",
+    "db:down": "docker compose down",
+    "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate"
   },
   "dependencies": {
-    "@assistant-ui/react": "latest",
     "@ai-sdk/react": "latest",
-    "better-sqlite3": "latest",
+    "@assistant-ui/react": "latest",
+    "ai": "^7.0.0",
     "drizzle-orm": "latest",
     "eve": "0.22.1",
     "lucide-react": "latest",
     "next": "latest",
+    "pg": "^8.22.0",
     "react": "latest",
     "react-dom": "latest",
     "zod": "latest"
   },
   "devDependencies": {
+    "@testing-library/dom": "^10.4.1",
     "@testing-library/jest-dom": "latest",
     "@testing-library/react": "latest",
-    "@types/better-sqlite3": "latest",
     "@types/node": "latest",
+    "@types/pg": "^8.20.0",
     "@types/react": "latest",
     "@types/react-dom": "latest",
     "drizzle-kit": "latest",
     "jsdom": "latest",
-    "typescript": "latest",
+    "typescript": "6.0.3",
     "vitest": "latest"
   }
 }

@@ -2,6 +2,8 @@ node_modules
 .next
 .env*
 !.env.example
+# Ignore legacy SQLite files after the PostgreSQL migration so local chat and
+# authentication data cannot be committed accidentally.
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal

@@ -1,6 +1,7 @@
+autoInstallPeers: false
+# Runtime and test peers are declared explicitly so optional database drivers
+# such as better-sqlite3 are not installed automatically.
 allowBuilds:
-  # Native SQLite bindings required by the local Drizzle/better-sqlite3 database.
-  better-sqlite3: true
   # Required by Vitest/Vite tooling and transitive build-time bundling.
   esbuild: true
   # Native image dependency used by Next.js image optimization when present.

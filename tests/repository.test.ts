@@ -10,13 +10,13 @@ describe("repository", () => {
   let testDb: TestDbHandle;
   let db: DbClient;
 
-  beforeEach(() => {
-    testDb = createTestDbHandle();
+  beforeEach(async () => {
+    testDb = await createTestDbHandle();
     db = testDb.db;
   });
 
-  afterEach(() => {
-    testDb.close();
+  afterEach(async () => {
+    await testDb.close();
   });
 
   it("creates and lists agent connections", async () => {
@@ -163,10 +163,10 @@ describe("repository", () => {
     });
     const chat = await repository.createChat({ agentConnectionId: agent.id, title: "Corrupt state" });
 
-    db.update(chats)
+    await db
+      .update(chats)
       .set({ sessionStateJson: JSON.stringify({ continuationToken: "missing-session-id" }) })
-      .where(eq(chats.id, chat.id))
-      .run();
+      .where(eq(chats.id, chat.id));
 
     await expect(repository.getChat(chat.id)).rejects.toThrow("Stored chat session state is invalid");
   });

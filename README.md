@@ -18,7 +18,7 @@ The browser talks to eve-chats. eve-chats talks server-side to remote Eve agents
 - Start chats bound to one healthy agent.
 - Persist user messages, assistant messages, raw Eve events, and Eve session state.
 - Continue existing chats using the saved Eve `sessionId`, `continuationToken`, and `streamIndex`.
-- Local-first SQLite persistence for the MVP.
+- PostgreSQL 16 persistence for agents, chats, messages, events, and session state.
 
 ## Development
 

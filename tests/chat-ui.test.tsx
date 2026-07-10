@@ -18,17 +18,22 @@ vi.mock("next/navigation", () => ({
   }),
 }));
 
+vi.mock("next/link", () => ({
+  default: ({ href, children, ...props }: React.AnchorHTMLAttributes<HTMLAnchorElement> & { href: string }) =>
+    React.createElement("a", { href, ...props }, children),
+}));
+
 describe("ChatsPage data loading", () => {
   let testDb: TestDbHandle;
 
-  beforeEach(() => {
-    testDb = createTestDbHandle();
+  beforeEach(async () => {
+    testDb = await createTestDbHandle();
     setDbClientForTests(testDb.db);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     setDbClientForTests(null);
-    testDb.close();
+    await testDb.close();
     vi.restoreAllMocks();
   });
 
@@ -126,14 +131,14 @@ describe("ChatList", () => {
 describe("ChatThread", () => {
   let testDb: TestDbHandle;
 
-  beforeEach(() => {
-    testDb = createTestDbHandle();
+  beforeEach(async () => {
+    testDb = await createTestDbHandle();
     setDbClientForTests(testDb.db);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     setDbClientForTests(null);
-    testDb.close();
+    await testDb.close();
     vi.restoreAllMocks();
     pushMock.mockReset();
   });
