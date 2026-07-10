@@ -1,0 +1,11 @@
+node_modules
+.next
+.git
+.env*
+.screenshots
+.claude
+docs
+tests
+Dockerfile
+compose.yaml
+compose.production.yaml

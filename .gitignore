@@ -9,3 +9,4 @@ node_modules
 *.sqlite-wal
 *.tsbuildinfo
 .DS_Store
+.screenshots/

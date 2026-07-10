@@ -1,0 +1,42 @@
+# syntax=docker/dockerfile:1
+
+FROM node:24-alpine AS base
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+RUN corepack enable pnpm
+WORKDIR /app
+
+FROM base AS deps
+# Override when registry.npmjs.org is slow from the deploy box,
+# e.g. NPM_REGISTRY=https://registry.npmmirror.com/
+ARG NPM_REGISTRY=https://registry.npmjs.org/
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN --mount=type=cache,id=pnpm-store,target=/pnpm-store \
+    pnpm config set store-dir /pnpm-store && \
+    pnpm config set registry "$NPM_REGISTRY" && \
+    pnpm config set fetch-timeout 600000 && \
+    pnpm install --frozen-lockfile
+
+FROM deps AS build
+COPY . .
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN pnpm build
+
+# One-shot migration image: drizzle-kit reads drizzle.config.ts and applies
+# the SQL files in src/db/migrations against DATABASE_URL.
+FROM deps AS migrate
+COPY drizzle.config.ts ./
+COPY src/db ./src/db
+CMD ["pnpm", "db:migrate"]
+
+FROM node:24-alpine AS runner
+WORKDIR /app
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
+    HOSTNAME=0.0.0.0 \
+    PORT=3010
+RUN addgroup -S nodejs && adduser -S nextjs -G nodejs
+COPY --from=build --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=build --chown=nextjs:nodejs /app/.next/static ./.next/static
+USER nextjs
+EXPOSE 3010
+CMD ["node", "server.js"]

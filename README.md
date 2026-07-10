@@ -23,3 +23,12 @@ The browser talks to eve-chats. eve-chats talks server-side to remote Eve agents
 ## Development
 
 See [`docs/local-development.md`](docs/local-development.md).
+
+## Production deployment (single machine)
+
+```bash
+echo "AUTH_SECRET=$(openssl rand -base64 32)" >> .env  # once, on first deploy
+docker compose -f compose.production.yaml up -d --build
+```
+
+This builds the app image, starts PostgreSQL, applies Drizzle migrations, and serves the app on port 3010. `AUTH_SECRET` encrypts agent credentials stored in Postgres and must stay the same across restarts. See the header of [`compose.production.yaml`](compose.production.yaml) for optional overrides (`POSTGRES_PASSWORD`, `APP_PORT`, `NPM_REGISTRY`).
