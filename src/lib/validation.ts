@@ -86,6 +86,10 @@ export const createAgentConnectionSchema = z
     }
   });
 
+export const discoverAgentsSchema = z.object({
+  gatewayUrl: agentBaseUrlSchema,
+});
+
 export const createChatSchema = z.object({
   agentId: nonEmptyTrimmedString,
   message: nonEmptyTrimmedString,

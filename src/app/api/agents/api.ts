@@ -4,7 +4,7 @@ import { createRepository, type AgentConnection } from "@/db/repository";
 import { getDbClient } from "@/db/provider";
 import { checkEveAgent, type EveHealthCheckResult } from "@/eve/client";
 import { encryptAuthConfig } from "@/eve/auth";
-import { createAgentConnectionSchema } from "@/lib/validation";
+import { createAgentConnectionSchema, discoverAgentsSchema, normalizeAgentBaseUrl } from "@/lib/validation";
 
 export type RedactedAgentConnection = {
   id: string;
@@ -98,6 +98,79 @@ export async function checkAgentConnection(agentId: string): Promise<Response> {
     const checked = await repository.updateAgentHealth(agent.id, { status: check.status, lastCheckedAt: new Date() });
 
     return jsonResponse(createCheckResponse(checked, check));
+  } catch {
+    return unknownErrorResponse();
+  }
+}
+
+const gatewayAgentSchema = z.object({
+  name: z.string().trim().min(1),
+  url: z.string(),
+});
+
+const gatewayDirectorySchema = z.object({
+  agents: z.array(z.unknown()),
+});
+
+export type DiscoveredAgent = {
+  name: string;
+  url: string;
+  connected: boolean;
+};
+
+export async function discoverAgentsFromGateway(body: unknown): Promise<Response> {
+  const parsed = discoverAgentsSchema.safeParse(body);
+  if (!parsed.success) {
+    return jsonResponse({ error: "Invalid discovery request" }, { status: 400 });
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(`${parsed.data.gatewayUrl}/.well-known/eve/agents.json`, {
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch {
+    return jsonResponse({ error: "Gateway unreachable" }, { status: 502 });
+  }
+
+  if (!response.ok) {
+    return jsonResponse({ error: "Gateway unreachable" }, { status: 502 });
+  }
+
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    return jsonResponse({ error: "Invalid gateway response" }, { status: 502 });
+  }
+
+  const directory = gatewayDirectorySchema.safeParse(payload);
+  if (!directory.success) {
+    return jsonResponse({ error: "Invalid gateway response" }, { status: 502 });
+  }
+
+  try {
+    const repository = createRepository(getDbClient());
+    const connectedUrls = new Set((await repository.listAgentConnections()).map((agent) => agent.baseUrl));
+
+    const agents: DiscoveredAgent[] = [];
+    for (const entry of directory.data.agents) {
+      const agent = gatewayAgentSchema.safeParse(entry);
+      if (!agent.success) {
+        continue;
+      }
+
+      let url: string;
+      try {
+        url = normalizeAgentBaseUrl(agent.data.url);
+      } catch {
+        continue;
+      }
+
+      agents.push({ name: agent.data.name, url, connected: connectedUrls.has(url) });
+    }
+
+    return jsonResponse({ agents });
   } catch {
     return unknownErrorResponse();
   }

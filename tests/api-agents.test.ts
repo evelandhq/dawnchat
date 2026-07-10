@@ -1,7 +1,10 @@
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { GET, POST } from "@/app/api/agents/route";
 import { POST as CHECK } from "@/app/api/agents/[agentId]/check/route";
+import { POST as DISCOVER } from "@/app/api/agents/discover/route";
 import { setDbClientForTests } from "@/db/provider";
 import { createRepository } from "@/db/repository";
 import { createTestDbHandle, type TestDbHandle } from "@/test/db";
@@ -27,12 +30,45 @@ function checkAgent(agentId: string): Promise<Response> {
   });
 }
 
+function discoverAgents(body: unknown): Promise<Response> {
+  return DISCOVER(
+    new Request("http://localhost/api/agents/discover", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  );
+}
+
+type FakeGateway = {
+  baseUrl: string;
+  requests: string[];
+  close: () => Promise<void>;
+};
+
+async function startFakeGateway(payload: string, status = 200): Promise<FakeGateway> {
+  const requests: string[] = [];
+  const server = createServer((req, res) => {
+    requests.push(`${req.method} ${req.url}`);
+    res.writeHead(status, { "content-type": "application/json" });
+    res.end(payload);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  const { port } = server.address() as AddressInfo;
+  return {
+    baseUrl: `http://127.0.0.1:${port}`,
+    requests,
+    close: () => new Promise((resolve) => server.close(() => resolve())),
+  };
+}
+
 function expectNoSecretLeak(payload: unknown, secret: string): void {
   expect(JSON.stringify(payload)).not.toContain(secret);
 }
 
 describe("Agent Connection API", () => {
   const servers: FakeEveServer[] = [];
+  const gateways: FakeGateway[] = [];
   let testDb: TestDbHandle;
 
   beforeEach(async () => {
@@ -44,6 +80,7 @@ describe("Agent Connection API", () => {
     setDbClientForTests(null);
     await testDb.close();
     await Promise.all(servers.splice(0).map((server) => server.close()));
+    await Promise.all(gateways.splice(0).map((gateway) => gateway.close()));
   });
 
   async function fakeServer(): Promise<FakeEveServer> {
@@ -198,6 +235,63 @@ describe("Agent Connection API", () => {
     expect(response.status).toBe(400);
     expect(body).toMatchObject({ error: "Invalid agent connection" });
     expectNoSecretLeak(body, secret);
+  });
+
+  it("discovers agents from a gateway directory and marks already-connected ones", async () => {
+    const server = await fakeServer();
+    await postAgents({ name: "Existing Agent", baseUrl: server.baseUrl, authType: "none" });
+
+    const gateway = await startFakeGateway(
+      JSON.stringify({
+        agents: [
+          { id: "aaa", name: "Existing Agent", url: `${server.baseUrl}/` },
+          { id: "bbb", name: "Fresh Agent", url: "http://127.0.0.1:19999" },
+          { name: "", url: "http://127.0.0.1:19998" },
+          { name: "Broken Agent", url: "not a url" },
+        ],
+      }),
+    );
+    gateways.push(gateway);
+
+    const response = await discoverAgents({ gatewayUrl: `${gateway.baseUrl}/` });
+    const body = await readJson(response);
+
+    expect(response.status).toBe(200);
+    expect(body).toEqual({
+      agents: [
+        { name: "Existing Agent", url: server.baseUrl, connected: true },
+        { name: "Fresh Agent", url: "http://127.0.0.1:19999", connected: false },
+      ],
+    });
+    expect(gateway.requests).toEqual(["GET /.well-known/eve/agents.json"]);
+  });
+
+  it("returns 502 when the gateway is unreachable", async () => {
+    const gateway = await startFakeGateway("{}");
+    const gatewayUrl = gateway.baseUrl;
+    await gateway.close();
+
+    const response = await discoverAgents({ gatewayUrl });
+
+    expect(response.status).toBe(502);
+    await expect(readJson(response)).resolves.toEqual({ error: "Gateway unreachable" });
+  });
+
+  it("returns 502 for a gateway response that is not a directory", async () => {
+    const gateway = await startFakeGateway(JSON.stringify({ hello: "world" }));
+    gateways.push(gateway);
+
+    const response = await discoverAgents({ gatewayUrl: gateway.baseUrl });
+
+    expect(response.status).toBe(502);
+    await expect(readJson(response)).resolves.toEqual({ error: "Invalid gateway response" });
+  });
+
+  it("rejects invalid gateway URLs before fetching", async () => {
+    const response = await discoverAgents({ gatewayUrl: "not a url" });
+
+    expect(response.status).toBe(400);
+    await expect(readJson(response)).resolves.toEqual({ error: "Invalid discovery request" });
   });
 
   it("persists unreachable status when a health check fails", async () => {
