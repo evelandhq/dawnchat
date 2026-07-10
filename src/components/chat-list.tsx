@@ -164,8 +164,11 @@ export function ChatList({ chats, agents }: ChatListProps): React.ReactElement {
             {recentChats.map((chat) => (
               <li key={chat.id} className="hover:bg-accent/50 relative rounded-xl border p-4 transition-colors">
                 <div className="flex items-center justify-between gap-3">
-                  <Link href={`/chats/${chat.id}` as Route} className="truncate font-medium after:absolute after:inset-0">
-                    <span className="sr-only">Open </span>
+                  <Link
+                    href={`/chats/${chat.id}` as Route}
+                    aria-label={`Open ${chat.title}`}
+                    className="truncate font-medium after:absolute after:inset-0"
+                  >
                     {chat.title}
                   </Link>
                   <StatusBadge status={chat.status} />
