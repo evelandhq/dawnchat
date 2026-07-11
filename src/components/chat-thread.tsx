@@ -42,8 +42,11 @@ type SendMessageResponse = {
   error?: string;
 };
 
+// Deliberately no `id`: assistant-ui then keys messages by list position, which
+// stays stable when the optimistic message is replaced by the server list.
+// Passing server ids makes the optimistic message an orphaned sibling in
+// assistant-ui's message tree and phantom 1/2 branch switchers appear.
 const convertMessage = (message: ChatThreadMessage): ThreadMessageLike => ({
-  id: message.id,
   role: message.role,
   content: [{ type: "text", text: message.content }],
   createdAt: new Date(message.createdAt),
@@ -87,15 +90,20 @@ export function ChatThread({ chat: initialChat, messages: initialMessages }: Cha
         body: JSON.stringify({ message: text }),
       });
       const body = (await response.json()) as SendMessageResponse;
-      if (!response.ok || !body.messages) {
-        setMessages(previous);
-        setError(body.error ?? "Unable to send message.");
-        return;
-      }
       if (body.chat) {
         setChat({ ...body.chat, agentName: chat.agentName });
       }
-      setMessages(body.messages);
+      // A failed turn still returns the persisted messages (the user message is
+      // saved server-side), so keep them visible instead of rolling back.
+      if (body.messages) {
+        setMessages(body.messages);
+      } else if (!response.ok) {
+        setMessages(previous);
+      }
+      if (!response.ok || !body.messages) {
+        setError(body.error ?? "Unable to send message.");
+        return;
+      }
       router.refresh();
     } catch {
       setMessages(previous);
@@ -111,7 +119,7 @@ export function ChatThread({ chat: initialChat, messages: initialMessages }: Cha
     convertMessage,
     onNew,
     isRunning,
-    isDisabled: chat.status !== "active",
+    isDisabled: chat.status === "completed",
   });
 
   return (
@@ -126,12 +134,16 @@ export function ChatThread({ chat: initialChat, messages: initialMessages }: Cha
           <Thread />
         </AssistantRuntimeProvider>
       </div>
-      {chat.status !== "active" ? (
+      {chat.status === "completed" ? (
         <p className="text-muted-foreground border-t px-4 py-2 text-center text-sm">
-          This chat is {chat.status}; new messages are disabled.
+          This chat is completed; new messages are disabled.
         </p>
       ) : null}
-      {error ? (
+      {chat.status === "failed" ? (
+        <p role="alert" className="text-destructive border-t px-4 py-2 text-center text-sm">
+          {error ?? "Eve turn failed"} — the agent did not reply. Send your message again to retry.
+        </p>
+      ) : error ? (
         <p role="alert" className="text-destructive border-t px-4 py-2 text-center text-sm">
           {error}
         </p>
