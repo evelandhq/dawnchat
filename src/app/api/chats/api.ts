@@ -98,10 +98,13 @@ export async function sendChatMessage(chatId: string, body: unknown): Promise<Re
     if (agent.status === "unreachable") {
       return jsonResponse({ error: "Agent connection is unreachable" }, { status: 409 });
     }
-    if (chat.status !== "active") {
-      return jsonResponse({ error: "Chat is not active" }, { status: 409 });
+    if (chat.status === "completed") {
+      return jsonResponse({ error: "Chat is completed" }, { status: 409 });
     }
-    if (!chat.sessionState) {
+    // A failed chat legitimately has no session state when its first turn never
+    // finished; the turn below then starts a fresh session. On an active chat a
+    // missing state is corrupt.
+    if (chat.status === "active" && !chat.sessionState) {
       return jsonResponse({ error: "Chat session state is missing" }, { status: 409 });
     }
 
@@ -110,7 +113,7 @@ export async function sendChatMessage(chatId: string, body: unknown): Promise<Re
         chatId: chat.id,
         role: "user",
         content: parsed.data.message,
-        eventIndex: chat.sessionState.streamIndex ?? null,
+        eventIndex: chat.sessionState?.streamIndex ?? null,
       });
 
       const completed = await persistEveTurn(repository, chat, agent, parsed.data.message);
@@ -137,7 +140,12 @@ async function persistEveTurn(
   agent: Parameters<typeof sendEveTurn>[0],
   message: string,
 ): Promise<Chat> {
-  const baseIndex = chat.sessionState?.streamIndex ?? 0;
+  // A failed turn can leave events persisted past the saved streamIndex, and
+  // (chatId, eventIndex) is unique — a retry must resume numbering after
+  // whichever is furthest or its inserts collide.
+  const persistedEvents = await repository.listEvents(chat.id);
+  const lastPersistedIndex = persistedEvents.reduce((max, event) => Math.max(max, event.eventIndex), 0);
+  const baseIndex = Math.max(chat.sessionState?.streamIndex ?? 0, lastPersistedIndex);
   let eventOffset = 0;
   let latestSessionState: ChatSessionState | null = chat.sessionState;
   let latestStatus: Chat["status"] | undefined;
@@ -155,6 +163,10 @@ async function persistEveTurn(
     const terminalState = sessionStateFromUpdate(update);
     if (terminalState) {
       latestSessionState = terminalState;
+    }
+    if (update.type === "session.waiting") {
+      // Explicit so a successful retry flips a failed chat back to active.
+      latestStatus = "active";
     }
     if (update.type === "session.completed") {
       latestStatus = "completed";

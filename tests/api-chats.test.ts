@@ -174,7 +174,7 @@ describe("Chat API", () => {
     ]);
   });
 
-  it("rejects follow-up messages for non-active chats", async () => {
+  it("rejects follow-up messages for completed chats", async () => {
     const server = await fakeServer();
     const agent = await createAgent(server.baseUrl);
     const created = (await readJson(await postChats({ agentId: agent.id, message: "Hello Eve" }))) as { chat: { id: string } };
@@ -184,7 +184,37 @@ describe("Chat API", () => {
     const body = await readJson(response);
 
     expect(response.status).toBe(409);
-    expect(body).toEqual({ error: "Chat is not active" });
+    expect(body).toEqual({ error: "Chat is completed" });
+  });
+
+  it("accepts a new message on a failed chat and reactivates it on success", async () => {
+    const server = await fakeServer();
+    const agent = await createAgent(server.baseUrl);
+    const created = (await readJson(await postChats({ agentId: agent.id, message: "Hello Eve" }))) as { chat: { id: string } };
+    await createRepository(testDb.db).updateChatStatus(created.chat.id, "failed");
+
+    const response = await postMessage(created.chat.id, { message: "Trying again" });
+    const body = (await readJson(response)) as { chat: { status: string }; messages: Array<{ role: string; content: string }> };
+
+    expect(response.status).toBe(200);
+    expect(body.chat.status).toBe("active");
+    expect(body.messages.at(-2)).toMatchObject({ role: "user", content: "Trying again" });
+    expect(body.messages.at(-1)).toMatchObject({ role: "assistant" });
+  });
+
+  it("accepts a resend on a chat whose first turn never created a session", async () => {
+    const server = await fakeServer({ failCreateSession: true });
+    const agent = await createAgent(server.baseUrl);
+    const created = (await readJson(await postChats({ agentId: agent.id, message: "First try" }))) as { chat: { id: string; status: string } };
+    expect(created.chat.status).toBe("failed");
+
+    const response = await postMessage(created.chat.id, { message: "Second try" });
+    const body = (await readJson(response)) as { chat: { status: string }; messages: Array<{ role: string }>; error: string };
+
+    expect(response.status).toBe(502);
+    expect(body.error).toBe("Eve turn failed");
+    expect(body.chat.status).toBe("failed");
+    expect(body.messages).toHaveLength(2);
   });
 
   it("lists chat summaries", async () => {
