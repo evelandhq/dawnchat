@@ -5,6 +5,7 @@ import { POST as POST_MESSAGE } from "@/app/api/chats/[chatId]/messages/route";
 import { setDbClientForTests } from "@/db/provider";
 import { createRepository } from "@/db/repository";
 import { createTestDbHandle, type TestDbHandle } from "@/test/db";
+import { readNdjsonLines } from "@/test/ndjson";
 import { startFakeEveServer, type FakeEveServer } from "@/eve/fake-eve-server.test-helper";
 
 async function readJson(response: Response): Promise<unknown> {
@@ -90,9 +91,10 @@ describe("Chat API", () => {
     const created = (await readJson(await postChats({ agentId: agent.id, message: "Hello Eve" }))) as { chat: { id: string } };
 
     const response = await postMessage(created.chat.id, { message: "Follow up" });
-    const body = (await readJson(response)) as { chat: { sessionState: unknown }; messages: Array<{ role: string; content: string }> };
-
     expect(response.status).toBe(200);
+    const lines = await readNdjsonLines(response);
+    const done = lines.at(-1);
+
     expect(server.requests.map((request) => `${request.method} ${request.path}${request.query}`)).toEqual([
       "POST /eve/v1/session",
       "GET /eve/v1/session/ses_1/stream",
@@ -100,8 +102,11 @@ describe("Chat API", () => {
       "GET /eve/v1/session/ses_1/stream?startIndex=3",
     ]);
     expect(server.requests[2].body).toMatchObject({ message: "Follow up", continuationToken: "eve:1" });
-    expect(body.chat).toMatchObject({ sessionState: { sessionId: "ses_1", continuationToken: "eve:1", streamIndex: 6 } });
-    expect(body.messages.map((message) => `${message.role}:${message.content}`)).toEqual([
+    expect(done).toMatchObject({
+      type: "done",
+      chat: { sessionState: { sessionId: "ses_1", continuationToken: "eve:1", streamIndex: 6 } },
+    });
+    expect(done?.messages?.map((message) => `${message.role}:${message.content}`)).toEqual([
       "user:Hello Eve",
       "assistant:Hello",
       "user:Follow up",
@@ -194,12 +199,12 @@ describe("Chat API", () => {
     await createRepository(testDb.db).updateChatStatus(created.chat.id, "failed");
 
     const response = await postMessage(created.chat.id, { message: "Trying again" });
-    const body = (await readJson(response)) as { chat: { status: string }; messages: Array<{ role: string; content: string }> };
-
     expect(response.status).toBe(200);
-    expect(body.chat.status).toBe("active");
-    expect(body.messages.at(-2)).toMatchObject({ role: "user", content: "Trying again" });
-    expect(body.messages.at(-1)).toMatchObject({ role: "assistant" });
+    const done = (await readNdjsonLines(response)).at(-1);
+
+    expect(done).toMatchObject({ type: "done", chat: { status: "active" } });
+    expect(done?.messages?.at(-2)).toMatchObject({ role: "user", content: "Trying again" });
+    expect(done?.messages?.at(-1)).toMatchObject({ role: "assistant" });
   });
 
   it("accepts a resend on a chat whose first turn never created a session", async () => {
@@ -209,12 +214,44 @@ describe("Chat API", () => {
     expect(created.chat.status).toBe("failed");
 
     const response = await postMessage(created.chat.id, { message: "Second try" });
-    const body = (await readJson(response)) as { chat: { status: string }; messages: Array<{ role: string }>; error: string };
+    expect(response.status).toBe(200);
+    const last = (await readNdjsonLines(response)).at(-1);
 
-    expect(response.status).toBe(502);
-    expect(body.error).toBe("Eve turn failed");
-    expect(body.chat.status).toBe("failed");
-    expect(body.messages).toHaveLength(2);
+    expect(last).toMatchObject({ type: "error", error: "Eve turn failed", chat: { status: "failed" } });
+    expect(last?.messages).toHaveLength(2);
+  });
+
+  it("streams assistant deltas before the terminal done line", async () => {
+    const server = await fakeServer({
+      streamEvents: [
+        {
+          type: "message.appended",
+          data: { messageDelta: "Hel", messageSoFar: "Hel", sequence: 1, stepIndex: 0, turnId: "turn_1" },
+        },
+        {
+          type: "message.appended",
+          data: { messageDelta: "lo", messageSoFar: "Hello", sequence: 2, stepIndex: 0, turnId: "turn_1" },
+        },
+        {
+          type: "message.completed",
+          data: { message: "Hello", finishReason: "stop", sequence: 3, stepIndex: 0, turnId: "turn_1" },
+        },
+        { type: "session.waiting", data: { wait: "next-user-message" } },
+      ],
+    });
+    const agent = await createAgent(server.baseUrl);
+    const created = (await readJson(await postChats({ agentId: agent.id, message: "Hello Eve" }))) as { chat: { id: string } };
+
+    const response = await postMessage(created.chat.id, { message: "Follow up" });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/x-ndjson");
+    const lines = await readNdjsonLines(response);
+
+    expect(lines.map((line) => line.type)).toEqual(["delta", "delta", "message", "done"]);
+    expect(lines[0]).toMatchObject({ type: "delta", message: "Hel" });
+    expect(lines[1]).toMatchObject({ type: "delta", message: "Hello" });
+    expect(lines[2]).toMatchObject({ type: "message", message: "Hello" });
+    expect(lines.at(-1)).toMatchObject({ type: "done", chat: { status: "active" } });
   });
 
   it("lists chat summaries", async () => {

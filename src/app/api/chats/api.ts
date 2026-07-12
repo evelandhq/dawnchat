@@ -26,6 +26,18 @@ export type MessageResponse = {
   createdAt: string;
 };
 
+/**
+ * One NDJSON line of the streaming send-message response. `delta` carries the
+ * full assistant text so far (not an increment); `message` marks one assistant
+ * message as completed; `done`/`error` are terminal and carry the persisted
+ * authoritative state.
+ */
+export type ChatStreamLine =
+  | { type: "delta"; message: string }
+  | { type: "message"; message: string }
+  | { type: "done"; chat: ChatResponse; messages: MessageResponse[] }
+  | { type: "error"; error: string; chat?: ChatResponse; messages?: MessageResponse[] };
+
 export function jsonResponse(body: unknown, init?: ResponseInit): Response {
   return Response.json(body, init);
 }
@@ -108,23 +120,54 @@ export async function sendChatMessage(chatId: string, body: unknown): Promise<Re
       return jsonResponse({ error: "Chat session state is missing" }, { status: 409 });
     }
 
-    try {
-      await repository.appendMessage({
-        chatId: chat.id,
-        role: "user",
-        content: parsed.data.message,
-        eventIndex: chat.sessionState?.streamIndex ?? null,
-      });
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const send = (line: ChatStreamLine) => controller.enqueue(encoder.encode(`${JSON.stringify(line)}\n`));
+        try {
+          await repository.appendMessage({
+            chatId: chat.id,
+            role: "user",
+            content: parsed.data.message,
+            eventIndex: chat.sessionState?.streamIndex ?? null,
+          });
 
-      const completed = await persistEveTurn(repository, chat, agent, parsed.data.message);
-      const messages = await repository.listMessages(chat.id);
+          const turn = streamEveTurn(repository, chat, agent, parsed.data.message);
+          let step = await turn.next();
+          while (!step.done) {
+            const update = step.value;
+            if (update.type === "message.appended") {
+              send({ type: "delta", message: update.message });
+            }
+            if (update.type === "message.completed" && update.message !== null) {
+              send({ type: "message", message: update.message });
+            }
+            step = await turn.next();
+          }
 
-      return jsonResponse({ chat: chatResponse(completed), messages: messages.map(messageResponse) });
-    } catch {
-      const failed = await repository.updateChatStatus(chat.id, "failed");
-      const messages = await repository.listMessages(chat.id);
-      return jsonResponse({ chat: chatResponse(failed), messages: messages.map(messageResponse), error: "Eve turn failed" }, { status: 502 });
-    }
+          const messages = await repository.listMessages(chat.id);
+          send({ type: "done", chat: chatResponse(step.value), messages: messages.map(messageResponse) });
+        } catch {
+          try {
+            const failed = await repository.updateChatStatus(chat.id, "failed");
+            const messages = await repository.listMessages(chat.id);
+            send({ type: "error", error: "Eve turn failed", chat: chatResponse(failed), messages: messages.map(messageResponse) });
+          } catch {
+            send({ type: "error", error: "Eve turn failed" });
+          }
+        } finally {
+          controller.close();
+        }
+      },
+    });
+
+    // Streaming starts after the guards, so guard failures keep real HTTP
+    // status codes; turn failures surface as an in-stream `error` line
+    // because the 200 header is already on the wire by then.
+    return new Response(stream, {
+      status: 200,
+      headers: { "content-type": "application/x-ndjson", "cache-control": "no-store" },
+    });
   } catch {
     return jsonResponse({ error: "Internal server error" }, { status: 500 });
   }
@@ -140,6 +183,20 @@ async function persistEveTurn(
   agent: Parameters<typeof sendEveTurn>[0],
   message: string,
 ): Promise<Chat> {
+  const turn = streamEveTurn(repository, chat, agent, message);
+  let step = await turn.next();
+  while (!step.done) {
+    step = await turn.next();
+  }
+  return step.value;
+}
+
+async function* streamEveTurn(
+  repository: Repository,
+  chat: Chat,
+  agent: Parameters<typeof sendEveTurn>[0],
+  message: string,
+): AsyncGenerator<EveTurnUpdate, Chat, void> {
   // A failed turn can leave events persisted past the saved streamIndex, and
   // (chatId, eventIndex) is unique — a retry must resume numbering after
   // whichever is furthest or its inserts collide.
@@ -174,6 +231,8 @@ async function persistEveTurn(
     if (update.type === "session.failed") {
       latestStatus = "failed";
     }
+
+    yield update;
   }
 
   if (latestSessionState) {

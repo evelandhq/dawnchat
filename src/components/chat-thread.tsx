@@ -42,6 +42,38 @@ type SendMessageResponse = {
   error?: string;
 };
 
+type ChatStreamLine =
+  | { type: "delta"; message: string }
+  | { type: "message"; message: string }
+  | { type: "done"; chat: Omit<ChatThreadSummary, "agentName">; messages: ChatThreadMessage[] }
+  | { type: "error"; error: string; chat?: Omit<ChatThreadSummary, "agentName">; messages?: ChatThreadMessage[] };
+
+async function* readNdjsonLines(body: ReadableStream<Uint8Array>): AsyncGenerator<ChatStreamLine> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    let newlineIndex = buffer.indexOf("\n");
+    while (newlineIndex !== -1) {
+      const rawLine = buffer.slice(0, newlineIndex).trim();
+      buffer = buffer.slice(newlineIndex + 1);
+      if (rawLine) {
+        yield JSON.parse(rawLine) as ChatStreamLine;
+      }
+      newlineIndex = buffer.indexOf("\n");
+    }
+  }
+  const tail = buffer.trim();
+  if (tail) {
+    yield JSON.parse(tail) as ChatStreamLine;
+  }
+}
+
 // Deliberately no `id`: assistant-ui then keys messages by list position, which
 // stays stable when the optimistic message is replaced by the server list.
 // Passing server ids makes the optimistic message an orphaned sibling in
@@ -71,7 +103,7 @@ export function ChatThread({ chat: initialChat, messages: initialMessages }: Cha
 
     setError(null);
     const previous = messages;
-    setMessages([
+    const withUser: ChatThreadMessage[] = [
       ...previous,
       {
         id: `optimistic_${Date.now()}`,
@@ -81,7 +113,8 @@ export function ChatThread({ chat: initialChat, messages: initialMessages }: Cha
         eventIndex: null,
         createdAt: new Date().toISOString(),
       },
-    ]);
+    ];
+    setMessages(withUser);
     setIsRunning(true);
     try {
       const response = await fetch(`/api/chats/${chat.id}/messages`, {
@@ -89,22 +122,65 @@ export function ChatThread({ chat: initialChat, messages: initialMessages }: Cha
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ message: text }),
       });
-      const body = (await response.json()) as SendMessageResponse;
-      if (body.chat) {
-        setChat({ ...body.chat, agentName: chat.agentName });
-      }
-      // A failed turn still returns the persisted messages (the user message is
-      // saved server-side), so keep them visible instead of rolling back.
-      if (body.messages) {
-        setMessages(body.messages);
-      } else if (!response.ok) {
-        setMessages(previous);
-      }
-      if (!response.ok || !body.messages) {
-        setError(body.error ?? "Unable to send message.");
+
+      const contentType = response.headers.get("content-type") ?? "";
+      if (!contentType.includes("application/x-ndjson") || !response.body) {
+        // Guard failures (validation, unreachable agent, completed chat) come
+        // back as plain JSON with a real HTTP status.
+        const body = (await response.json()) as SendMessageResponse;
+        if (body.chat) {
+          setChat({ ...body.chat, agentName: chat.agentName });
+        }
+        // A failed turn still returns the persisted messages (the user message
+        // is saved server-side), so keep them visible instead of rolling back.
+        if (body.messages) {
+          setMessages(body.messages);
+        } else if (!response.ok) {
+          setMessages(previous);
+        }
+        if (!response.ok || !body.messages) {
+          setError(body.error ?? "Unable to send message.");
+          return;
+        }
+        router.refresh();
         return;
       }
-      router.refresh();
+
+      const committed: ChatThreadMessage[] = [];
+      const assistantSoFar = (content: string, index: number): ChatThreadMessage => ({
+        id: `streaming_${index}`,
+        chatId: chat.id,
+        role: "assistant",
+        content,
+        eventIndex: null,
+        createdAt: new Date().toISOString(),
+      });
+      let terminal = false;
+      for await (const line of readNdjsonLines(response.body)) {
+        if (line.type === "delta") {
+          setMessages([...withUser, ...committed, assistantSoFar(line.message, committed.length)]);
+        } else if (line.type === "message") {
+          committed.push(assistantSoFar(line.message, committed.length));
+          setMessages([...withUser, ...committed]);
+        } else if (line.type === "done") {
+          terminal = true;
+          setChat({ ...line.chat, agentName: chat.agentName });
+          setMessages(line.messages);
+          router.refresh();
+        } else if (line.type === "error") {
+          terminal = true;
+          if (line.chat) {
+            setChat({ ...line.chat, agentName: chat.agentName });
+          }
+          if (line.messages) {
+            setMessages(line.messages);
+          }
+          setError(line.error);
+        }
+      }
+      if (!terminal) {
+        setError("Connection lost while receiving the reply. Send your message again to retry.");
+      }
     } catch {
       setMessages(previous);
       setError("Unable to send message.");

@@ -226,6 +226,50 @@ describe("ChatThread", () => {
     expect(await screen.findByText("Next, ship it.")).toBeInTheDocument();
   });
 
+  it("consumes a streaming NDJSON response and renders the assistant reply", async () => {
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Stream Eve",
+      baseUrl: "https://stream-eve.example.com",
+      authType: "none",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({ agentConnectionId: agent.id, title: "Streaming chat" });
+
+    const pageData = await getChatThreadForPage(chat.id);
+    if (!pageData) {
+      throw new Error("Expected chat thread page data");
+    }
+
+    const doneChat = { ...pageData.chat, updatedAt: "2026-07-12T00:00:01.000Z" };
+    const ndjson = `${[
+      JSON.stringify({ type: "delta", message: "Str" }),
+      JSON.stringify({ type: "delta", message: "Streamed reply" }),
+      JSON.stringify({ type: "message", message: "Streamed reply" }),
+      JSON.stringify({
+        type: "done",
+        chat: doneChat,
+        messages: [
+          { id: "msg_user", chatId: chat.id, role: "user", content: "Stream please", eventIndex: 1, createdAt: "2026-07-12T00:00:00.000Z" },
+          { id: "msg_reply", chatId: chat.id, role: "assistant", content: "Streamed reply", eventIndex: 2, createdAt: "2026-07-12T00:00:01.000Z" },
+        ],
+      }),
+    ].join("\n")}\n`;
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(ndjson, { status: 200, headers: { "content-type": "application/x-ndjson" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(React.createElement(ChatThread, pageData));
+
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Stream please" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("Streamed reply")).toBeInTheDocument();
+    expect(screen.getByText("Stream please")).toBeInTheDocument();
+  });
+
   it("does not allow changing the agent inside an existing chat", () => {
     const chat: ChatThreadSummary = {
       id: "chat_static_agent",

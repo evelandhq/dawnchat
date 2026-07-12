@@ -7,6 +7,7 @@ import { setDbClientForTests } from "@/db/provider";
 import { createRepository } from "@/db/repository";
 import { startFakeEveServer, type FakeEveServer } from "@/eve/fake-eve-server.test-helper";
 import { createTestDbHandle, type TestDbHandle } from "@/test/db";
+import { readNdjsonLines } from "@/test/ndjson";
 
 async function readJson(response: Response): Promise<unknown> {
   return response.json();
@@ -87,12 +88,14 @@ describe("Eve chat flow smoke", () => {
     expect(createdChat.chat.id).toEqual(expect.stringMatching(/^chat_[a-f0-9]{16}$/));
 
     const followUpResponse = await postFollowUp(createdChat.chat.id, { message: "Can you continue?" });
-    const followUp = (await readJson(followUpResponse)) as {
+    expect(followUpResponse.status).toBe(200);
+    const followUpLines = await readNdjsonLines(followUpResponse);
+    const followUp = followUpLines.at(-1) as unknown as {
+      type: string;
       chat: { sessionState: unknown };
       messages: Array<{ role: string; content: string }>;
     };
-
-    expect(followUpResponse.status).toBe(200);
+    expect(followUp.type).toBe("done");
     expect(server.requests.map((request) => `${request.method} ${request.path}${request.query}`)).toEqual([
       "GET /eve/v1/health",
       "GET /eve/v1/info",
