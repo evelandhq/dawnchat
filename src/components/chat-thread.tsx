@@ -10,7 +10,6 @@ import {
 } from "@assistant-ui/react";
 
 import { Thread } from "@/components/assistant-ui/thread";
-import { StatusBadge } from "@/components/status-badge";
 
 export type ChatThreadSummary = {
   id: string;
@@ -200,11 +199,6 @@ export function ChatThread({ chat: initialChat, messages: initialMessages }: Cha
 
   return (
     <section className="flex h-full min-h-0 flex-col">
-      <header className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b px-4 py-3 sm:px-6">
-        <h1 className="truncate text-base font-semibold">{chat.title}</h1>
-        <span className="text-muted-foreground text-sm">{chat.agentName}</span>
-        <StatusBadge status={chat.status} />
-      </header>
       <div className="min-h-0 flex-1">
         <AssistantRuntimeProvider runtime={runtime}>
           <Thread />

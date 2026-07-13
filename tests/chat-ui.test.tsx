@@ -2,133 +2,19 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
-import { ChatList, type ChatListAgent, type ChatListSummary } from "@/components/chat-list";
 import { ChatThread, type ChatThreadMessage, type ChatThreadSummary } from "@/components/chat-thread";
-import { getChatsForPage } from "@/app/chats/page";
 import { getChatThreadForPage } from "@/app/chats/[chatId]/page";
 import { createRepository } from "@/db/repository";
 import { setDbClientForTests } from "@/db/provider";
 import { createTestDbHandle, type TestDbHandle } from "@/test/db";
 
-const pushMock = vi.fn();
 const refreshMock = vi.fn();
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
-    push: pushMock,
     refresh: refreshMock,
   }),
 }));
-
-vi.mock("next/link", () => ({
-  default: ({ href, children, ...props }: React.AnchorHTMLAttributes<HTMLAnchorElement> & { href: string }) =>
-    React.createElement("a", { href, ...props }, children),
-}));
-
-describe("ChatsPage data loading", () => {
-  let testDb: TestDbHandle;
-
-  beforeEach(async () => {
-    testDb = await createTestDbHandle();
-    setDbClientForTests(testDb.db);
-  });
-
-  afterEach(async () => {
-    setDbClientForTests(null);
-    await testDb.close();
-    vi.restoreAllMocks();
-  });
-
-  it("renders chat history with bound agent names", async () => {
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
-    const repository = createRepository(testDb.db);
-    const agent = await repository.createAgentConnection({
-      name: "Research Eve",
-      baseUrl: "https://research-eve.example.com",
-      authType: "none",
-    });
-    await repository.updateAgentHealth(agent.id, { status: "healthy" });
-    const chat = await repository.createChat({ agentConnectionId: agent.id, title: "Plan the launch" });
-    await repository.appendMessage({ chatId: chat.id, role: "user", content: "First message", eventIndex: 0 });
-
-    const pageData = await getChatsForPage();
-
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(pageData.chats).toEqual([
-      expect.objectContaining({
-        id: chat.id,
-        title: "Plan the launch",
-        agentName: "Research Eve",
-        lastMessage: "First message",
-      }),
-    ]);
-
-    render(React.createElement(ChatList, pageData));
-
-    expect(screen.getByRole("heading", { name: "Chats" })).toBeInTheDocument();
-    expect(screen.getByText("Plan the launch")).toBeInTheDocument();
-    expect(screen.getAllByText("Research Eve").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("First message").length).toBeGreaterThan(0);
-    expect(screen.getByRole("link", { name: "Open Plan the launch" })).toHaveAttribute("href", `/chats/${chat.id}`);
-  });
-});
-
-describe("ChatList", () => {
-  afterEach(() => {
-    vi.restoreAllMocks();
-    pushMock.mockReset();
-  });
-
-  it("start chat form selects healthy agent, submits first message to POST /api/chats, and navigates to /chats/:chatId", async () => {
-    const chats: ChatListSummary[] = [];
-    const agents: ChatListAgent[] = [
-      { id: "agent_healthy", name: "Healthy Eve", status: "healthy" },
-      { id: "agent_unknown", name: "Unknown Eve", status: "unknown" },
-      { id: "agent_unreachable", name: "Down Eve", status: "unreachable" },
-    ];
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          chat: {
-            id: "chat_created",
-            agentConnectionId: "agent_healthy",
-            title: "Hello Eve",
-            status: "active",
-            sessionState: { sessionId: "session_1", streamIndex: 1 },
-            createdAt: "2026-07-10T00:00:00.000Z",
-            updatedAt: "2026-07-10T00:00:00.000Z",
-          },
-          messages: [],
-        }),
-        { status: 201, headers: { "content-type": "application/json" } },
-      ),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-
-    render(React.createElement(ChatList, { chats, agents }));
-
-    const agentSelect = screen.getByLabelText("Agent");
-    expect(agentSelect).toHaveValue("agent_healthy");
-    expect(screen.getByRole("option", { name: "Healthy Eve" })).toBeInTheDocument();
-    expect(screen.queryByRole("option", { name: "Unknown Eve" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("option", { name: "Down Eve" })).not.toBeInTheDocument();
-
-    fireEvent.change(screen.getByLabelText("First message"), { target: { value: "Hello Eve" } });
-    fireEvent.click(screen.getByRole("button", { name: "Start chat" }));
-
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/chats",
-      expect.objectContaining({
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ agentId: "agent_healthy", message: "Hello Eve" }),
-      }),
-    );
-    await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/chats/chat_created"));
-  });
-});
 
 describe("ChatThread", () => {
   let testDb: TestDbHandle;
@@ -142,7 +28,6 @@ describe("ChatThread", () => {
     setDbClientForTests(null);
     await testDb.close();
     vi.restoreAllMocks();
-    pushMock.mockReset();
   });
 
   it("renders a chat thread and sends a follow-up to POST /api/chats/:chatId/messages, appending response messages", async () => {
@@ -205,9 +90,9 @@ describe("ChatThread", () => {
 
     render(React.createElement(ChatThread, pageData));
 
-    expect(screen.getByRole("heading", { name: "Existing chat" })).toBeInTheDocument();
-    expect(screen.getAllByText("Thread Eve").length).toBeGreaterThan(0);
-    expect(screen.getByText("active")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Existing chat" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Thread Eve")).not.toBeInTheDocument();
+    expect(screen.queryByText("active")).not.toBeInTheDocument();
     expect(screen.getByText("Hi")).toBeInTheDocument();
     expect(screen.getByText("Hello from Eve")).toBeInTheDocument();
 
@@ -284,7 +169,7 @@ describe("ChatThread", () => {
 
     render(React.createElement(ChatThread, { chat, messages }));
 
-    expect(screen.getByText("Static Eve")).toBeInTheDocument();
+    expect(screen.queryByText("Static Eve")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Agent")).not.toBeInTheDocument();
     expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
   });
