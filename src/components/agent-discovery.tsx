@@ -84,11 +84,19 @@ export function AgentDiscovery(): React.ReactElement {
         return;
       }
 
-      const body = (await response.json()) as { agent: { status: StatusValue } };
+      const body = (await response.json()) as { agent?: { id?: unknown; status?: StatusValue } };
+      const agentId = body.agent?.id;
+      const health = body.agent?.status;
+      if (typeof agentId !== "string" || health === undefined) {
+        setConnections((previous) => ({ ...previous, [agent.url]: { phase: "error" } }));
+        return;
+      }
+
       setConnections((previous) => ({
         ...previous,
-        [agent.url]: { phase: "connected", health: body.agent.status },
+        [agent.url]: { phase: "connected", health },
       }));
+      router.push(`/agents/${agentId}`);
       router.refresh();
     } catch {
       setConnections((previous) => ({ ...previous, [agent.url]: { phase: "error" } }));

@@ -1,39 +1,55 @@
 import Link from "next/link";
 import type { Route } from "next";
-import { Bot, MessageSquarePlus, Sparkles } from "lucide-react";
+import { Sparkles } from "lucide-react";
 
 import { createRepository } from "@/db/repository";
 import { getDbClient } from "@/db/provider";
-import { Button } from "@/components/ui/button";
 import {
   Sidebar,
   SidebarContent,
-  SidebarFooter,
-  SidebarGroup,
-  SidebarGroupContent,
-  SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
-import { SidebarChatNav, type SidebarChatItem } from "@/components/sidebar-chat-nav";
+import { SidebarNav, type SidebarAgentItem, type SidebarChatItem } from "@/components/sidebar-nav";
 import { ThemeToggle } from "@/components/theme-toggle";
 
-export async function AppSidebar(): Promise<React.ReactElement> {
+export type AppNavigationData = {
+  agents: SidebarAgentItem[];
+  chats: SidebarChatItem[];
+};
+
+type AppSidebarProps = {
+  data?: AppNavigationData;
+};
+
+export async function getAppNavigationData(): Promise<AppNavigationData> {
   const repository = createRepository(getDbClient());
-  const chats = await repository.listChats();
-  const items: SidebarChatItem[] = chats
-    .map((chat) => ({ id: chat.id, title: chat.title }))
-    .reverse();
+  const [agents, chats] = await Promise.all([repository.listAgentConnections(), repository.listChats()]);
+
+  return {
+    agents: agents.map((agent) => ({
+      id: agent.id,
+      name: agent.name,
+      status: agent.status,
+    })),
+    chats: chats
+      .map((chat) => ({ id: chat.id, title: chat.title, agentConnectionId: chat.agentConnectionId }))
+      .reverse(),
+  };
+}
+
+export async function AppSidebar({ data }: AppSidebarProps = {}): Promise<React.ReactElement> {
+  const navigationData = data ?? (await getAppNavigationData());
 
   return (
     <Sidebar>
-      <SidebarHeader className="gap-3">
-        <SidebarMenu>
+      <SidebarHeader className="border-sidebar-border h-14 flex-row items-center gap-1 border-b">
+        <SidebarMenu className="min-w-0 flex-1">
           <SidebarMenuItem>
-            <SidebarMenuButton asChild size="lg">
-              <Link href={"/chats" as Route}>
+            <SidebarMenuButton asChild className="h-10">
+              <Link href={"/" as Route}>
                 <div className="bg-primary text-primary-foreground flex size-8 items-center justify-center rounded-lg">
                   <Sparkles className="size-4" />
                 </div>
@@ -42,36 +58,11 @@ export async function AppSidebar(): Promise<React.ReactElement> {
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>
-        <Button asChild variant="outline" className="justify-start">
-          <Link href={"/chats" as Route}>
-            <MessageSquarePlus />
-            New chat
-          </Link>
-        </Button>
+        <ThemeToggle />
       </SidebarHeader>
       <SidebarContent>
-        <SidebarGroup>
-          <SidebarGroupLabel>Chats</SidebarGroupLabel>
-          <SidebarGroupContent>
-            <SidebarChatNav chats={items} />
-          </SidebarGroupContent>
-        </SidebarGroup>
+        <SidebarNav agents={navigationData.agents} chats={navigationData.chats} />
       </SidebarContent>
-      <SidebarFooter>
-        <div className="flex items-center justify-between gap-2">
-          <SidebarMenu className="flex-1">
-            <SidebarMenuItem>
-              <SidebarMenuButton asChild>
-                <Link href="/agents">
-                  <Bot />
-                  Agents
-                </Link>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          </SidebarMenu>
-          <ThemeToggle />
-        </div>
-      </SidebarFooter>
     </Sidebar>
   );
 }

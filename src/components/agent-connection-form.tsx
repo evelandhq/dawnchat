@@ -113,7 +113,14 @@ export function AgentConnectionForm(): React.ReactElement {
         return;
       }
 
-      router.push("/agents");
+      const body = (await response.json()) as { agent?: { id?: unknown } };
+      if (typeof body.agent?.id !== "string") {
+        setErrors({ submit: "Unable to register agent. Please check the connection and try again." });
+        return;
+      }
+
+      router.push(`/agents/${body.agent.id}`);
+      router.refresh();
     } catch {
       setErrors({ submit: "Unable to register agent. Please check the connection and try again." });
     } finally {

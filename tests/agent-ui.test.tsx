@@ -24,9 +24,10 @@ describe("AgentConnectionForm", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     pushMock.mockReset();
+    refreshMock.mockReset();
   });
 
-  it("submits a remote Eve base URL to the agents API and navigates to the list", async () => {
+  it("submits a remote Eve base URL and navigates to the new agent chat entry", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(
         JSON.stringify({
@@ -60,7 +61,8 @@ describe("AgentConnectionForm", () => {
         body: JSON.stringify({ name: "Remote Eve", baseUrl: "https://eve.example.com", authType: "none" }),
       }),
     );
-    await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/agents"));
+    await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/agents/agent_123"));
+    expect(refreshMock).toHaveBeenCalledTimes(1);
   });
 
   it("shows validation errors for invalid URLs and does not call fetch", async () => {
@@ -120,7 +122,8 @@ describe("AgentConnectionForm", () => {
         }),
       }),
     );
-    await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/agents"));
+    await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/agents/agent_123"));
+    expect(refreshMock).toHaveBeenCalledTimes(1);
   });
 
   it("rejects invalid custom header names before submitting", async () => {
@@ -145,6 +148,7 @@ describe("AgentConnectionForm", () => {
 describe("AgentDiscovery", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    pushMock.mockReset();
     refreshMock.mockReset();
   });
 
@@ -201,6 +205,7 @@ describe("AgentDiscovery", () => {
       }),
     );
     expect(await screen.findByText("healthy")).toBeInTheDocument();
+    expect(pushMock).toHaveBeenCalledWith("/agents/agent_1");
     expect(refreshMock).toHaveBeenCalled();
   });
 

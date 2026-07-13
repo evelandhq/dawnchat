@@ -5,10 +5,10 @@ import { Geist } from "next/font/google";
 
 import "./globals.css";
 
-import { AppSidebar } from "@/components/app-sidebar";
+import { AppHeader } from "@/components/app-header";
+import { AppSidebar, getAppNavigationData } from "@/components/app-sidebar";
 import { ThemeProvider } from "@/components/theme-provider";
-import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
-import { Separator } from "@/components/ui/separator";
+import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { cn } from "@/lib/utils";
 
 const geist = Geist({ subsets: ["latin"], variable: "--font-sans" });
@@ -19,7 +19,7 @@ export const metadata: Metadata = {
 };
 
 export default async function RootLayout({ children }: { children: ReactNode }): Promise<React.ReactElement> {
-  const cookieStore = await cookies();
+  const [cookieStore, navigationData] = await Promise.all([cookies(), getAppNavigationData()]);
   const defaultOpen = cookieStore.get("sidebar_state")?.value !== "false";
 
   return (
@@ -27,12 +27,9 @@ export default async function RootLayout({ children }: { children: ReactNode }):
       <body className="antialiased">
         <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
           <SidebarProvider defaultOpen={defaultOpen}>
-            <AppSidebar />
+            <AppSidebar data={navigationData} />
             <SidebarInset className="h-svh overflow-hidden">
-              <header className="flex h-14 shrink-0 items-center gap-2 border-b px-4">
-                <SidebarTrigger className="-ml-1" />
-                <span className="text-sm font-medium">Eve Chats</span>
-              </header>
+              <AppHeader {...navigationData} />
               <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
             </SidebarInset>
           </SidebarProvider>
