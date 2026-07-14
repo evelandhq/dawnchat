@@ -1,6 +1,6 @@
 "use client";
 
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
@@ -62,6 +62,7 @@ export function AgentConnectionForm({
   const [headerValue, setHeaderValue] = useState("");
   const [errors, setErrors] = useState<FormErrors>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const isSubmittingRef = useRef(false);
   const canPreserveSelectedSecret =
     initialAgent?.hasAuth === true && authType === initialAgent.authType;
 
@@ -96,6 +97,9 @@ export function AgentConnectionForm({
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
+    if (isSubmittingRef.current) {
+      return;
+    }
 
     const nextErrors = validate();
     setErrors(nextErrors);
@@ -103,6 +107,7 @@ export function AgentConnectionForm({
       return;
     }
 
+    isSubmittingRef.current = true;
     const payload: Record<string, string> = {
       name: name.trim(),
       baseUrl: baseUrl.trim(),
@@ -159,6 +164,7 @@ export function AgentConnectionForm({
     } catch {
       setErrors({ submit: genericSubmitError });
     } finally {
+      isSubmittingRef.current = false;
       setIsSubmitting(false);
     }
   }

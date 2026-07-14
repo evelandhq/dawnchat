@@ -208,6 +208,53 @@ describe("AgentConnectionForm", () => {
     expect(refreshMock).toHaveBeenCalledTimes(1);
   });
 
+  it("ignores duplicate edit submissions while the request is pending", async () => {
+    let resolveRequest: (response: Response) => void = () => {};
+    const request = new Promise<Response>((resolve) => {
+      resolveRequest = resolve;
+    });
+    const fetchMock = vi.fn().mockReturnValue(request);
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      React.createElement(AgentConnectionForm, {
+        initialAgent: {
+          id: "agent_123",
+          name: "Remote Eve",
+          baseUrl: "https://eve.example.com",
+          authType: "none",
+          hasAuth: false,
+          headerName: "",
+        },
+      }),
+    );
+
+    const form = screen.getByRole("button", { name: "Save changes" }).closest("form");
+    expect(form).not.toBeNull();
+    React.act(() => {
+      form?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      form?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/agents/agent_123",
+      expect.objectContaining({ method: "PATCH" }),
+    );
+    expect(screen.getByRole("button", { name: "Saving…" })).toBeDisabled();
+
+    await React.act(async () => {
+      resolveRequest(
+        new Response(JSON.stringify({ agent: { id: "agent_123" } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      await request;
+    });
+    await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/agents"));
+  });
+
   it("requires a new secret after switching authentication type", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
