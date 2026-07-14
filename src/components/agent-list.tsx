@@ -1,8 +1,17 @@
 import Link from "next/link";
+import type { Route } from "next";
 import { Bot, Plus } from "lucide-react";
 
+import { AgentDeleteDialog } from "@/components/agent-delete-dialog";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { StatusBadge } from "@/components/status-badge";
 
 export type AgentListItem = {
@@ -80,6 +89,14 @@ export function AgentList({ agents }: AgentListProps): React.ReactElement {
                     </div>
                   </dl>
                 </CardContent>
+                <CardFooter className="mt-auto justify-end gap-2">
+                  <Button asChild variant="outline" size="sm">
+                    <Link href={("/agents/" + agent.id + "/edit") as Route} aria-label={"Edit " + agent.name}>
+                      Edit
+                    </Link>
+                  </Button>
+                  <AgentDeleteDialog agentId={agent.id} agentName={agent.name} />
+                </CardFooter>
               </Card>
             </li>
           ))}

@@ -425,6 +425,23 @@ describe("AgentsPage data loading", () => {
 });
 
 describe("AgentList", () => {
+  const agents: AgentListItem[] = [
+    {
+      id: "agent_123",
+      name: "Remote Eve",
+      baseUrl: "https://eve.example.com",
+      authType: "bearer",
+      hasAuth: true,
+      status: "healthy",
+      lastCheckedAt: "2026-07-10T00:00:00.000Z",
+    },
+  ];
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    refreshMock.mockReset();
+  });
+
   it("renders empty state and create link", () => {
     render(React.createElement(AgentList, { agents: [] }));
 
@@ -433,18 +450,6 @@ describe("AgentList", () => {
   });
 
   it("renders redacted agent rows", () => {
-    const agents: AgentListItem[] = [
-      {
-        id: "agent_123",
-        name: "Remote Eve",
-        baseUrl: "https://eve.example.com",
-        authType: "bearer",
-        hasAuth: true,
-        status: "healthy",
-        lastCheckedAt: "2026-07-10T00:00:00.000Z",
-      },
-    ];
-
     render(React.createElement(AgentList, { agents }));
 
     expect(screen.getByText("Remote Eve"));
@@ -453,5 +458,90 @@ describe("AgentList", () => {
     expect(screen.getByText("Bearer Token"));
     expect(screen.getByText("Auth configured"));
     expect(screen.getByRole("link", { name: "Connect an agent" })).toHaveAttribute("href", "/agents/new");
+  });
+
+  it("renders edit and delete actions for a connected agent", () => {
+    render(React.createElement(AgentList, { agents }));
+
+    expect(screen.getByRole("link", { name: "Edit Remote Eve" })).toHaveAttribute(
+      "href",
+      "/agents/agent_123/edit",
+    );
+    expect(screen.getByRole("button", { name: "Delete Remote Eve" })).toBeEnabled();
+  });
+
+  it("requires the exact agent name before deleting and refreshes on success", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    render(React.createElement(AgentList, { agents }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete Remote Eve" }));
+    const confirmation = screen.getByLabelText('Type "Remote Eve" to confirm');
+    const deleteButton = screen.getByRole("button", { name: "Delete agent" });
+
+    expect(deleteButton).toBeDisabled();
+    fireEvent.change(confirmation, { target: { value: "remote eve" } });
+    expect(deleteButton).toBeDisabled();
+    fireEvent.change(confirmation, { target: { value: "Remote Eve" } });
+    expect(deleteButton).toBeEnabled();
+    fireEvent.click(deleteButton);
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith("/api/agents/agent_123", {
+        method: "DELETE",
+      }),
+    );
+    expect(refreshMock).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
+  it("keeps the delete dialog and confirmation value when deletion fails", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: "Internal server error" }), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    render(React.createElement(AgentList, { agents }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete Remote Eve" }));
+    const confirmation = screen.getByLabelText('Type "Remote Eve" to confirm');
+    fireEvent.change(confirmation, { target: { value: "Remote Eve" } });
+    fireEvent.click(screen.getByRole("button", { name: "Delete agent" }));
+
+    expect(await screen.findByText("Unable to delete agent. Please try again.")).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(confirmation).toHaveValue("Remote Eve");
+    expect(refreshMock).not.toHaveBeenCalled();
+  });
+
+  it("ignores duplicate delete activation while the request is pending", async () => {
+    let resolveRequest: (response: Response) => void = () => {};
+    const request = new Promise<Response>((resolve) => {
+      resolveRequest = resolve;
+    });
+    const fetchMock = vi.fn().mockReturnValue(request);
+    vi.stubGlobal("fetch", fetchMock);
+    render(React.createElement(AgentList, { agents }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete Remote Eve" }));
+    fireEvent.change(screen.getByLabelText('Type "Remote Eve" to confirm'), {
+      target: { value: "Remote Eve" },
+    });
+    const deleteButton = screen.getByRole("button", { name: "Delete agent" });
+    React.act(() => {
+      deleteButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      deleteButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Deleting…" })).toBeDisabled();
+
+    await React.act(async () => {
+      resolveRequest(new Response(null, { status: 204 }));
+      await request;
+    });
+    await waitFor(() => expect(refreshMock).toHaveBeenCalledTimes(1));
   });
 });
