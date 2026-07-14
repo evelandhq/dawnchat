@@ -27,6 +27,7 @@ export const chats = pgTable("chats", {
   agentConnectionId: text("agent_connection_id").notNull().references(() => agentConnections.id, { onDelete: "cascade" }),
   title: text("title").notNull(),
   sessionStateJson: text("session_state_json"),
+  pendingUserMessage: text("pending_user_message"),
   status: text("status", { enum: chatStatuses }).notNull().default("active"),
   createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull(),
@@ -47,11 +48,20 @@ export const events = pgTable(
     id: text("id").primaryKey(),
     chatId: text("chat_id").notNull().references(() => chats.id, { onDelete: "cascade" }),
     eventIndex: integer("event_index").notNull(),
+    sessionId: text("session_id"),
+    streamIndex: integer("stream_index"),
     type: text("type").notNull(),
     payloadJson: text("payload_json").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
   },
-  (table) => [uniqueIndex("events_chat_id_event_index_unique").on(table.chatId, table.eventIndex)],
+  (table) => [
+    uniqueIndex("events_chat_id_event_index_unique").on(table.chatId, table.eventIndex),
+    uniqueIndex("events_chat_id_session_id_stream_index_unique").on(
+      table.chatId,
+      table.sessionId,
+      table.streamIndex,
+    ),
+  ],
 );
 
 export const schema = { agentConnections, chats, messages, events };

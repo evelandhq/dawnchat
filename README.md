@@ -5,10 +5,10 @@ Standalone chat UI for connecting to open Eve agents by remote base URL.
 ## Core model
 
 ```text
-AgentConnection -> Chat -> Message/Event
+AgentConnection -> Chat -> Eve Event Stream
 ```
 
-The browser talks to eve-chats. eve-chats talks server-side to remote Eve agents using `eve/client` and the default Eve HTTP API.
+The browser renders Eve's `defaultMessageReducer` projection with AI Elements and talks to a same-origin, per-chat Eve protocol proxy. The proxy selects the registered remote agent, adds its server-side credentials and continuation token, and persists the raw Eve event stream.
 
 ## What this MVP includes
 
@@ -16,9 +16,10 @@ The browser talks to eve-chats. eve-chats talks server-side to remote Eve agents
 - Optional agent auth via bearer token or custom header, stored encrypted server-side.
 - Health-check registered agents.
 - Start chats bound to one healthy agent.
-- Persist user messages, assistant messages, raw Eve events, and Eve session state.
-- Continue existing chats using the saved Eve `sessionId`, `continuationToken`, and `streamIndex`.
-- PostgreSQL 16 persistence for agents, chats, messages, events, and session state.
+- Stream and render text, reasoning, tool calls/results, HITL requests, authorization challenges, and files through AI Elements.
+- Persist raw Eve events as the canonical chat history, with idempotent `(chat, session, stream index)` replay handling.
+- Continue existing chats through `useEveAgent` while keeping remote auth and the real `continuationToken` server-side.
+- PostgreSQL 16 persistence for agents, chats, raw events, and Eve session state.
 
 ## Development
 
