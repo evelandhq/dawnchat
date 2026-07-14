@@ -2,6 +2,8 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { getAgentConnectionEditDefaults } from "@/app/api/agents/api";
+import { DELETE, PATCH } from "@/app/api/agents/[agentId]/route";
 import { GET, POST } from "@/app/api/agents/route";
 import { POST as CHECK } from "@/app/api/agents/[agentId]/check/route";
 import { POST as DISCOVER } from "@/app/api/agents/discover/route";
@@ -22,6 +24,23 @@ function postAgents(body: unknown): Promise<Response> {
       body: JSON.stringify(body),
     }),
   );
+}
+
+function patchAgent(agentId: string, body: unknown): Promise<Response> {
+  return PATCH(
+    new Request("http://localhost/api/agents/" + agentId, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+    { params: Promise.resolve({ agentId }) },
+  );
+}
+
+function deleteAgent(agentId: string): Promise<Response> {
+  return DELETE(new Request("http://localhost/api/agents/" + agentId, { method: "DELETE" }), {
+    params: Promise.resolve({ agentId }),
+  });
 }
 
 function checkAgent(agentId: string): Promise<Response> {
@@ -334,5 +353,279 @@ describe("Agent Connection API", () => {
 
     const listed = (await readJson(await GET())) as { agents: Array<{ id: string; status: string }> };
     expect(listed.agents).toEqual([expect.objectContaining({ id: body.agent.id, status: "unreachable" })]);
+  });
+
+  it("projects safe edit defaults without exposing a stored header value", async () => {
+    const repository = createRepository(testDb.db);
+    const secret = "edit-default-secret";
+    const agent = await repository.createAgentConnection({
+      name: "Header Agent",
+      baseUrl: "https://header-defaults.example.com",
+      authType: "header",
+      authConfigEncrypted: JSON.stringify({
+        headerName: "X-Agent-Key",
+        headerValue: secret,
+      }),
+    });
+
+    const defaults = getAgentConnectionEditDefaults(agent);
+
+    expect(defaults).toEqual({
+      id: agent.id,
+      name: "Header Agent",
+      baseUrl: "https://header-defaults.example.com",
+      authType: "header",
+      hasAuth: true,
+      headerName: "X-Agent-Key",
+    });
+    expect(JSON.stringify(defaults)).not.toContain(secret);
+  });
+
+  it("updates an agent, preserves its bearer secret, and checks the new configuration", async () => {
+    const server = await fakeServer();
+    const secret = "preserved-bearer-secret";
+    const created = (await readJson(
+      await postAgents({
+        name: "Original",
+        baseUrl: server.baseUrl,
+        authType: "bearer",
+        bearerToken: secret,
+      }),
+    )) as { agent: { id: string } };
+    const requestCountBeforeEdit = server.requests.length;
+
+    const response = await patchAgent(created.agent.id, {
+      name: "Renamed",
+      baseUrl: server.baseUrl + "/",
+      authType: "bearer",
+      bearerToken: "",
+    });
+    const body = await readJson(response);
+
+    expect(response.status).toBe(200);
+    expect(body).toEqual({
+      agent: expect.objectContaining({
+        id: created.agent.id,
+        name: "Renamed",
+        baseUrl: server.baseUrl,
+        authType: "bearer",
+        hasAuth: true,
+        status: "healthy",
+        lastCheckedAt: expect.any(String),
+      }),
+      info: expect.objectContaining({ name: "Fake Eve Agent" }),
+    });
+    expectNoSecretLeak(body, secret);
+    for (const request of server.requests.slice(requestCountBeforeEdit)) {
+      expect(request.headers.authorization).toBe("Bearer " + secret);
+    }
+  });
+
+  it("preserves a custom header value while allowing its header name to change", async () => {
+    const server = await fakeServer();
+    const secret = "preserved-header-secret";
+    const created = (await readJson(
+      await postAgents({
+        name: "Header Agent",
+        baseUrl: server.baseUrl,
+        authType: "header",
+        headerName: "X-Old-Key",
+        headerValue: secret,
+      }),
+    )) as { agent: { id: string } };
+    const requestCountBeforeEdit = server.requests.length;
+
+    const response = await patchAgent(created.agent.id, {
+      name: "Header Agent",
+      baseUrl: server.baseUrl,
+      authType: "header",
+      headerName: "X-New-Key",
+      headerValue: "",
+    });
+
+    expect(response.status).toBe(200);
+    const editedRequests = server.requests.slice(requestCountBeforeEdit);
+    expect(editedRequests).toHaveLength(2);
+    for (const request of editedRequests) {
+      expect(request.headers["x-new-key"]).toBe(secret);
+      expect(request.headers["x-old-key"]).toBeUndefined();
+    }
+  });
+
+  it("accepts an edit whose automatic health check is unreachable", async () => {
+    const server = await fakeServer();
+    const created = (await readJson(
+      await postAgents({ name: "Online", baseUrl: server.baseUrl, authType: "none" }),
+    )) as { agent: { id: string } };
+    const baseUrl = server.baseUrl;
+    await server.close();
+    servers.pop();
+
+    const response = await patchAgent(created.agent.id, {
+      name: "Offline",
+      baseUrl,
+      authType: "none",
+    });
+    const body = (await readJson(response)) as {
+      agent: { status: string; lastCheckedAt: string | null };
+      error?: string;
+    };
+
+    expect(response.status).toBe(200);
+    expect(body.agent).toMatchObject({
+      status: "unreachable",
+      lastCheckedAt: expect.any(String),
+    });
+    expect(body.error).toEqual(expect.any(String));
+    await expect(createRepository(testDb.db).getAgentConnection(created.agent.id)).resolves.toMatchObject({
+      name: "Offline",
+      status: "unreachable",
+    });
+  });
+
+  it("requires a new secret when switching authentication type", async () => {
+    const server = await fakeServer();
+    const created = (await readJson(
+      await postAgents({ name: "Public", baseUrl: server.baseUrl, authType: "none" }),
+    )) as { agent: { id: string } };
+    const requestCountBeforeEdit = server.requests.length;
+
+    const response = await patchAgent(created.agent.id, {
+      name: "Private",
+      baseUrl: server.baseUrl,
+      authType: "bearer",
+      bearerToken: "",
+    });
+
+    expect(response.status).toBe(400);
+    await expect(readJson(response)).resolves.toEqual({ error: "Invalid agent connection" });
+    await expect(createRepository(testDb.db).getAgentConnection(created.agent.id)).resolves.toMatchObject({
+      name: "Public",
+      authType: "none",
+    });
+    expect(server.requests).toHaveLength(requestCountBeforeEdit);
+  });
+
+  it("saves supplied credentials when switching auth and clears them when switching to none", async () => {
+    const server = await fakeServer();
+    const secret = "new-bearer-secret";
+    const created = (await readJson(
+      await postAgents({ name: "Public", baseUrl: server.baseUrl, authType: "none" }),
+    )) as { agent: { id: string } };
+    const requestCountBeforeBearer = server.requests.length;
+
+    const bearerResponse = await patchAgent(created.agent.id, {
+      name: "Private",
+      baseUrl: server.baseUrl,
+      authType: "bearer",
+      bearerToken: secret,
+    });
+
+    expect(bearerResponse.status).toBe(200);
+    for (const request of server.requests.slice(requestCountBeforeBearer)) {
+      expect(request.headers.authorization).toBe("Bearer " + secret);
+    }
+
+    const noneResponse = await patchAgent(created.agent.id, {
+      name: "Public Again",
+      baseUrl: server.baseUrl,
+      authType: "none",
+    });
+
+    expect(noneResponse.status).toBe(200);
+    await expect(createRepository(testDb.db).getAgentConnection(created.agent.id)).resolves.toMatchObject({
+      name: "Public Again",
+      authType: "none",
+      authConfigEncrypted: null,
+      status: "healthy",
+    });
+  });
+
+  it("does not edit an agent when its preserved auth config is invalid", async () => {
+    const repository = createRepository(testDb.db);
+    const created = await repository.createAgentConnection({
+      name: "Corrupt Auth",
+      baseUrl: "https://corrupt-auth.example.com",
+      authType: "bearer",
+      authConfigEncrypted: JSON.stringify({}),
+    });
+
+    const response = await patchAgent(created.id, {
+      name: "Should Not Persist",
+      baseUrl: created.baseUrl,
+      authType: "bearer",
+      bearerToken: "",
+    });
+
+    expect(response.status).toBe(500);
+    await expect(readJson(response)).resolves.toEqual({ error: "Internal server error" });
+    await expect(repository.getAgentConnection(created.id)).resolves.toMatchObject({
+      name: "Corrupt Auth",
+      authConfigEncrypted: JSON.stringify({}),
+    });
+  });
+
+  it("returns the creation-compatible conflict when an edit duplicates another URL", async () => {
+    const firstServer = await fakeServer();
+    const secondServer = await fakeServer();
+    const first = (await readJson(
+      await postAgents({ name: "First", baseUrl: firstServer.baseUrl, authType: "none" }),
+    )) as { agent: { id: string } };
+    await postAgents({ name: "Second", baseUrl: secondServer.baseUrl, authType: "none" });
+    const secondRequestCount = secondServer.requests.length;
+
+    const response = await patchAgent(first.agent.id, {
+      name: "First",
+      baseUrl: secondServer.baseUrl + "/?source=edit",
+      authType: "none",
+    });
+
+    expect(response.status).toBe(409);
+    await expect(readJson(response)).resolves.toEqual({ error: "Agent URL already registered" });
+    await expect(createRepository(testDb.db).getAgentConnection(first.agent.id)).resolves.toMatchObject({
+      baseUrl: firstServer.baseUrl,
+    });
+    expect(secondServer.requests).toHaveLength(secondRequestCount);
+  });
+
+  it("returns 404 for an unknown agent edit", async () => {
+    const response = await patchAgent("agent_missing", {
+      name: "Missing",
+      baseUrl: "https://missing.example.com",
+      authType: "none",
+    });
+
+    expect(response.status).toBe(404);
+    await expect(readJson(response)).resolves.toEqual({ error: "Agent connection not found" });
+  });
+
+  it("deletes an agent by id without a confirmation payload", async () => {
+    const server = await fakeServer();
+    const created = (await readJson(
+      await postAgents({ name: "Disposable", baseUrl: server.baseUrl, authType: "none" }),
+    )) as { agent: { id: string } };
+    const repository = createRepository(testDb.db);
+    const chat = await repository.createChat({
+      agentConnectionId: created.agent.id,
+      title: "Delete through API",
+    });
+    await repository.appendEvent({
+      chatId: chat.id,
+      eventIndex: 0,
+      type: "message.completed",
+      payload: { message: "gone" },
+    });
+
+    const response = await deleteAgent(created.agent.id);
+
+    expect(response.status).toBe(204);
+    expect(await response.text()).toBe("");
+    await expect(repository.getAgentConnection(created.agent.id)).resolves.toBeNull();
+    await expect(repository.getChat(chat.id)).resolves.toBeNull();
+    await expect(repository.listEvents(chat.id)).resolves.toEqual([]);
+
+    const missingResponse = await deleteAgent(created.agent.id);
+    expect(missingResponse.status).toBe(404);
+    await expect(readJson(missingResponse)).resolves.toEqual({ error: "Agent connection not found" });
   });
 });

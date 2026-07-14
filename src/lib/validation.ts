@@ -86,6 +86,25 @@ export const createAgentConnectionSchema = z
     }
   });
 
+export const updateAgentConnectionSchema = z
+  .object({
+    name: nonEmptyTrimmedString,
+    baseUrl: agentBaseUrlSchema,
+    authType: authTypeSchema,
+    bearerToken: z.string().optional(),
+    headerName: httpHeaderNameSchema,
+    headerValue: z.string().optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (value.authType === "header" && !value.headerName?.trim()) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["headerName"],
+        message: "Header name is required for header auth",
+      });
+    }
+  });
+
 export const discoverAgentsSchema = z.object({
   gatewayUrl: agentBaseUrlSchema,
 });

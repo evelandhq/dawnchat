@@ -3,6 +3,7 @@ import {
   createAgentConnectionSchema,
   createChatSchema,
   normalizeAgentBaseUrl,
+  updateAgentConnectionSchema,
 } from "@/lib/validation";
 
 import { createId } from "@/lib/ids";
@@ -90,6 +91,45 @@ describe("domain validation", () => {
         authType: "header",
         headerName: "   ",
         headerValue: "secret-header-value",
+      }),
+    ).toThrow();
+  });
+
+  it("normalizes edit fields without requiring an unchanged secret", () => {
+    expect(
+      updateAgentConnectionSchema.parse({
+        name: "  Renamed Agent  ",
+        baseUrl: "https://agent.example.com/?source=edit",
+        authType: "bearer",
+        bearerToken: "",
+      }),
+    ).toMatchObject({
+      name: "Renamed Agent",
+      baseUrl: "https://agent.example.com",
+      authType: "bearer",
+      bearerToken: "",
+    });
+  });
+
+  it("requires a valid header name while allowing an omitted edit secret", () => {
+    expect(
+      updateAgentConnectionSchema.parse({
+        name: "Header Agent",
+        baseUrl: "https://header.example.com",
+        authType: "header",
+        headerName: "X-Agent-Key",
+      }),
+    ).toMatchObject({
+      authType: "header",
+      headerName: "X-Agent-Key",
+    });
+
+    expect(() =>
+      updateAgentConnectionSchema.parse({
+        name: "Header Agent",
+        baseUrl: "https://header.example.com",
+        authType: "header",
+        headerName: "Bad Header",
       }),
     ).toThrow();
   });
