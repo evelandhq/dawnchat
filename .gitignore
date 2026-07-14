@@ -10,4 +10,5 @@ node_modules
 *.tsbuildinfo
 .DS_Store
 .screenshots/
+.worktrees/
 next-env.d.ts
