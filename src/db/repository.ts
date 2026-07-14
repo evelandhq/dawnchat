@@ -1,4 +1,4 @@
-import { asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { z } from "zod";
 
@@ -10,8 +10,6 @@ import {
   type AgentConnectionStatus,
   type AuthType,
   type ChatStatus,
-  type MessageRole,
-  messages,
   schema,
 } from "@/db/schema";
 
@@ -29,7 +27,6 @@ export type AgentConnection = typeof agentConnections.$inferSelect;
 export type Chat = Omit<typeof chats.$inferSelect, "sessionStateJson"> & {
   sessionState: SessionState | null;
 };
-export type Message = typeof messages.$inferSelect;
 export type EveEvent = Omit<typeof events.$inferSelect, "payloadJson"> & {
   payload: unknown;
 };
@@ -49,21 +46,25 @@ export type UpdateAgentHealthInput = {
 export type CreateChatInput = {
   agentConnectionId: string;
   title: string;
-};
-
-export type AppendMessageInput = {
-  chatId: string;
-  role: MessageRole;
-  content: string;
-  eventIndex?: number | null;
+  pendingUserMessage?: string | null;
 };
 
 export type AppendEventInput = {
   chatId: string;
-  eventIndex: number;
   type: string;
   payload: unknown;
-};
+} & (
+  | {
+      eventIndex: number;
+      sessionId?: never;
+      streamIndex?: never;
+    }
+  | {
+      eventIndex?: never;
+      sessionId: string;
+      streamIndex: number;
+    }
+);
 
 export type Repository = {
   createAgentConnection(input: CreateAgentConnectionInput): Promise<AgentConnection>;
@@ -73,10 +74,9 @@ export type Repository = {
   createChat(input: CreateChatInput): Promise<Chat>;
   listChats(): Promise<Chat[]>;
   getChat(id: string): Promise<Chat | null>;
-  appendMessage(input: AppendMessageInput): Promise<Message>;
-  listMessages(chatId: string): Promise<Message[]>;
   appendEvent(input: AppendEventInput): Promise<EveEvent>;
   listEvents(chatId: string): Promise<EveEvent[]>;
+  clearPendingUserMessage(chatId: string): Promise<Chat>;
   updateChatSessionState(chatId: string, state: SessionState, status?: ChatStatus): Promise<Chat>;
   updateChatStatus(chatId: string, status: ChatStatus): Promise<Chat>;
 };
@@ -171,6 +171,7 @@ export function createRepository(db: RepositoryDb): Repository {
         agentConnectionId: input.agentConnectionId,
         title: input.title,
         sessionStateJson: null,
+        pendingUserMessage: input.pendingUserMessage ?? null,
         status: "active" satisfies ChatStatus,
         createdAt: now,
         updatedAt: now,
@@ -190,40 +191,51 @@ export function createRepository(db: RepositoryDb): Repository {
       return row ? mapChat(row) : null;
     },
 
-    async appendMessage(input) {
-      const record: typeof messages.$inferInsert = {
-        id: createId("msg"),
-        chatId: input.chatId,
-        role: input.role,
-        content: input.content,
-        eventIndex: input.eventIndex ?? null,
-        createdAt: new Date(),
-      };
-
-      const [created] = await db.insert(messages).values(record).returning();
-      return created;
-    },
-
-    async listMessages(chatId) {
-      return db
-        .select()
-        .from(messages)
-        .where(eq(messages.chatId, chatId))
-        .orderBy(sql`${messages.eventIndex} IS NULL`, asc(messages.eventIndex), asc(messages.createdAt), asc(messages.id));
-    },
-
     async appendEvent(input) {
-      const record: typeof events.$inferInsert = {
-        id: createId("evt"),
-        chatId: input.chatId,
-        eventIndex: input.eventIndex,
-        type: input.type,
-        payloadJson: JSON.stringify(input.payload),
-        createdAt: new Date(),
-      };
+      return db.transaction(async (tx) => {
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${input.chatId}))`);
 
-      const [created] = await db.insert(events).values(record).returning();
-      return mapEvent(created);
+        if (input.sessionId !== undefined && input.streamIndex !== undefined) {
+          const [existing] = await tx
+            .select()
+            .from(events)
+            .where(
+              and(
+                eq(events.chatId, input.chatId),
+                eq(events.sessionId, input.sessionId),
+                eq(events.streamIndex, input.streamIndex),
+              ),
+            )
+            .limit(1);
+          if (existing) {
+            return mapEvent(existing);
+          }
+        }
+
+        const eventIndex =
+          input.eventIndex ??
+          Number(
+            (
+              await tx
+                .select({ value: sql<number>`coalesce(max(${events.eventIndex}), 0) + 1` })
+                .from(events)
+                .where(eq(events.chatId, input.chatId))
+            )[0]?.value ?? 1,
+          );
+        const record: typeof events.$inferInsert = {
+          id: createId("evt"),
+          chatId: input.chatId,
+          eventIndex,
+          sessionId: input.sessionId,
+          streamIndex: input.streamIndex,
+          type: input.type,
+          payloadJson: JSON.stringify(input.payload),
+          createdAt: new Date(),
+        };
+
+        const [created] = await tx.insert(events).values(record).returning();
+        return mapEvent(created);
+      });
     },
 
     async listEvents(chatId) {
@@ -233,6 +245,20 @@ export function createRepository(db: RepositoryDb): Repository {
         .where(eq(events.chatId, chatId))
         .orderBy(asc(events.eventIndex), asc(events.id));
       return rows.map(mapEvent);
+    },
+
+    async clearPendingUserMessage(chatId) {
+      const [updated] = await db
+        .update(chats)
+        .set({ pendingUserMessage: null, updatedAt: new Date() })
+        .where(eq(chats.id, chatId))
+        .returning();
+
+      if (!updated) {
+        throw new Error(`Chat not found: ${chatId}`);
+      }
+
+      return mapChat(updated);
     },
 
     async updateChatSessionState(chatId, state, status) {

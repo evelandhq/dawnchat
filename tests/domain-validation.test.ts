@@ -3,7 +3,6 @@ import {
   createAgentConnectionSchema,
   createChatSchema,
   normalizeAgentBaseUrl,
-  sendMessageSchema,
 } from "@/lib/validation";
 
 import { createId } from "@/lib/ids";
@@ -40,10 +39,6 @@ describe("domain validation", () => {
 
     expect(parsed.authType).toBe("bearer");
     expect(parsed.bearerToken).toBe("secret-token");
-  });
-
-  it("rejects empty chat messages", () => {
-    expect(() => sendMessageSchema.parse({ message: "   " })).toThrow();
   });
 
   it("trims agent names and strips URL search and hash", () => {
@@ -110,10 +105,6 @@ describe("domain validation", () => {
 
   it("rejects empty chat creation messages", () => {
     expect(() => createChatSchema.parse({ agentId: "agent_123", message: "   " })).toThrow();
-  });
-
-  it("trims valid chat messages", () => {
-    expect(sendMessageSchema.parse({ message: "  Hello again  " })).toEqual({ message: "Hello again" });
   });
 
   it("creates prefixed ids", () => {

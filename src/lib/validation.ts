@@ -94,7 +94,3 @@ export const createChatSchema = z.object({
   agentId: nonEmptyTrimmedString,
   message: nonEmptyTrimmedString,
 });
-
-export const sendMessageSchema = z.object({
-  message: nonEmptyTrimmedString,
-});

@@ -8,6 +8,20 @@
       "when": 1783648332192,
       "tag": "0000_initial_postgresql",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1784009586802,
+      "tag": "0001_nervous_night_thrasher",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1784009694577,
+      "tag": "0002_faulty_arclight",
+      "breakpoints": true
     }
   ]
 }

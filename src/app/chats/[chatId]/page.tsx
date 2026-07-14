@@ -1,14 +1,16 @@
 import { notFound } from "next/navigation";
+import type { HandleMessageStreamEvent } from "eve/client";
 
-import { createRepository, type AgentConnection, type Chat, type Message } from "@/db/repository";
+import { createRepository, type AgentConnection, type Chat } from "@/db/repository";
 import { getDbClient } from "@/db/provider";
-import { ChatThread, type ChatThreadMessage, type ChatThreadSummary } from "@/components/chat-thread";
+import { ChatThread, type ChatThreadSummary } from "@/components/chat-thread";
 
 export const dynamic = "force-dynamic";
 
 type ChatThreadPageData = {
   chat: ChatThreadSummary;
-  messages: ChatThreadMessage[];
+  events: HandleMessageStreamEvent[];
+  pendingUserMessage: string | null;
 };
 
 type ChatThreadPageProps = {
@@ -22,14 +24,15 @@ export async function getChatThreadForPage(chatId: string): Promise<ChatThreadPa
     return null;
   }
 
-  const [agent, messages] = await Promise.all([
+  const [agent, events] = await Promise.all([
     repository.getAgentConnection(chat.agentConnectionId),
-    repository.listMessages(chat.id),
+    repository.listEvents(chat.id),
   ]);
 
   return {
     chat: chatThreadSummaryForPage(chat, agent),
-    messages: messages.map(messageForThread),
+    events: events.map((event) => event.payload as HandleMessageStreamEvent),
+    pendingUserMessage: chat.pendingUserMessage,
   };
 }
 
@@ -50,18 +53,13 @@ function chatThreadSummaryForPage(chat: Chat, agent: AgentConnection | null): Ch
     agentName: agent?.name ?? "Unknown agent",
     title: chat.title,
     status: chat.status,
+    sessionState: chat.sessionState
+      ? {
+          sessionId: chat.sessionState.sessionId,
+          streamIndex: chat.sessionState.streamIndex ?? 0,
+        }
+      : null,
     createdAt: chat.createdAt.toISOString(),
     updatedAt: chat.updatedAt.toISOString(),
-  };
-}
-
-function messageForThread(message: Message): ChatThreadMessage {
-  return {
-    id: message.id,
-    chatId: message.chatId,
-    role: message.role,
-    content: message.content,
-    eventIndex: message.eventIndex,
-    createdAt: message.createdAt.toISOString(),
   };
 }

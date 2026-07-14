@@ -93,7 +93,7 @@ describe("repository", () => {
     ).rejects.toThrow("Chat not found");
   });
 
-  it("stores chat session state separately from message history", async () => {
+  it("stores chat session state separately from raw Eve event history", async () => {
     const repository = createRepository(db);
     const agent = await repository.createAgentConnection({
       name: "Support Agent",
@@ -109,17 +109,17 @@ describe("repository", () => {
       status: "active",
     });
 
-    const firstMessage = await repository.appendMessage({
+    const firstEvent = await repository.appendEvent({
       chatId: chat.id,
-      role: "user",
-      content: "Hello",
       eventIndex: 0,
+      type: "message.received",
+      payload: { type: "message.received", data: { message: "Hello" } },
     });
-    const secondMessage = await repository.appendMessage({
+    const secondEvent = await repository.appendEvent({
       chatId: chat.id,
-      role: "assistant",
-      content: "Hi there",
       eventIndex: 1,
+      type: "message.completed",
+      payload: { type: "message.completed", data: { message: "Hi there" } },
     });
 
     const state = { sessionId: "session-123", continuationToken: "continue-456", streamIndex: 2 };
@@ -130,28 +130,30 @@ describe("repository", () => {
       id: chat.id,
       sessionState: state,
     });
-    await expect(repository.listMessages(chat.id)).resolves.toEqual([firstMessage, secondMessage]);
+    await expect(repository.listEvents(chat.id)).resolves.toEqual([firstEvent, secondEvent]);
   });
 
-  it("orders indexed messages before messages without event indexes", async () => {
+  it("deduplicates replayed remote events by session cursor", async () => {
     const repository = createRepository(db);
     const agent = await repository.createAgentConnection({
       name: "Support Agent",
       baseUrl: "https://support.example.com",
       authType: "none",
     });
-    const chat = await repository.createChat({ agentConnectionId: agent.id, title: "Ordering" });
-
-    const unindexed = await repository.appendMessage({
+    const chat = await repository.createChat({ agentConnectionId: agent.id, title: "Replay" });
+    const eventInput = {
       chatId: chat.id,
-      role: "system",
-      content: "Unindexed setup",
-      eventIndex: null,
-    });
-    const second = await repository.appendMessage({ chatId: chat.id, role: "assistant", content: "Second", eventIndex: 1 });
-    const first = await repository.appendMessage({ chatId: chat.id, role: "user", content: "First", eventIndex: 0 });
+      sessionId: "ses_1",
+      streamIndex: 0,
+      type: "message.received",
+      payload: { type: "message.received", data: { message: "First" } },
+    } as const;
 
-    await expect(repository.listMessages(chat.id)).resolves.toEqual([first, second, unindexed]);
+    const first = await repository.appendEvent(eventInput);
+    const replay = await repository.appendEvent(eventInput);
+
+    expect(replay).toEqual(first);
+    await expect(repository.listEvents(chat.id)).resolves.toEqual([first]);
   });
 
   it("fails fast on corrupted stored chat session state", async () => {

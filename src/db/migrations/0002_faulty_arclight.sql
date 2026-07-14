@@ -1,0 +1,1 @@
+ALTER TABLE "chats" ADD COLUMN "pending_user_message" text;

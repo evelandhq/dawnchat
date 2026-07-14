@@ -2,8 +2,8 @@ import "@testing-library/jest-dom/vitest";
 
 process.env.AUTH_SECRET ??= "test-auth-secret-for-agent-auth-config-encryption";
 
-// jsdom lacks the layout/observer APIs used by the assistant-ui thread viewport
-// and Radix; stub them only when absent so real browsers are untouched.
+// jsdom lacks the layout/observer APIs used by the AI Elements conversation
+// viewport and Radix; stub them only when absent so real browsers are untouched.
 if (typeof window !== "undefined") {
   window.HTMLElement.prototype.scrollIntoView ??= () => {};
   window.HTMLElement.prototype.scrollTo ??= () => {};
