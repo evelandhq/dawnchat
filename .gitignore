@@ -10,3 +10,4 @@ node_modules
 *.tsbuildinfo
 .DS_Store
 .screenshots/
+next-env.d.ts
