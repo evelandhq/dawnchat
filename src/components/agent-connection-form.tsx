@@ -108,6 +108,11 @@ export function AgentConnectionForm(): React.ReactElement {
         body: JSON.stringify(payload),
       });
 
+      if (response.status === 409) {
+        setErrors({ submit: "An agent with this URL is already registered." });
+        return;
+      }
+
       if (!response.ok) {
         setErrors({ submit: "Unable to register agent. Please check the connection and try again." });
         return;

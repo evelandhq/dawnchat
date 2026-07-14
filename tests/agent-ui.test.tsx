@@ -65,6 +65,26 @@ describe("AgentConnectionForm", () => {
     expect(refreshMock).toHaveBeenCalledTimes(1);
   });
 
+  it("shows a specific error when the agent URL is already registered", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: "Agent URL already registered" }), {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(React.createElement(AgentConnectionForm));
+
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Duplicate Eve" } });
+    fireEvent.change(screen.getByLabelText("Base URL"), { target: { value: "https://eve.example.com" } });
+    fireEvent.click(screen.getByRole("button", { name: "Register agent" }));
+
+    expect(await screen.findByText("An agent with this URL is already registered.")).toBeInTheDocument();
+    expect(pushMock).not.toHaveBeenCalled();
+    expect(refreshMock).not.toHaveBeenCalled();
+  });
+
   it("shows validation errors for invalid URLs and does not call fetch", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
