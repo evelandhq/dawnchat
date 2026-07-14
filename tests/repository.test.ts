@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 
-import { createRepository } from "@/db/repository";
+import { createRepository, DuplicateAgentUrlError } from "@/db/repository";
 import type { DbClient } from "@/db/client";
-import { chats } from "@/db/schema";
+import { chats, events, messages } from "@/db/schema";
 import { createTestDbHandle, type TestDbHandle } from "@/test/db";
 
 describe("repository", () => {
@@ -68,6 +68,107 @@ describe("repository", () => {
     const repository = createRepository(db);
 
     await expect(repository.getAgentConnection("agent_missing")).resolves.toBeNull();
+  });
+
+  it("updates agent connection details without changing its identity", async () => {
+    const repository = createRepository(db);
+    const created = await repository.createAgentConnection({
+      name: "Old Agent",
+      baseUrl: "https://old.example.com",
+      authType: "none",
+    });
+    await repository.updateAgentHealth(created.id, {
+      status: "healthy",
+      lastCheckedAt: new Date("2026-07-14T01:00:00.000Z"),
+    });
+
+    const updated = await repository.updateAgentConnection(created.id, {
+      name: "New Agent",
+      baseUrl: "https://new.example.com",
+      authType: "bearer",
+      authConfigEncrypted: "encrypted-token",
+    });
+
+    expect(updated).toMatchObject({
+      id: created.id,
+      name: "New Agent",
+      baseUrl: "https://new.example.com",
+      authType: "bearer",
+      authConfigEncrypted: "encrypted-token",
+      status: "unknown",
+      lastCheckedAt: null,
+      createdAt: created.createdAt,
+    });
+  });
+
+  it("rejects an update to another agent URL", async () => {
+    const repository = createRepository(db);
+    const first = await repository.createAgentConnection({
+      name: "First",
+      baseUrl: "https://first.example.com",
+      authType: "none",
+    });
+    await repository.createAgentConnection({
+      name: "Second",
+      baseUrl: "https://second.example.com",
+      authType: "none",
+    });
+
+    await expect(
+      repository.updateAgentConnection(first.id, {
+        name: "First",
+        baseUrl: "https://second.example.com",
+        authType: "none",
+        authConfigEncrypted: null,
+      }),
+    ).rejects.toBeInstanceOf(DuplicateAgentUrlError);
+  });
+
+  it("returns missing results for unknown agent mutations", async () => {
+    const repository = createRepository(db);
+
+    await expect(
+      repository.updateAgentConnection("agent_missing", {
+        name: "Missing",
+        baseUrl: "https://missing.example.com",
+        authType: "none",
+        authConfigEncrypted: null,
+      }),
+    ).resolves.toBeNull();
+    await expect(repository.deleteAgentConnection("agent_missing")).resolves.toBe(false);
+  });
+
+  it("deletes an agent connection and cascades its chat data", async () => {
+    const repository = createRepository(db);
+    const agent = await repository.createAgentConnection({
+      name: "Disposable",
+      baseUrl: "https://disposable.example.com",
+      authType: "none",
+    });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Delete me",
+    });
+    await repository.appendEvent({
+      chatId: chat.id,
+      eventIndex: 0,
+      type: "message.completed",
+      payload: { message: "gone" },
+    });
+    await db.insert(messages).values({
+      id: "msg_delete_test",
+      chatId: chat.id,
+      role: "user",
+      content: "gone",
+      eventIndex: 0,
+      createdAt: new Date(),
+    });
+
+    await expect(repository.deleteAgentConnection(agent.id)).resolves.toBe(true);
+    await expect(repository.getAgentConnection(agent.id)).resolves.toBeNull();
+    await expect(db.select().from(chats)).resolves.toEqual([]);
+    await expect(db.select().from(messages)).resolves.toEqual([]);
+    await expect(db.select().from(events)).resolves.toEqual([]);
   });
 
   it("updates agent health independently of connection details", async () => {

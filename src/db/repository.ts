@@ -39,6 +39,13 @@ export type CreateAgentConnectionInput = {
   authConfigEncrypted?: string | null;
 };
 
+export type UpdateAgentConnectionInput = {
+  name: string;
+  baseUrl: string;
+  authType: AuthType;
+  authConfigEncrypted: string | null;
+};
+
 export type UpdateAgentHealthInput = {
   status: AgentConnectionStatus;
   lastCheckedAt?: Date | null;
@@ -71,6 +78,8 @@ export type Repository = {
   createAgentConnection(input: CreateAgentConnectionInput): Promise<AgentConnection>;
   listAgentConnections(): Promise<AgentConnection[]>;
   getAgentConnection(id: string): Promise<AgentConnection | null>;
+  updateAgentConnection(id: string, input: UpdateAgentConnectionInput): Promise<AgentConnection | null>;
+  deleteAgentConnection(id: string): Promise<boolean>;
   updateAgentHealth(id: string, input: UpdateAgentHealthInput): Promise<AgentConnection>;
   createChat(input: CreateChatInput): Promise<Chat>;
   listChats(): Promise<Chat[]>;
@@ -177,6 +186,38 @@ export function createRepository(db: RepositoryDb): Repository {
     async getAgentConnection(id) {
       const [agent] = await db.select().from(agentConnections).where(eq(agentConnections.id, id)).limit(1);
       return agent ?? null;
+    },
+
+    async updateAgentConnection(id, input) {
+      try {
+        const [updated] = await db
+          .update(agentConnections)
+          .set({
+            name: input.name,
+            baseUrl: input.baseUrl,
+            authType: input.authType,
+            authConfigEncrypted: input.authConfigEncrypted,
+            status: "unknown",
+            lastCheckedAt: null,
+            updatedAt: new Date(),
+          })
+          .where(eq(agentConnections.id, id))
+          .returning();
+        return updated ?? null;
+      } catch (error) {
+        if (isDuplicateAgentUrlError(error)) {
+          throw new DuplicateAgentUrlError(error);
+        }
+        throw error;
+      }
+    },
+
+    async deleteAgentConnection(id) {
+      const deleted = await db
+        .delete(agentConnections)
+        .where(eq(agentConnections.id, id))
+        .returning({ id: agentConnections.id });
+      return deleted.length > 0;
     },
 
     async updateAgentHealth(id, input) {
