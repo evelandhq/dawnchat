@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "agent_connections_base_url_unique" ON "agent_connections" USING btree ("base_url");

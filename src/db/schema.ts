@@ -10,17 +10,21 @@ export type AgentConnectionStatus = (typeof agentConnectionStatuses)[number];
 export type ChatStatus = (typeof chatStatuses)[number];
 export type MessageRole = (typeof messageRoles)[number];
 
-export const agentConnections = pgTable("agent_connections", {
-  id: text("id").primaryKey(),
-  name: text("name").notNull(),
-  baseUrl: text("base_url").notNull(),
-  authType: text("auth_type", { enum: authTypes }).notNull(),
-  authConfigEncrypted: text("auth_config_encrypted"),
-  status: text("status", { enum: agentConnectionStatuses }).notNull().default("unknown"),
-  lastCheckedAt: timestamp("last_checked_at", { withTimezone: true, mode: "date" }),
-  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
-  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull(),
-});
+export const agentConnections = pgTable(
+  "agent_connections",
+  {
+    id: text("id").primaryKey(),
+    name: text("name").notNull(),
+    baseUrl: text("base_url").notNull(),
+    authType: text("auth_type", { enum: authTypes }).notNull(),
+    authConfigEncrypted: text("auth_config_encrypted"),
+    status: text("status", { enum: agentConnectionStatuses }).notNull().default("unknown"),
+    lastCheckedAt: timestamp("last_checked_at", { withTimezone: true, mode: "date" }),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull(),
+  },
+  (table) => [uniqueIndex("agent_connections_base_url_unique").on(table.baseUrl)],
+);
 
 export const chats = pgTable("chats", {
   id: text("id").primaryKey(),

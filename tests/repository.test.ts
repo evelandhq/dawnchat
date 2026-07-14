@@ -43,6 +43,27 @@ describe("repository", () => {
     expect(listed).toEqual([created]);
   });
 
+  it("rejects duplicate agent URLs", async () => {
+    const repository = createRepository(db);
+    const baseUrl = "https://duplicate.example.com";
+
+    await repository.createAgentConnection({
+      name: "First Agent",
+      baseUrl,
+      authType: "none",
+    });
+
+    await expect(
+      repository.createAgentConnection({
+        name: "Second Agent",
+        baseUrl,
+        authType: "bearer",
+        authConfigEncrypted: "encrypted-token",
+      }),
+    ).rejects.toThrow();
+    await expect(repository.listAgentConnections()).resolves.toHaveLength(1);
+  });
+
   it("returns null for a missing agent connection", async () => {
     const repository = createRepository(db);
 
