@@ -5,9 +5,11 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { AgentConnectionForm } from "@/components/agent-connection-form";
 import { AgentDiscovery } from "@/components/agent-discovery";
 import { AgentList, type AgentListItem } from "@/components/agent-list";
+import { getAgentForEditPage } from "@/app/agents/[agentId]/edit/page";
 import { getAgentsForPage } from "@/app/agents/page";
 import { createRepository } from "@/db/repository";
 import { setDbClientForTests } from "@/db/provider";
+import { encryptAuthConfig } from "@/eve/auth";
 import { createTestDbHandle, type TestDbHandle } from "@/test/db";
 
 const pushMock = vi.fn();
@@ -163,6 +165,99 @@ describe("AgentConnectionForm", () => {
     expect(fetchMock).not.toHaveBeenCalled();
     expect(pushMock).not.toHaveBeenCalled();
   });
+
+  it("submits safe edit defaults while preserving an existing bearer token", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ agent: { id: "agent_123" } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      React.createElement(AgentConnectionForm, {
+        initialAgent: {
+          id: "agent_123",
+          name: "Remote Eve",
+          baseUrl: "https://eve.example.com",
+          authType: "bearer",
+          hasAuth: true,
+          headerName: "",
+        },
+      }),
+    );
+
+    expect(screen.getByLabelText("Name")).toHaveValue("Remote Eve");
+    expect(screen.getByLabelText("Base URL")).toHaveValue("https://eve.example.com");
+    expect(screen.getByText("Leave blank to keep the current bearer token.")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Renamed Eve" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(fetchMock).toHaveBeenCalledWith("/api/agents/agent_123", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "Renamed Eve",
+        baseUrl: "https://eve.example.com",
+        authType: "bearer",
+      }),
+    });
+    expect(pushMock).toHaveBeenCalledWith("/agents");
+    expect(refreshMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("requires a new secret after switching authentication type", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      React.createElement(AgentConnectionForm, {
+        initialAgent: {
+          id: "agent_123",
+          name: "Remote Eve",
+          baseUrl: "https://eve.example.com",
+          authType: "header",
+          hasAuth: true,
+          headerName: "X-Agent-Key",
+        },
+      }),
+    );
+
+    fireEvent.change(screen.getByLabelText("Auth Type"), { target: { value: "bearer" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    expect(await screen.findByText("Bearer token is required.")).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("shows the shared duplicate URL error in edit mode", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: "Agent URL already registered" }), {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      React.createElement(AgentConnectionForm, {
+        initialAgent: {
+          id: "agent_123",
+          name: "Remote Eve",
+          baseUrl: "https://eve.example.com",
+          authType: "none",
+          hasAuth: false,
+          headerName: "",
+        },
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    expect(await screen.findByText("An agent with this URL is already registered.")).toBeInTheDocument();
+    expect(pushMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("AgentDiscovery", () => {
@@ -299,6 +394,33 @@ describe("AgentsPage data loading", () => {
       }),
     ]);
     expect(JSON.stringify(agents)).not.toContain("encrypted-test-value");
+  });
+
+  it("loads only safe edit defaults from storage", async () => {
+    const repository = createRepository(testDb.db);
+    const secret = "header-secret-not-for-client";
+    const agent = await repository.createAgentConnection({
+      name: "Header Eve",
+      baseUrl: "https://header.example.com",
+      authType: "header",
+      authConfigEncrypted: encryptAuthConfig({
+        headerName: "X-Agent-Key",
+        headerValue: secret,
+      }),
+    });
+
+    const defaults = await getAgentForEditPage(agent.id);
+
+    expect(defaults).toEqual({
+      id: agent.id,
+      name: "Header Eve",
+      baseUrl: "https://header.example.com",
+      authType: "header",
+      hasAuth: true,
+      headerName: "X-Agent-Key",
+    });
+    expect(JSON.stringify(defaults)).not.toContain(secret);
+    await expect(getAgentForEditPage("agent_missing")).resolves.toBeNull();
   });
 });
 

@@ -10,6 +10,19 @@ import { NativeSelect } from "@/components/native-select";
 
 type AuthType = "none" | "bearer" | "header";
 
+export type AgentConnectionFormInitialAgent = {
+  id: string;
+  name: string;
+  baseUrl: string;
+  authType: AuthType;
+  hasAuth: boolean;
+  headerName: string;
+};
+
+type AgentConnectionFormProps = {
+  initialAgent?: AgentConnectionFormInitialAgent;
+};
+
 type FormErrors = Partial<Record<"name" | "baseUrl" | "bearerToken" | "headerName" | "headerValue" | "submit", string>>;
 
 function isValidHttpUrl(value: string): boolean {
@@ -36,16 +49,21 @@ function FieldError({ message }: { message: string | undefined }): React.ReactEl
   );
 }
 
-export function AgentConnectionForm(): React.ReactElement {
+export function AgentConnectionForm({
+  initialAgent,
+}: AgentConnectionFormProps): React.ReactElement {
   const router = useRouter();
-  const [name, setName] = useState("");
-  const [baseUrl, setBaseUrl] = useState("");
-  const [authType, setAuthType] = useState<AuthType>("none");
+  const isEditing = initialAgent !== undefined;
+  const [name, setName] = useState(initialAgent?.name ?? "");
+  const [baseUrl, setBaseUrl] = useState(initialAgent?.baseUrl ?? "");
+  const [authType, setAuthType] = useState<AuthType>(initialAgent?.authType ?? "none");
   const [bearerToken, setBearerToken] = useState("");
-  const [headerName, setHeaderName] = useState("");
+  const [headerName, setHeaderName] = useState(initialAgent?.headerName ?? "");
   const [headerValue, setHeaderValue] = useState("");
   const [errors, setErrors] = useState<FormErrors>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const canPreserveSelectedSecret =
+    initialAgent?.hasAuth === true && authType === initialAgent.authType;
 
   function validate(): FormErrors {
     const nextErrors: FormErrors = {};
@@ -58,7 +76,7 @@ export function AgentConnectionForm(): React.ReactElement {
       nextErrors.baseUrl = "Base URL must be a valid http(s) URL.";
     }
 
-    if (authType === "bearer" && !bearerToken.trim()) {
+    if (authType === "bearer" && !bearerToken.trim() && !canPreserveSelectedSecret) {
       nextErrors.bearerToken = "Bearer token is required.";
     }
 
@@ -68,7 +86,7 @@ export function AgentConnectionForm(): React.ReactElement {
       } else if (!isValidHttpHeaderName(headerName.trim())) {
         nextErrors.headerName = "Header name must be a valid HTTP header name.";
       }
-      if (!headerValue.trim()) {
+      if (!headerValue.trim() && !canPreserveSelectedSecret) {
         nextErrors.headerValue = "Header value is required.";
       }
     }
@@ -91,19 +109,27 @@ export function AgentConnectionForm(): React.ReactElement {
       authType,
     };
 
-    if (authType === "bearer") {
+    if (authType === "bearer" && bearerToken.trim()) {
       payload.bearerToken = bearerToken;
     }
 
     if (authType === "header") {
       payload.headerName = headerName.trim();
-      payload.headerValue = headerValue;
+      if (headerValue.trim()) {
+        payload.headerValue = headerValue;
+      }
     }
+
+    const endpoint = isEditing ? "/api/agents/" + initialAgent.id : "/api/agents";
+    const method = isEditing ? "PATCH" : "POST";
+    const genericSubmitError = isEditing
+      ? "Unable to update agent. Please check the connection and try again."
+      : "Unable to register agent. Please check the connection and try again.";
 
     setIsSubmitting(true);
     try {
-      const response = await fetch("/api/agents", {
-        method: "POST",
+      const response = await fetch(endpoint, {
+        method,
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
       });
@@ -114,20 +140,24 @@ export function AgentConnectionForm(): React.ReactElement {
       }
 
       if (!response.ok) {
-        setErrors({ submit: "Unable to register agent. Please check the connection and try again." });
+        setErrors({ submit: genericSubmitError });
         return;
       }
 
       const body = (await response.json()) as { agent?: { id?: unknown } };
       if (typeof body.agent?.id !== "string") {
-        setErrors({ submit: "Unable to register agent. Please check the connection and try again." });
+        setErrors({ submit: genericSubmitError });
         return;
       }
 
-      router.push(`/agents/${body.agent.id}`);
+      if (isEditing) {
+        router.push("/agents");
+      } else {
+        router.push(`/agents/${body.agent.id}`);
+      }
       router.refresh();
     } catch {
-      setErrors({ submit: "Unable to register agent. Please check the connection and try again." });
+      setErrors({ submit: genericSubmitError });
     } finally {
       setIsSubmitting(false);
     }
@@ -177,6 +207,11 @@ export function AgentConnectionForm(): React.ReactElement {
             value={bearerToken}
             onChange={(event) => setBearerToken(event.target.value)}
           />
+          {canPreserveSelectedSecret && authType === "bearer" ? (
+            <p className="text-muted-foreground text-sm">
+              Leave blank to keep the current bearer token.
+            </p>
+          ) : null}
           <FieldError message={errors.bearerToken} />
         </div>
       ) : null}
@@ -202,6 +237,11 @@ export function AgentConnectionForm(): React.ReactElement {
               value={headerValue}
               onChange={(event) => setHeaderValue(event.target.value)}
             />
+            {canPreserveSelectedSecret && authType === "header" ? (
+              <p className="text-muted-foreground text-sm">
+                Leave blank to keep the current header value.
+              </p>
+            ) : null}
             <FieldError message={errors.headerValue} />
           </div>
         </>
@@ -210,7 +250,13 @@ export function AgentConnectionForm(): React.ReactElement {
       <FieldError message={errors.submit} />
 
       <Button type="submit" disabled={isSubmitting} className="justify-self-start">
-        {isSubmitting ? "Registering…" : "Register agent"}
+        {isSubmitting
+          ? isEditing
+            ? "Saving…"
+            : "Registering…"
+          : isEditing
+            ? "Save changes"
+            : "Register agent"}
       </Button>
     </form>
   );
