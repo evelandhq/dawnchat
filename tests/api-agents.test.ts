@@ -125,6 +125,31 @@ describe("Agent Connection API", () => {
     expect(server.requests[0].headers.authorization).toBe(`Bearer ${secret}`);
   });
 
+  it("rejects an already-registered normalized agent URL", async () => {
+    const server = await fakeServer();
+
+    const firstResponse = await postAgents({
+      name: "First Agent",
+      baseUrl: server.baseUrl,
+      authType: "none",
+    });
+    expect(firstResponse.status).toBe(201);
+
+    const duplicateResponse = await postAgents({
+      name: "Renamed Agent",
+      baseUrl: `${server.baseUrl}/?source=gateway#ignored`,
+      authType: "none",
+    });
+
+    expect(duplicateResponse.status).toBe(409);
+    await expect(readJson(duplicateResponse)).resolves.toEqual({ error: "Agent URL already registered" });
+    await expect(createRepository(testDb.db).listAgentConnections()).resolves.toHaveLength(1);
+    expect(server.requests.map((request) => `${request.method} ${request.path}`)).toEqual([
+      "GET /eve/v1/health",
+      "GET /eve/v1/info",
+    ]);
+  });
+
   it("lists created agent connections with redacted auth", async () => {
     const firstServer = await fakeServer();
     const secondServer = await fakeServer();

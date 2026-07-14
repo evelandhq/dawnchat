@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { createRepository, type AgentConnection } from "@/db/repository";
+import { createRepository, DuplicateAgentUrlError, type AgentConnection } from "@/db/repository";
 import { getDbClient } from "@/db/provider";
 import { checkEveAgent, type EveHealthCheckResult } from "@/eve/client";
 import { encryptAuthConfig } from "@/eve/auth";
@@ -71,7 +71,10 @@ export async function createAndCheckAgentConnection(body: unknown): Promise<Resp
     const checked = await repository.updateAgentHealth(created.id, { status: check.status, lastCheckedAt: new Date() });
 
     return jsonResponse(createCheckResponse(checked, check), { status: 201 });
-  } catch {
+  } catch (error) {
+    if (error instanceof DuplicateAgentUrlError) {
+      return jsonResponse({ error: error.message }, { status: 409 });
+    }
     return unknownErrorResponse();
   }
 }

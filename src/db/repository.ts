@@ -1,5 +1,6 @@
 import { and, asc, eq, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
+import { DatabaseError } from "pg";
 import { z } from "zod";
 
 import { createId } from "@/lib/ids";
@@ -116,6 +117,32 @@ function mapEvent(row: typeof events.$inferSelect): EveEvent {
   };
 }
 
+const duplicateAgentUrlConstraint = "agent_connections_base_url_unique";
+
+export class DuplicateAgentUrlError extends Error {
+  constructor(cause: unknown) {
+    super("Agent URL already registered", { cause });
+    this.name = "DuplicateAgentUrlError";
+  }
+}
+
+function isDuplicateAgentUrlError(error: unknown): boolean {
+  let current = error;
+
+  while (current instanceof Error) {
+    if (
+      current instanceof DatabaseError &&
+      current.code === "23505" &&
+      current.constraint === duplicateAgentUrlConstraint
+    ) {
+      return true;
+    }
+    current = current.cause;
+  }
+
+  return false;
+}
+
 export function createRepository(db: RepositoryDb): Repository {
   return {
     async createAgentConnection(input) {
@@ -132,8 +159,15 @@ export function createRepository(db: RepositoryDb): Repository {
         updatedAt: now,
       };
 
-      const [created] = await db.insert(agentConnections).values(record).returning();
-      return created;
+      try {
+        const [created] = await db.insert(agentConnections).values(record).returning();
+        return created;
+      } catch (error) {
+        if (isDuplicateAgentUrlError(error)) {
+          throw new DuplicateAgentUrlError(error);
+        }
+        throw error;
+      }
     },
 
     async listAgentConnections() {
