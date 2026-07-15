@@ -3,6 +3,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:
 import type { ClientOptions } from "eve/client";
 
 import type { AuthType } from "@/db/schema";
+import { readValidatedAuthSecret } from "@/lib/server/auth-secret";
 
 export interface EveAgentConnectionLike {
   readonly baseUrl: string;
@@ -60,10 +61,9 @@ function decryptAuthConfig(raw: string): string {
 }
 
 function getAuthConfigEncryptionKey(): Buffer {
-  const secret = process.env.AUTH_SECRET?.trim();
-  if (!secret || secret === "replace-with-local-dev-secret" || secret === "replace-with-a-local-secret") {
-    throw new Error("AUTH_SECRET is required to encrypt agent auth configuration");
-  }
+  const secret = readValidatedAuthSecret(
+    "AUTH_SECRET is required to encrypt agent auth configuration",
+  );
 
   return createHash("sha256").update(AUTH_CONFIG_KEY_CONTEXT).update("\0").update(secret).digest();
 }

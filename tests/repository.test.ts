@@ -33,6 +33,7 @@ describe("repository", () => {
       baseUrl: "https://support.example.com",
       authType: "none",
       authConfigEncrypted: null,
+      securityRevision: 1,
       status: "unknown",
     });
     expect(created.id).toMatch(/^agent_[a-f0-9]{16}$/);
