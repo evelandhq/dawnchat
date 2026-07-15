@@ -141,7 +141,8 @@ describe("Agent Connection API", () => {
       "GET /eve/v1/health",
       "GET /eve/v1/info",
     ]);
-    expect(server.requests[0].headers.authorization).toBe(`Bearer ${secret}`);
+    expect(server.requests[0].headers.authorization).toBeUndefined();
+    expect(server.requests[1].headers.authorization).toBe(`Bearer ${secret}`);
   });
 
   it("rejects an already-registered normalized agent URL", async () => {
@@ -416,9 +417,13 @@ describe("Agent Connection API", () => {
       info: expect.objectContaining({ name: "Fake Eve Agent" }),
     });
     expectNoSecretLeak(body, secret);
-    for (const request of server.requests.slice(requestCountBeforeEdit)) {
-      expect(request.headers.authorization).toBe("Bearer " + secret);
-    }
+    const editedRequests = server.requests.slice(requestCountBeforeEdit);
+    expect(editedRequests.map((request) => request.path)).toEqual([
+      "/eve/v1/health",
+      "/eve/v1/info",
+    ]);
+    expect(editedRequests[0].headers.authorization).toBeUndefined();
+    expect(editedRequests[1].headers.authorization).toBe("Bearer " + secret);
   });
 
   it("preserves a custom header value while allowing its header name to change", async () => {
@@ -446,10 +451,13 @@ describe("Agent Connection API", () => {
     expect(response.status).toBe(200);
     const editedRequests = server.requests.slice(requestCountBeforeEdit);
     expect(editedRequests).toHaveLength(2);
-    for (const request of editedRequests) {
-      expect(request.headers["x-new-key"]).toBe(secret);
-      expect(request.headers["x-old-key"]).toBeUndefined();
-    }
+    expect(editedRequests.map((request) => request.path)).toEqual([
+      "/eve/v1/health",
+      "/eve/v1/info",
+    ]);
+    expect(editedRequests[0].headers["x-new-key"]).toBeUndefined();
+    expect(editedRequests[1].headers["x-new-key"]).toBe(secret);
+    expect(editedRequests.every((request) => request.headers["x-old-key"] === undefined)).toBe(true);
   });
 
   it("accepts an edit whose automatic health check is unreachable", async () => {
@@ -522,9 +530,13 @@ describe("Agent Connection API", () => {
     });
 
     expect(bearerResponse.status).toBe(200);
-    for (const request of server.requests.slice(requestCountBeforeBearer)) {
-      expect(request.headers.authorization).toBe("Bearer " + secret);
-    }
+    const bearerRequests = server.requests.slice(requestCountBeforeBearer);
+    expect(bearerRequests.map((request) => request.path)).toEqual([
+      "/eve/v1/health",
+      "/eve/v1/info",
+    ]);
+    expect(bearerRequests[0].headers.authorization).toBeUndefined();
+    expect(bearerRequests[1].headers.authorization).toBe("Bearer " + secret);
 
     const noneResponse = await patchAgent(created.agent.id, {
       name: "Public Again",

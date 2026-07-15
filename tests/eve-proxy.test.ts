@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { resetAgentAuthModuleForTests } from "@/agent-auth/runtime.server";
 import { setDbClientForTests } from "@/db/provider";
 import { createRepository } from "@/db/repository";
 import { startFakeEveServer, type FakeEveServer } from "@/eve/fake-eve-server.test-helper";
@@ -62,9 +63,11 @@ describe("per-chat Eve protocol proxy", () => {
   beforeEach(async () => {
     testDb = await createTestDbHandle();
     setDbClientForTests(testDb.db);
+    resetAgentAuthModuleForTests();
   });
 
   afterEach(async () => {
+    resetAgentAuthModuleForTests();
     setDbClientForTests(null);
     await testDb.close();
     await Promise.all(servers.splice(0).map((server) => server.close()));

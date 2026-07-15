@@ -202,12 +202,24 @@ describe("Agent transport base URL and SSRF policy", () => {
       allowlistedHostnames: ["LOCALHOST"],
     });
 
-    await transport.request(outboundRequest("http://localhost:3011/local-agent"));
-
+    await expect(
+      transport.request(outboundRequest("http://localhost:3000/deployment")),
+    ).resolves.toBeInstanceOf(Response);
     expect(fetchImpl).toHaveBeenCalledOnce();
     expect(resolveHostname).not.toHaveBeenCalled();
   });
 
+  it("still rejects public HTTP hosts that are outside the exact insecure allowlist", async () => {
+    const { fetchImpl, transport } = policyHarness({
+      allowInsecureHttp: true,
+      allowlistedHostnames: ["localhost", "127.0.0.1", "::1"],
+    });
+
+    await expectPolicyFailure(
+      transport.request(outboundRequest("http://agent.example/deployment")),
+      fetchImpl,
+    );
+  });
   it("does not treat a suffix lookalike as an exact allowlist match", async () => {
     const { fetchImpl, transport } = policyHarness({
       addresses: ["127.0.0.1"],

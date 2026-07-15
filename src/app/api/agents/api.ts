@@ -352,5 +352,8 @@ function createCheckResponse(agent: AgentConnection, check: EveHealthCheckResult
     agent: redactAgentConnection(agent),
     ...(check.info === undefined ? {} : { info: check.info }),
     ...(check.error === undefined ? {} : { error: check.error }),
+    ...("authFailure" in check && check.authFailure !== undefined
+      ? { authFailure: check.authFailure }
+      : {}),
   };
 }

@@ -1,24 +1,18 @@
-import { createServer, type Server } from "node:http";
 import { once } from "node:events";
+import { createServer, type Server } from "node:http";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { checkEveAgent, createEveClientForConnection } from "@/eve/client";
+import type { AgentAuthModule } from "@/agent-auth/contracts";
+import {
+  resetAgentAuthModuleForTests,
+  setAgentAuthModuleForTests,
+} from "@/agent-auth/runtime.server";
+import { setDbClientForTests } from "@/db/provider";
+import { createRepository, type AgentConnection } from "@/db/repository";
+import { checkEveAgent } from "@/eve/client";
 import { startFakeEveServer, type FakeEveServer } from "@/eve/fake-eve-server.test-helper";
-
-function connection(
-  baseUrl: string,
-  overrides: Partial<Parameters<typeof createEveClientForConnection>[0]> = {},
-) {
-  return {
-    id: "agent_test",
-    name: "Fake Eve Agent",
-    baseUrl,
-    authType: "none" as const,
-    authConfigEncrypted: null,
-    ...overrides,
-  };
-}
+import { createTestDbHandle, type TestDbHandle } from "@/test/db";
 
 async function startRedirectTargetServer(): Promise<{
   baseUrl: string;
@@ -56,8 +50,18 @@ async function closeServer(server: Server): Promise<void> {
 
 describe("Eve client connector", () => {
   const servers: FakeEveServer[] = [];
+  let testDb: TestDbHandle;
+
+  beforeEach(async () => {
+    testDb = await createTestDbHandle();
+    setDbClientForTests(testDb.db);
+    resetAgentAuthModuleForTests();
+  });
 
   afterEach(async () => {
+    resetAgentAuthModuleForTests();
+    setDbClientForTests(null);
+    await testDb.close();
     await Promise.all(servers.splice(0).map((server) => server.close()));
   });
 
@@ -67,10 +71,22 @@ describe("Eve client connector", () => {
     return server;
   }
 
+  async function connection(
+    baseUrl: string,
+    overrides: Partial<Pick<AgentConnection, "authType" | "authConfigEncrypted">> = {},
+  ): Promise<AgentConnection> {
+    return createRepository(testDb.db).createAgentConnection({
+      name: "Fake Eve Agent",
+      baseUrl,
+      authType: overrides.authType ?? "none",
+      authConfigEncrypted: overrides.authConfigEncrypted ?? null,
+    });
+  }
+
   it("checks remote Eve health and inspection info", async () => {
     const server = await fakeServer();
 
-    await expect(checkEveAgent(connection(server.baseUrl))).resolves.toEqual({
+    await expect(checkEveAgent(await connection(server.baseUrl))).resolves.toEqual({
       status: "healthy",
       info: expect.objectContaining({ name: "Fake Eve Agent" }),
     });
@@ -86,15 +102,41 @@ describe("Eve client connector", () => {
     await server.close();
     servers.pop();
 
-    const result = await checkEveAgent(connection(baseUrl));
+    const result = await checkEveAgent(await connection(baseUrl));
 
     expect(result.status).toBe("unreachable");
     expect(result.error).toEqual(expect.any(String));
   });
 
-  it("sends bearer auth to health and info requests", async () => {
+  it("does not expose malformed upstream health body contents", async () => {
+    const secretDiagnostic = "not-json-secret-health-diagnostic";
+    const server = await fakeServer({ rawHealthBody: secretDiagnostic });
+
+    const result = await checkEveAgent(await connection(server.baseUrl));
+
+    expect(result).toEqual({ status: "unreachable", error: "Eve health check failed" });
+    expect(JSON.stringify(result)).not.toContain(secretDiagnostic);
+  });
+
+  it("rejects metadata and private health targets through the shared transport policy", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(Response.json({ status: "ok" }));
+    try {
+      const result = await checkEveAgent(
+        await connection("https://169.254.169.254/latest/meta-data"),
+      );
+
+      expect(result.status).toBe("unreachable");
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("keeps health anonymous and sends bearer auth only to protected info", async () => {
     const server = await fakeServer();
-    const secured = connection(server.baseUrl, {
+    const secured = await connection(server.baseUrl, {
       authType: "bearer",
       authConfigEncrypted: JSON.stringify({ bearerToken: "test-token" }),
     });
@@ -102,16 +144,17 @@ describe("Eve client connector", () => {
     await checkEveAgent(secured);
 
     expect(server.requests).toHaveLength(2);
-    for (const request of server.requests) {
-      expect(request.headers.authorization).toBe("Bearer test-token");
-    }
+    expect(server.requests[0]).toMatchObject({ path: "/eve/v1/health" });
+    expect(server.requests[0].headers.authorization).toBeUndefined();
+    expect(server.requests[1]).toMatchObject({ path: "/eve/v1/info" });
+    expect(server.requests[1].headers.authorization).toBe("Bearer test-token");
   });
 
-  it("sends configured custom header auth to health and info requests", async () => {
+  it("keeps health anonymous and sends configured custom auth only to protected info", async () => {
     const server = await fakeServer();
 
     await checkEveAgent(
-      connection(server.baseUrl, {
+      await connection(server.baseUrl, {
         authType: "header",
         authConfigEncrypted: JSON.stringify({
           headerName: "X-Agent-Token",
@@ -121,16 +164,17 @@ describe("Eve client connector", () => {
     );
 
     expect(server.requests).toHaveLength(2);
-    for (const request of server.requests) {
-      expect(request.headers["x-agent-token"]).toBe("header-secret");
-    }
+    expect(server.requests[0]).toMatchObject({ path: "/eve/v1/health" });
+    expect(server.requests[0].headers["x-agent-token"]).toBeUndefined();
+    expect(server.requests[1]).toMatchObject({ path: "/eve/v1/info" });
+    expect(server.requests[1].headers["x-agent-token"]).toBe("header-secret");
   });
 
-  it("does not follow redirects for credential-bearing health checks", async () => {
+  it("does not follow health redirects and never sends credentials to health or its redirect", async () => {
     const redirectTarget = await startRedirectTargetServer();
     try {
       const server = await fakeServer({ redirectHealthTo: redirectTarget.baseUrl });
-      const secured = connection(server.baseUrl, {
+      const secured = await connection(server.baseUrl, {
         authType: "bearer",
         authConfigEncrypted: JSON.stringify({ bearerToken: "test-token" }),
       });
@@ -140,9 +184,46 @@ describe("Eve client connector", () => {
       expect(result.status).toBe("unreachable");
       expect(redirectTarget.requests).toEqual([]);
       expect(server.requests).toHaveLength(1);
-      expect(server.requests[0].headers.authorization).toBe("Bearer test-token");
+      expect(server.requests[0].headers.authorization).toBeUndefined();
     } finally {
       await redirectTarget.close();
     }
+  });
+
+  it("uses AgentAuthModule for info and preserves auth failure while liveness stays healthy", async () => {
+    const server = await fakeServer();
+    const secured = await connection(server.baseUrl, {
+      authType: "bearer",
+      authConfigEncrypted: JSON.stringify({ bearerToken: "must-not-be-read" }),
+    });
+    const calls: Parameters<AgentAuthModule["request"]>[] = [];
+    const authFailure = {
+      code: "interaction_required" as const,
+      method: "oidc-authorization-code",
+      message: "Sign in is required",
+    };
+    setAgentAuthModuleForTests({
+      async request(...args) {
+        calls.push(args);
+        return authFailure;
+      },
+      async status() {
+        return { state: "interaction_required" };
+      },
+    });
+
+    await expect(checkEveAgent(secured)).resolves.toEqual({
+      status: "healthy",
+      authFailure,
+    });
+    expect(calls).toEqual([
+      [
+        { agentConnectionId: secured.id, principalId: "" },
+        { pathname: "/eve/v1/info" },
+      ],
+    ]);
+    expect(server.requests).toHaveLength(1);
+    expect(server.requests[0]).toMatchObject({ method: "GET", path: "/eve/v1/health" });
+    expect(server.requests[0].headers.authorization).toBeUndefined();
   });
 });

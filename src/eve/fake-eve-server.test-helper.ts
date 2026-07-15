@@ -12,6 +12,7 @@ export interface CapturedEveRequest {
 export interface FakeEveServerOptions {
   readonly omitContinuationTokenOnContinue?: boolean;
   readonly redirectHealthTo?: string;
+  readonly rawHealthBody?: string;
   readonly failCreateSession?: boolean;
   readonly streamEvents?: readonly unknown[];
   /** Emit stream events without ending the response, like eve 0.18.x agents. */
@@ -76,7 +77,12 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
       }
 
       if (request.method === "GET" && url.pathname === "/eve/v1/health") {
-        writeJson(response, 200, { ok: true, status: "ready", workflowId: "fake-workflow", name: "Fake Eve Agent" });
+        if (options.rawHealthBody !== undefined) {
+          response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+          response.end(options.rawHealthBody);
+        } else {
+          writeJson(response, 200, { ok: true, status: "ready", workflowId: "fake-workflow", name: "Fake Eve Agent" });
+        }
         return;
       }
 

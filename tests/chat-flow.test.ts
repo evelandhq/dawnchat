@@ -82,7 +82,7 @@ describe("Eve chat flow smoke", () => {
       "GET /eve/v1/health",
       "GET /eve/v1/info",
       "POST /eve/v1/session",
-      "GET /eve/v1/session/ses_1/stream",
+      "GET /eve/v1/session/ses_1/stream?startIndex=0",
       "POST /eve/v1/session/ses_1",
       "GET /eve/v1/session/ses_1/stream?startIndex=3",
     ]);

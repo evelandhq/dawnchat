@@ -327,6 +327,26 @@ describe("Agent transport request construction", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]!.url).toBe("https://agent.example/deploy/api/safe");
   });
+
+  it("late-binds the default fetch implementation after transport construction", async () => {
+    const originalFetch = globalThis.fetch;
+    const initialFetch = vi.fn(async () => new Response("initial"));
+    const replacementFetch = vi.fn(async () => new Response("replacement"));
+    globalThis.fetch = initialFetch as typeof fetch;
+    const transport = createAgentTransport({
+      resolveHostname: async () => ["93.184.216.34"],
+    });
+    globalThis.fetch = replacementFetch as typeof fetch;
+
+    try {
+      await transport.request(request({ kind: "none" }));
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(initialFetch).not.toHaveBeenCalled();
+    expect(replacementFetch).toHaveBeenCalledOnce();
+  });
 });
 
 describe("Agent transport credential header policy", () => {

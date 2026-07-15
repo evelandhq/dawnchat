@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from "node:util";
+
 import { and, asc, eq, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { DatabaseError } from "pg";
@@ -74,6 +76,22 @@ export type AppendEventInput = {
     }
 );
 
+export type PersistStreamEventInput = {
+  chatId: string;
+  sessionId: string;
+  streamIndex: number;
+  type: string;
+  payload: unknown;
+  status?: ChatStatus;
+};
+
+export type PersistStreamEventResult = {
+  event: EveEvent;
+  inserted: boolean;
+  advanced: boolean;
+  chat: Chat;
+};
+
 export type Repository = {
   createAgentConnection(input: CreateAgentConnectionInput): Promise<AgentConnection>;
   listAgentConnections(): Promise<AgentConnection[]>;
@@ -85,6 +103,7 @@ export type Repository = {
   listChats(): Promise<Chat[]>;
   getChat(id: string): Promise<Chat | null>;
   appendEvent(input: AppendEventInput): Promise<EveEvent>;
+  persistStreamEvent(input: PersistStreamEventInput): Promise<PersistStreamEventResult>;
   listEvents(chatId: string): Promise<EveEvent[]>;
   clearPendingUserMessage(chatId: string): Promise<Chat>;
   updateChatSessionState(chatId: string, state: SessionState, status?: ChatStatus): Promise<Chat>;
@@ -313,6 +332,97 @@ export function createRepository(db: RepositoryDb): Repository {
       });
     },
 
+    async persistStreamEvent(input) {
+      return db.transaction(async (tx) => {
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${input.chatId}))`);
+
+        const [chatRow] = await tx
+          .select()
+          .from(chats)
+          .where(eq(chats.id, input.chatId))
+          .limit(1);
+        if (!chatRow) {
+          throw new Error(`Chat not found: ${input.chatId}`);
+        }
+        const session = parseSessionState(chatRow.sessionStateJson);
+        if (!session || session.sessionId !== input.sessionId) {
+          throw new Error("Eve session does not belong to this chat");
+        }
+        const cursor = session.streamIndex ?? 0;
+        if (
+          !Number.isInteger(input.streamIndex) ||
+          input.streamIndex < 0 ||
+          input.streamIndex > 2_147_483_647
+        ) {
+          throw new Error("Eve stream index is invalid");
+        }
+
+        const [existingRow] = await tx
+          .select()
+          .from(events)
+          .where(
+            and(
+              eq(events.chatId, input.chatId),
+              eq(events.sessionId, input.sessionId),
+              eq(events.streamIndex, input.streamIndex),
+            ),
+          )
+          .limit(1);
+
+        let event: EveEvent;
+        let inserted = false;
+        if (existingRow) {
+          event = mapEvent(existingRow);
+          if (event.type !== input.type || !isDeepStrictEqual(event.payload, input.payload)) {
+            throw new Error("Eve replay conflicts with the persisted event");
+          }
+        } else {
+          const eventIndex = Number(
+            (
+              await tx
+                .select({ value: sql<number>`coalesce(max(${events.eventIndex}), 0) + 1` })
+                .from(events)
+                .where(eq(events.chatId, input.chatId))
+            )[0]?.value ?? 1,
+          );
+          const [created] = await tx
+            .insert(events)
+            .values({
+              id: createId("evt"),
+              chatId: input.chatId,
+              eventIndex,
+              sessionId: input.sessionId,
+              streamIndex: input.streamIndex,
+              type: input.type,
+              payloadJson: JSON.stringify(input.payload),
+              createdAt: new Date(),
+            })
+            .returning();
+          event = mapEvent(created);
+          inserted = true;
+        }
+
+        let resultChat = mapChat(chatRow);
+        const advanced = input.streamIndex === cursor;
+        if (advanced) {
+          const nextState: SessionState = { ...session, streamIndex: cursor + 1 };
+          const nextStatus = monotonicChatStatus(chatRow.status, input.status);
+          const [updated] = await tx
+            .update(chats)
+            .set({
+              sessionStateJson: JSON.stringify(nextState),
+              status: nextStatus,
+              updatedAt: new Date(),
+            })
+            .where(eq(chats.id, input.chatId))
+            .returning();
+          resultChat = mapChat(updated);
+        }
+
+        return { event, inserted, advanced, chat: resultChat };
+      });
+    },
+
     async listEvents(chatId) {
       const rows = await db
         .select()
@@ -368,4 +478,11 @@ export function createRepository(db: RepositoryDb): Repository {
       return mapChat(updated);
     },
   };
+}
+
+function monotonicChatStatus(current: ChatStatus, requested: ChatStatus | undefined): ChatStatus {
+  if (current === "completed" || current === "failed") {
+    return current;
+  }
+  return requested ?? current;
 }

@@ -34,7 +34,10 @@ export type AgentTransportFetch = (input: URL, init: RequestInit) => Promise<Res
 export type HostnameResolver = (hostname: string) => Promise<readonly string[]>;
 
 export interface AgentTransportPolicy {
-  /** Disabled by default. Deployment configuration must opt into plaintext HTTP. */
+  /**
+   * Disabled by default. When enabled, plaintext HTTP is still accepted only
+   * for exact entries in `allowlistedHostnames`.
+   */
   readonly allowInsecureHttp?: boolean;
   /**
    * Exact hostname exceptions for deployment-owned targets such as local dev.
@@ -151,7 +154,7 @@ class DefaultAgentTransport implements AgentTransport {
   readonly #allowlistedHostnames: ReadonlySet<string>;
 
   constructor(options: CreateAgentTransportOptions) {
-    this.#fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
+    this.#fetch = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
     this.#resolveHostname = options.resolveHostname ?? defaultHostnameResolver;
     this.#allowInsecureHttp = options.policy?.allowInsecureHttp === true;
     this.#allowlistedHostnames = new Set(
@@ -160,7 +163,11 @@ class DefaultAgentTransport implements AgentTransport {
   }
 
   async request(request: AgentTransportRequest): Promise<Response> {
-    const prepared = prepareRequest(request, this.#allowInsecureHttp);
+    const prepared = prepareRequest(
+      request,
+      this.#allowInsecureHttp,
+      this.#allowlistedHostnames,
+    );
     await this.#enforceAddressPolicy(prepared.hostname);
 
     try {
@@ -244,6 +251,7 @@ async function defaultHostnameResolver(hostname: string): Promise<readonly strin
 function prepareRequest(
   request: AgentTransportRequest,
   allowInsecureHttp: boolean,
+  allowlistedHostnames: ReadonlySet<string>,
 ): PreparedRequest {
   try {
     const preparedInit = request.init;
@@ -258,7 +266,7 @@ function prepareRequest(
     const pathname = target.pathname;
     const searchParams = target.searchParams;
 
-    const url = parseBaseUrl(baseUrl, allowInsecureHttp);
+    const url = parseBaseUrl(baseUrl, allowInsecureHttp, allowlistedHostnames);
     validatePathname(pathname);
 
     const { method, body, signal } = preparedInit;
@@ -317,7 +325,11 @@ function isAbortSignal(value: unknown): value is AbortSignal {
   );
 }
 
-function parseBaseUrl(baseUrl: string, allowInsecureHttp: boolean): URL {
+function parseBaseUrl(
+  baseUrl: string,
+  allowInsecureHttp: boolean,
+  allowlistedHostnames: ReadonlySet<string>,
+): URL {
   if (
     typeof baseUrl !== "string" ||
     RAW_CONTROL.test(baseUrl) ||
@@ -337,7 +349,10 @@ function parseBaseUrl(baseUrl: string, allowInsecureHttp: boolean): URL {
   if (url.protocol !== "https:" && url.protocol !== "http:") {
     throw configurationError();
   }
-  if (url.protocol === "http:" && !allowInsecureHttp) {
+  if (
+    url.protocol === "http:" &&
+    (!allowInsecureHttp || !allowlistedHostnames.has(normalizeHostname(url.hostname)))
+  ) {
     throw configurationError();
   }
   if (
