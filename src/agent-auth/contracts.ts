@@ -7,6 +7,31 @@ export interface AgentAuthTarget {
   readonly principalId: string;
 }
 
+/** A structured outbound target; query data must never be embedded in pathname. */
+export interface AgentRequestTarget {
+  readonly pathname: string;
+  readonly searchParams?: Readonly<Record<string, string>>;
+}
+
+/**
+ * Replayable outbound request data. Transport-owned headers, bodies, and redirect
+ * behavior are intentionally absent from this public contract.
+ */
+export interface AgentRequestInit {
+  readonly method?: "GET" | "POST";
+  readonly jsonBody?: unknown;
+  readonly signal?: AbortSignal;
+}
+
+export interface InteractionContext {
+  readonly chatId: string;
+}
+
+export interface AuthInteraction {
+  readonly type: "redirect";
+  readonly url: string;
+}
+
 export type CredentialSnapshot =
   | { readonly kind: "none" }
   | { readonly kind: "basic"; readonly username: string; readonly password: string }
@@ -26,6 +51,29 @@ export type AgentAuthFailureCode =
   | "provider_unavailable"
   | "upstream_unavailable"
   | "retry_required";
+
+export interface AgentAuthFailure {
+  readonly code: AgentAuthFailureCode;
+  readonly method: string;
+  readonly message: string;
+  readonly interaction?: AuthInteraction;
+}
+
+export type AgentAuthStatus =
+  | { readonly state: "not_required" }
+  | { readonly state: "credential_available" }
+  | { readonly state: "interaction_required"; readonly interaction?: AuthInteraction }
+  | { readonly state: "misconfigured"; readonly message: string };
+
+export interface AgentAuthModule {
+  request(
+    target: AgentAuthTarget,
+    req: AgentRequestTarget,
+    init?: AgentRequestInit,
+    interaction?: InteractionContext,
+  ): Promise<Response | AgentAuthFailure>;
+  status(target: AgentAuthTarget, interaction?: InteractionContext): Promise<AgentAuthStatus>;
+}
 
 export interface ProviderFailure {
   readonly code: AgentAuthFailureCode;
