@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 
 import { AppHeader } from "@/components/app-header";
 import { SidebarProvider } from "@/components/ui/sidebar";
@@ -9,6 +9,11 @@ const pathnameState = vi.hoisted(() => ({ value: "/" }));
 
 vi.mock("next/navigation", () => ({
   usePathname: () => pathnameState.value,
+}));
+
+vi.mock("next/link", () => ({
+  default: ({ href, children, ...props }: React.AnchorHTMLAttributes<HTMLAnchorElement> & { href: string }) =>
+    React.createElement("a", { href, ...props }, children),
 }));
 
 const agents = [
@@ -46,7 +51,16 @@ describe("AppHeader", () => {
     expect(screen.getByText("healthy")).toBeInTheDocument();
   });
 
-  it("falls back to the product title outside an explicit agent or chat route", () => {
+  it("opens a menu with Agent Info and New Chat next to the agent name", () => {
+    renderHeader("/agents/agent_a");
+
+    fireEvent.keyDown(screen.getByRole("button", { name: /Data Bot/ }), { key: "Enter" });
+
+    expect(screen.getByRole("menuitem", { name: "Agent Info" })).toHaveAttribute("href", "/agents/agent_a/edit");
+    expect(screen.getByRole("menuitem", { name: "New Chat" })).toHaveAttribute("href", "/agents/agent_a");
+  });
+
+  it("shows no title outside an explicit agent or chat route", () => {
     pathnameState.value = "/agents";
     const { rerender } = render(
       <SidebarProvider>
@@ -54,7 +68,7 @@ describe("AppHeader", () => {
       </SidebarProvider>,
     );
 
-    expect(screen.getByText("Eve Chats")).toBeInTheDocument();
+    expect(screen.queryByText("Eve Chats")).not.toBeInTheDocument();
     expect(screen.queryByText("healthy")).not.toBeInTheDocument();
 
     pathnameState.value = "/agents/new";
@@ -64,6 +78,6 @@ describe("AppHeader", () => {
       </SidebarProvider>,
     );
 
-    expect(screen.getByText("Eve Chats")).toBeInTheDocument();
+    expect(screen.queryByText("Eve Chats")).not.toBeInTheDocument();
   });
 });

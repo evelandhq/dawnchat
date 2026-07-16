@@ -1,6 +1,5 @@
 import Link from "next/link";
 import type { Route } from "next";
-import { Sparkles } from "lucide-react";
 
 import { createRepository } from "@/db/repository";
 import { getDbClient } from "@/db/provider";
@@ -11,6 +10,7 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
+  SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { SidebarNav, type SidebarAgentItem, type SidebarChatItem } from "@/components/sidebar-nav";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -45,23 +45,21 @@ export async function AppSidebar({ data }: AppSidebarProps = {}): Promise<React.
 
   return (
     <Sidebar>
-      <SidebarHeader className="border-sidebar-border h-14 flex-row items-center gap-1 border-b">
+      <SidebarHeader className="h-14 flex-row items-center gap-1">
         <SidebarMenu className="min-w-0 flex-1">
           <SidebarMenuItem>
             <SidebarMenuButton asChild className="h-10">
               <Link href={"/" as Route}>
-                <div className="bg-primary text-primary-foreground flex size-8 items-center justify-center rounded-lg">
-                  <Sparkles className="size-4" />
-                </div>
-                <span className="text-base font-semibold">Eve Chats</span>
+                <span className="text-base font-semibold">EveChats</span>
               </Link>
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>
         <ThemeToggle />
+        <SidebarTrigger />
       </SidebarHeader>
       <SidebarContent>
-        <SidebarNav agents={navigationData.agents} chats={navigationData.chats} />
+        <SidebarNav chats={navigationData.chats} />
       </SidebarContent>
     </Sidebar>
   );

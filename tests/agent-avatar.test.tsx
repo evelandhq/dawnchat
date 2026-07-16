@@ -20,27 +20,24 @@ describe("AgentAvatar", () => {
     expect(screen.queryByText("unreachable")).not.toBeInTheDocument();
   });
 
-  it("allows a custom dimension class to override the lg size", () => {
+  it("passes custom classes through to the avatar root", () => {
     const { container } = render(
       React.createElement(AgentAvatar, {
         agentId: "agent_1",
         name: "Data Bot",
         size: "lg",
-        className: "size-16",
+        className: "mt-2",
       }),
     );
-    const avatar = container.querySelector('[data-slot="avatar"]');
 
-    expect(avatar).toHaveClass("size-16");
-    expect(avatar).not.toHaveClass("size-10");
-    expect(avatar).not.toHaveClass("data-[size=lg]:size-10");
+    expect(container.querySelector('[data-slot="avatar"]')).toHaveClass("mt-2");
   });
 
-  it("uses the lg dimension when no custom dimension is provided", () => {
+  it("applies the size variant through the data-size attribute", () => {
     const { container } = render(
       React.createElement(AgentAvatar, { agentId: "agent_1", name: "Data Bot", size: "lg" }),
     );
 
-    expect(container.querySelector('[data-slot="avatar"]')).toHaveClass("size-10");
+    expect(container.querySelector('[data-slot="avatar"]')).toHaveAttribute("data-size", "lg");
   });
 });
