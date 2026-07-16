@@ -1,9 +1,20 @@
 "use client";
 
+import Link from "next/link";
+import type { Route } from "next";
 import { usePathname } from "next/navigation";
+import { ChevronDown, Info, MessageSquarePlus } from "lucide-react";
 
 import { StatusBadge } from "@/components/status-badge";
-import { SidebarTrigger } from "@/components/ui/sidebar";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { SidebarTrigger, useSidebar } from "@/components/ui/sidebar";
 import type { SidebarAgentItem, SidebarChatItem } from "@/components/sidebar-nav";
 import { deriveCurrentAgentId } from "@/lib/current-agent";
 
@@ -14,6 +25,8 @@ type AppHeaderProps = {
 
 export function AppHeader({ agents, chats }: AppHeaderProps): React.ReactElement {
   const pathname = usePathname();
+  const { state, isMobile } = useSidebar();
+  const showSidebarTrigger = isMobile || state === "collapsed";
   const currentAgentId = deriveCurrentAgentId(
     pathname,
     chats,
@@ -27,16 +40,37 @@ export function AppHeader({ agents, chats }: AppHeaderProps): React.ReactElement
     isExplicitAgentRoute || isExplicitChatRoute ? agents.find((agent) => agent.id === currentAgentId) : undefined;
 
   return (
-    <header className="flex h-14 shrink-0 items-center gap-2 border-b px-4">
-      <SidebarTrigger className="-ml-1" />
+    <header className="flex h-14 shrink-0 items-center gap-2 px-4">
+      {showSidebarTrigger ? <SidebarTrigger className="-ml-1" /> : null}
       {currentAgent ? (
         <div className="flex min-w-0 items-center gap-2">
-          <span className="truncate text-sm font-medium">{currentAgent.name}</span>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="sm" className="min-w-0 px-2">
+                <span className="truncate text-sm font-medium">{currentAgent.name}</span>
+                <ChevronDown data-icon="inline-end" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start">
+              <DropdownMenuGroup>
+                <DropdownMenuItem asChild>
+                  <Link href={`/agents/${currentAgent.id}/edit` as Route}>
+                    <Info />
+                    Agent Info
+                  </Link>
+                </DropdownMenuItem>
+                <DropdownMenuItem asChild>
+                  <Link href={`/agents/${currentAgent.id}` as Route}>
+                    <MessageSquarePlus />
+                    New Chat
+                  </Link>
+                </DropdownMenuItem>
+              </DropdownMenuGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
           <StatusBadge status={currentAgent.status} />
         </div>
-      ) : (
-        <span className="text-sm font-medium">Eve Chats</span>
-      )}
+      ) : null}
     </header>
   );
 }

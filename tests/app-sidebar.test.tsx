@@ -28,17 +28,25 @@ describe("AppSidebar", () => {
     await testDb.close();
   });
 
-  it("places the theme toggle beside the Eve Chats title and omits the footer Agents link", async () => {
+  it("places the theme toggle beside the EveChats title without a header divider", async () => {
     const sidebar = await AppSidebar();
     const { container } = render(<SidebarProvider>{sidebar}</SidebarProvider>);
     const header = container.querySelector('[data-sidebar="header"]');
 
     expect(header).not.toBeNull();
-    expect(header).toHaveClass("h-14", "flex-row", "items-center", "border-b");
-    const brandLink = within(header as HTMLElement).getByRole("link", { name: "Eve Chats" });
+    expect(header).toHaveClass("h-14", "flex-row", "items-center");
+    expect(header).not.toHaveClass("border-b");
+    const brandLink = within(header as HTMLElement).getByRole("link", { name: "EveChats" });
     expect(brandLink).toHaveClass("h-10");
     expect(within(header as HTMLElement).getByRole("button", { name: "Toggle theme" })).toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: "Agents" })).not.toBeInTheDocument();
     expect(container.querySelector('[data-sidebar="footer"]')).not.toBeInTheDocument();
+  });
+
+  it("offers New Chat and Agents navigation entries", async () => {
+    const sidebar = await AppSidebar();
+    render(<SidebarProvider>{sidebar}</SidebarProvider>);
+
+    expect(screen.getByRole("link", { name: "New Chat" })).toHaveAttribute("href", "/chats/new");
+    expect(screen.getByRole("link", { name: "Agents" })).toHaveAttribute("href", "/agents");
   });
 });

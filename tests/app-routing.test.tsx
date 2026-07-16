@@ -110,7 +110,7 @@ describe("app routing", () => {
     render(await HomePage());
 
     expect(redirectMock).not.toHaveBeenCalled();
-    expect(screen.getByRole("heading", { name: "Welcome to Eve Chats" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Welcome to EveChats" })).toBeInTheDocument();
     expect(screen.getByText("Connect your first Eve agent to start chatting.")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Connect an agent" })).toHaveAttribute("href", "/agents/new");
   });

@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
+import type { Route } from "next";
 import { useRouter } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
@@ -20,11 +21,13 @@ import { Label } from "@/components/ui/label";
 type AgentDeleteDialogProps = {
   agentId: string;
   agentName: string;
+  redirectTo?: Route;
 };
 
 export function AgentDeleteDialog({
   agentId,
   agentName,
+  redirectTo,
 }: AgentDeleteDialogProps): React.ReactElement {
   const router = useRouter();
   const isDeletingRef = useRef(false);
@@ -62,7 +65,11 @@ export function AgentDeleteDialog({
 
       setConfirmation("");
       setOpen(false);
-      router.refresh();
+      if (redirectTo) {
+        router.push(redirectTo);
+      } else {
+        router.refresh();
+      }
     } catch {
       setError("Unable to delete agent. Please try again.");
     } finally {

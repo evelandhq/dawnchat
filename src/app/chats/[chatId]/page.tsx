@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import type { HandleMessageStreamEvent } from "eve/client";
 
@@ -34,6 +35,12 @@ export async function getChatThreadForPage(chatId: string): Promise<ChatThreadPa
     events: events.map((event) => event.payload as HandleMessageStreamEvent),
     pendingUserMessage: chat.pendingUserMessage,
   };
+}
+
+export async function generateMetadata({ params }: ChatThreadPageProps): Promise<Metadata> {
+  const { chatId } = await params;
+  const chat = await createRepository(getDbClient()).getChat(chatId);
+  return { title: chat?.title ?? "Chat" };
 }
 
 export default async function ChatThreadPage({ params }: ChatThreadPageProps): Promise<React.ReactElement> {

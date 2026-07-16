@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 
 import { createRepository } from "@/db/repository";
@@ -25,6 +26,12 @@ export async function getAgentForNewChatPage(agentId: string): Promise<AgentNewC
   }
 
   return { id: agent.id, name: agent.name, status: agent.status };
+}
+
+export async function generateMetadata({ params }: AgentNewChatPageProps): Promise<Metadata> {
+  const { agentId } = await params;
+  const agent = await getAgentForNewChatPage(agentId);
+  return { title: agent ? `New Chat · ${agent.name}` : "New Chat" };
 }
 
 export default async function AgentNewChatPage({ params }: AgentNewChatPageProps): Promise<React.ReactElement> {

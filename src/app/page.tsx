@@ -27,7 +27,7 @@ export default async function HomePage(): Promise<React.ReactElement> {
       <div className="bg-primary text-primary-foreground flex size-12 items-center justify-center rounded-2xl">
         <Sparkles className="size-6" />
       </div>
-      <h1 className="text-2xl font-semibold tracking-tight">Welcome to Eve Chats</h1>
+      <h1 className="text-2xl font-semibold tracking-tight">Welcome to EveChats</h1>
       <p className="text-muted-foreground text-sm">Connect your first Eve agent to start chatting.</p>
       <Button asChild>
         <Link href={"/agents/new" as Route}>Connect an agent</Link>

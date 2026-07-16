@@ -1,6 +1,12 @@
+import type { Metadata } from "next";
+
 import { AgentConnectionForm } from "@/components/agent-connection-form";
 import { AgentDiscovery } from "@/components/agent-discovery";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+
+export const metadata: Metadata = {
+  title: "Connect an Agent",
+};
 
 export default function NewAgentPage(): React.ReactElement {
   return (
