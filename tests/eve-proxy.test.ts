@@ -129,7 +129,7 @@ describe("per-chat Eve protocol proxy", () => {
     });
   });
 
-  it("passes raw structured events through unchanged and persists them idempotently", async () => {
+  it("keeps Eve 0.24 v18 sessions resumable without exposing a continuation token", async () => {
     const streamEvents = [
       {
         type: "message.received",
@@ -217,11 +217,19 @@ describe("per-chat Eve protocol proxy", () => {
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as unknown);
-    expect(forwardedEvents).toEqual(streamEvents);
+    const browserEvents = streamEvents.map((event) =>
+      event.type === "session.waiting"
+        ? {
+            ...event,
+            data: { ...event.data, continuationToken: EVE_PROXY_CONTINUATION_TOKEN },
+          }
+        : event,
+    );
+    expect(forwardedEvents).toEqual(browserEvents);
 
     const stored = await repository.listEvents(chat.id);
     expect(stored).toHaveLength(streamEvents.length);
-    expect(stored.map((event) => event.payload)).toEqual(streamEvents);
+    expect(stored.map((event) => event.payload)).toEqual(browserEvents);
     expect(stored.map((event) => event.eventIndex)).toEqual([1, 2, 3, 4, 5]);
     expect(stored).toEqual(
       expect.arrayContaining([
@@ -238,6 +246,68 @@ describe("per-chat Eve protocol proxy", () => {
     expect(replayResponse.status).toBe(200);
     await replayResponse.text();
     await expect(repository.listEvents(chat.id)).resolves.toHaveLength(streamEvents.length);
+  });
+
+  it("stores Eve 0.25 v19 continuation tokens server-side and replaces them in the browser stream", async () => {
+    const streamEvents = [
+      {
+        type: "message.completed",
+        data: {
+          message: "Done",
+          finishReason: "stop",
+          sequence: 1,
+          stepIndex: 0,
+          turnId: "turn_1",
+        },
+      },
+      {
+        type: "session.waiting",
+        data: { wait: "next-user-message", continuationToken: "eve:rotated" },
+      },
+    ] as const;
+    const server = await fakeServer({ streamEvents, streamVersion: 19 });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Eve 0.25",
+      baseUrl: server.baseUrl,
+      authType: "none",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({ agentConnectionId: agent.id, title: "Rotating token" });
+    await repository.updateChatSessionState(chat.id, {
+      sessionId: "ses_1",
+      continuationToken: "eve:1",
+      streamIndex: 0,
+    });
+    const routes = await loadProxyRoutes();
+
+    const response = await routes.streamSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1/stream`),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+
+    expect(response.status).toBe(200);
+    const forwardedEvents = (await response.text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as unknown);
+    expect(forwardedEvents).toEqual([
+      streamEvents[0],
+      {
+        type: "session.waiting",
+        data: {
+          wait: "next-user-message",
+          continuationToken: EVE_PROXY_CONTINUATION_TOKEN,
+        },
+      },
+    ]);
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      sessionState: {
+        sessionId: "ses_1",
+        continuationToken: "eve:rotated",
+        streamIndex: 2,
+      },
+    });
   });
 
   it("injects the stored continuation token for HITL responses and rejects another session id", async () => {

@@ -220,24 +220,30 @@ function createPersistedEventStream(input: {
   let buffered: IteratorResult<HandleMessageStreamEvent> | null = input.first;
   let nextStreamIndex = input.startIndex;
   let latestCursor = input.session.streamIndex ?? 0;
+  let currentSession = input.session;
 
-  const persistEvent = async (event: HandleMessageStreamEvent): Promise<boolean> => {
+  const persistEvent = async (
+    event: HandleMessageStreamEvent,
+  ): Promise<{ event: HandleMessageStreamEvent; terminal: boolean }> => {
+    const continuationToken = waitingContinuationToken(event);
+    const browserEvent = replaceWaitingContinuationToken(event);
     await input.repository.appendEvent({
       chatId: input.chat.id,
       sessionId: input.sessionId,
       streamIndex: nextStreamIndex,
-      type: event.type,
-      payload: event,
+      type: browserEvent.type,
+      payload: browserEvent,
     });
     nextStreamIndex += 1;
     latestCursor = Math.max(latestCursor, nextStreamIndex);
+    currentSession = {
+      ...currentSession,
+      ...(continuationToken ? { continuationToken } : {}),
+      streamIndex: latestCursor,
+    };
     const status = chatStatusFromEvent(event);
-    await input.repository.updateChatSessionState(
-      input.chat.id,
-      { ...input.session, streamIndex: latestCursor },
-      status,
-    );
-    return status !== undefined;
+    await input.repository.updateChatSessionState(input.chat.id, currentSession, status);
+    return { event: browserEvent, terminal: status !== undefined };
   };
 
   return new ReadableStream<Uint8Array>({
@@ -250,9 +256,9 @@ function createPersistedEventStream(input: {
           return;
         }
 
-        const terminal = await persistEvent(next.value);
-        controller.enqueue(encoder.encode(`${JSON.stringify(next.value)}\n`));
-        if (terminal) {
+        const persisted = await persistEvent(next.value);
+        controller.enqueue(encoder.encode(`${JSON.stringify(persisted.event)}\n`));
+        if (persisted.terminal) {
           input.abort.abort();
           void input.iterator.return?.();
           controller.close();
@@ -270,6 +276,25 @@ function createPersistedEventStream(input: {
       void input.iterator.return?.();
     },
   });
+}
+
+function waitingContinuationToken(event: HandleMessageStreamEvent): string | undefined {
+  if (event.type !== "session.waiting") return undefined;
+  const data = event.data as unknown;
+  if (!data || typeof data !== "object" || Array.isArray(data)) return undefined;
+  return stringValue((data as Record<string, unknown>).continuationToken);
+}
+
+function replaceWaitingContinuationToken(
+  event: HandleMessageStreamEvent,
+): HandleMessageStreamEvent {
+  if (event.type !== "session.waiting") return event;
+  const data = event.data as unknown;
+  const safeData = data && typeof data === "object" && !Array.isArray(data) ? data : {};
+  return {
+    ...event,
+    data: { ...safeData, continuationToken: EVE_PROXY_CONTINUATION_TOKEN },
+  } as HandleMessageStreamEvent;
 }
 
 function chatStatusFromEvent(event: HandleMessageStreamEvent): Chat["status"] | undefined {

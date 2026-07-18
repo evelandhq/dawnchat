@@ -17,9 +17,10 @@ The browser renders Eve's `defaultMessageReducer` projection with AI Elements an
 - Health-check registered agents.
 - Start chats bound to one healthy agent.
 - Stream and render text, reasoning, tool calls/results, HITL requests, authorization challenges, and files through AI Elements.
-- Persist raw Eve events as the canonical chat history, with idempotent `(chat, session, stream index)` replay handling.
+- Persist Eve events as the canonical chat history, with continuation tokens redacted and idempotent `(chat, session, stream index)` replay handling.
 - Continue existing chats through `useEveAgent` while keeping remote auth and the real `continuationToken` server-side.
-- PostgreSQL 16 persistence for agents, chats, raw events, and Eve session state.
+- Connect to Eve agents running either 0.24.x or 0.25.x.
+- PostgreSQL 16 persistence for agents, chats, protocol events, and Eve session state.
 
 ## Development
 

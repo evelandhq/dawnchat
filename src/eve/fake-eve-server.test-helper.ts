@@ -14,6 +14,7 @@ export interface FakeEveServerOptions {
   readonly redirectHealthTo?: string;
   readonly failCreateSession?: boolean;
   readonly streamEvents?: readonly unknown[];
+  readonly streamVersion?: 18 | 19;
   /** Emit stream events without ending the response, like eve 0.18.x agents. */
   readonly holdStreamOpen?: boolean;
 }
@@ -39,11 +40,16 @@ function writeJson(response: ServerResponse, statusCode: number, body: unknown):
   response.end(JSON.stringify(body));
 }
 
-function writeNdjson(response: ServerResponse, events: readonly unknown[], holdOpen = false): void {
+function writeNdjson(
+  response: ServerResponse,
+  events: readonly unknown[],
+  holdOpen = false,
+  streamVersion: 18 | 19 = 18,
+): void {
   response.writeHead(200, {
     "content-type": "application/x-ndjson; charset=utf-8",
     "x-eve-stream-format": "ndjson",
-    "x-eve-stream-version": "18",
+    "x-eve-stream-version": String(streamVersion),
   });
 
   for (const event of events) {
@@ -122,6 +128,7 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
             { type: "session.waiting", data: { wait: "next-user-message" } },
           ],
           options.holdStreamOpen,
+          options.streamVersion,
         );
         return;
       }
