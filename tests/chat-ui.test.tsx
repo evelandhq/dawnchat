@@ -114,7 +114,10 @@ describe("ChatThread with Eve and AI Elements", () => {
         },
       },
       { type: "turn.completed", data: { sequence: 7, turnId: "turn_1" } },
-      { type: "session.waiting", data: { wait: "next-user-message" } },
+      {
+        type: "session.waiting",
+        data: { wait: "next-user-message", continuationToken: EVE_PROXY_CONTINUATION_TOKEN },
+      },
     ];
 
     render(<ChatThread chat={chat({ sessionState: { sessionId: "ses_1", streamIndex: 8 } })} events={events} />);
@@ -164,7 +167,10 @@ describe("ChatThread with Eve and AI Elements", () => {
           turnId: "turn_1",
         },
       },
-      { type: "session.waiting", data: { wait: "next-user-message" } },
+      {
+        type: "session.waiting",
+        data: { wait: "next-user-message", continuationToken: EVE_PROXY_CONTINUATION_TOKEN },
+      },
     ];
     const resumedEvents = [
       {
@@ -177,7 +183,10 @@ describe("ChatThread with Eve and AI Elements", () => {
           turnId: "turn_2",
         },
       },
-      { type: "session.waiting", data: { wait: "next-user-message" } },
+      {
+        type: "session.waiting",
+        data: { wait: "next-user-message", continuationToken: EVE_PROXY_CONTINUATION_TOKEN },
+      },
     ];
     const fetchMock = vi
       .fn()
@@ -242,7 +251,10 @@ describe("ChatThread with Eve and AI Elements", () => {
           turnId: "turn_1",
         },
       },
-      { type: "session.waiting", data: { wait: "next-user-message" } },
+      {
+        type: "session.waiting",
+        data: { wait: "next-user-message", continuationToken: EVE_PROXY_CONTINUATION_TOKEN },
+      },
     ];
     const fetchMock = vi
       .fn()
@@ -292,7 +304,10 @@ describe("ChatThread with Eve and AI Elements", () => {
           turnId: "turn_1",
         },
       },
-      { type: "session.waiting", data: { wait: "next-user-message" } },
+      {
+        type: "session.waiting",
+        data: { wait: "next-user-message", continuationToken: EVE_PROXY_CONTINUATION_TOKEN },
+      },
     ];
 
     render(<ChatThread chat={chat()} events={events} />);

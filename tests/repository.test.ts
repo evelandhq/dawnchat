@@ -204,6 +204,32 @@ describe("repository", () => {
     });
   });
 
+  it("does not persist a health result for an obsolete security revision", async () => {
+    const repository = createRepository(db);
+    const created = await repository.createAgentConnection({
+      name: "Changing Agent",
+      baseUrl: "https://changing.example.com",
+      authType: "none",
+    });
+    await repository.updateAgentConnection(created.id, {
+      name: created.name,
+      baseUrl: created.baseUrl,
+      authType: "none",
+      authConfigEncrypted: null,
+      expectedSecurityRevision: created.securityRevision,
+      securityChanged: true,
+    });
+
+    await expect(repository.updateAgentHealth(created.id, {
+      status: "healthy",
+      expectedSecurityRevision: created.securityRevision,
+    })).rejects.toThrow("Agent connection changed while an operation was in progress");
+    await expect(repository.getAgentConnection(created.id)).resolves.toMatchObject({
+      securityRevision: created.securityRevision + 1,
+      status: "unknown",
+    });
+  });
+
   it("throws when updating missing records", async () => {
     const repository = createRepository(db);
 
@@ -213,6 +239,76 @@ describe("repository", () => {
     await expect(
       repository.updateChatSessionState("chat_missing", { sessionId: "session-123" }),
     ).rejects.toThrow("Chat not found");
+  });
+
+  it("fences credential refresh completion with its lease", async () => {
+    const repository = createRepository(db);
+    const agent = await repository.createAgentConnection({
+      name: "OIDC Agent",
+      baseUrl: "https://oidc.example.com",
+      authType: "oidc",
+    });
+    const key = {
+      agentConnectionId: agent.id,
+      securityRevision: agent.securityRevision,
+      authMethod: "oidc",
+      credentialScope: "principal",
+      scopeSubject: "eve-chats-local-user",
+      credentialKey: "",
+    };
+    await repository.putAgentAuthCredential({
+      ...key,
+      payloadEncrypted: "initial",
+      expiresAt: new Date("2026-07-20T10:00:00.000Z"),
+    });
+    const firstNow = new Date("2026-07-20T09:00:00.000Z");
+    const firstLease = await repository.claimAgentAuthRefreshLease({
+      ...key,
+      expectedRotationSeq: 0,
+      refreshOwner: "worker-a",
+      refreshLeaseId: "lease-a",
+      now: firstNow,
+      leaseUntil: new Date("2026-07-20T09:00:15.000Z"),
+    });
+    expect(firstLease).toMatchObject({ refreshOwner: "worker-a", refreshLeaseId: "lease-a" });
+    await expect(repository.claimAgentAuthRefreshLease({
+      ...key,
+      expectedRotationSeq: 0,
+      refreshOwner: "worker-b",
+      refreshLeaseId: "lease-b-too-early",
+      now: new Date("2026-07-20T09:00:10.000Z"),
+      leaseUntil: new Date("2026-07-20T09:00:25.000Z"),
+    })).resolves.toBeNull();
+
+    const secondLease = await repository.claimAgentAuthRefreshLease({
+      ...key,
+      expectedRotationSeq: 0,
+      refreshOwner: "worker-b",
+      refreshLeaseId: "lease-b",
+      now: new Date("2026-07-20T09:00:16.000Z"),
+      leaseUntil: new Date("2026-07-20T09:00:31.000Z"),
+    });
+    expect(secondLease).toMatchObject({ refreshOwner: "worker-b", refreshLeaseId: "lease-b" });
+    await expect(repository.completeAgentAuthRefresh({
+      ...key,
+      expectedRotationSeq: 0,
+      refreshOwner: "worker-a",
+      refreshLeaseId: "lease-a",
+      now: new Date("2026-07-20T09:00:17.000Z"),
+      payloadEncrypted: "late-writer",
+      expiresAt: new Date("2026-07-20T11:00:00.000Z"),
+    })).resolves.toBeNull();
+
+    const completed = await repository.completeAgentAuthRefresh({
+      ...key,
+      expectedRotationSeq: 0,
+      refreshOwner: "worker-b",
+      refreshLeaseId: "lease-b",
+      now: new Date("2026-07-20T09:00:18.000Z"),
+      payloadEncrypted: "winner",
+      expiresAt: new Date("2026-07-20T11:00:00.000Z"),
+    });
+    expect(completed).toMatchObject({ payloadEncrypted: "winner", rotationSeq: 1 });
   });
 
   it("stores chat session state separately from raw Eve event history", async () => {

@@ -1,4 +1,4 @@
-import type { HandleMessageStreamEvent } from "eve/client";
+import { ClientError, type HandleMessageStreamEvent } from "eve/client";
 
 import {
   createRepository,
@@ -7,7 +7,13 @@ import {
   type SessionState,
 } from "@/db/repository";
 import { getDbClient } from "@/db/provider";
-import { createEveClientForConnection } from "@/eve/client";
+import {
+  recoverEveClientAfterUnauthorized,
+  resolveEveClientForConnection,
+  type ResolvedEveClient,
+} from "@/eve/client";
+import { AgentAuthRecoveryUnavailableError, canRecoverAgentAuth } from "@/eve/auth-runtime";
+import { AgentAuthorizationRequiredError } from "@/eve/oidc";
 import { EVE_PROXY_CONTINUATION_TOKEN } from "@/eve/proxy-contract";
 
 const NDJSON_CONTENT_TYPE = "application/x-ndjson; charset=utf-8";
@@ -15,7 +21,7 @@ const NDJSON_CONTENT_TYPE = "application/x-ndjson; charset=utf-8";
 type ProxyContext = {
   chat: Chat;
   repository: Repository;
-  client: ReturnType<typeof createEveClientForConnection>;
+  resolvedClient: ResolvedEveClient;
 };
 
 export async function proxyCreateEveSession(request: Request, chatId: string): Promise<Response> {
@@ -81,19 +87,50 @@ export async function proxyEveSessionStream(
   } else {
     request.signal.addEventListener("abort", () => abort.abort(), { once: true });
   }
-  const iterator = resolved.client
-    .session({
-      sessionId,
-      continuationToken: session.continuationToken,
-      streamIndex: parsedStartIndex,
-    })
-    .stream({ startIndex: parsedStartIndex, signal: abort.signal })
-    [Symbol.asyncIterator]();
+  let activeClient = resolved.resolvedClient;
+  const createIterator = () => activeClient.client
+      .session({
+        sessionId,
+        continuationToken: session.continuationToken,
+        streamIndex: parsedStartIndex,
+      })
+      .stream({ startIndex: parsedStartIndex, signal: abort.signal })
+      [Symbol.asyncIterator]();
+  let iterator = createIterator();
   let first: IteratorResult<HandleMessageStreamEvent>;
   try {
     first = await iterator.next();
-  } catch {
-    return errorResponse("Unable to reach Eve agent", 502);
+  } catch (error) {
+    if (
+      error instanceof ClientError
+      && error.status === 401
+      && canRecoverAgentAuth(activeClient.auth)
+    ) {
+      try {
+        activeClient = await recoverEveClientAfterUnauthorized(activeClient, 0, `/chats/${chatId}`);
+        iterator = createIterator();
+        first = await iterator.next();
+      } catch (retryError) {
+        if (retryError instanceof AgentAuthRecoveryUnavailableError) {
+          return errorResponse("Unable to reach Eve agent", 502);
+        }
+        if (retryError instanceof ClientError && retryError.status === 401) {
+          try {
+            await recoverEveClientAfterUnauthorized(activeClient, 1, `/chats/${chatId}`);
+          } catch (authorizationError) {
+            if (authorizationError instanceof AgentAuthorizationRequiredError) {
+              return authorizationRequiredResponse(authorizationError);
+            }
+          }
+        }
+        if (retryError instanceof AgentAuthorizationRequiredError) {
+          return authorizationRequiredResponse(retryError);
+        }
+        return errorResponse("Unable to reach Eve agent", 502);
+      }
+    } else {
+      return errorResponse("Unable to reach Eve agent", 502);
+    }
   }
 
   const persisted = createPersistedEventStream({
@@ -136,7 +173,7 @@ async function proxyTurnRequest(
     : "/eve/v1/session";
   let remote: Response;
   try {
-    remote = await context.client.fetch(path, {
+    remote = await context.resolvedClient.client.fetch(path, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -145,6 +182,31 @@ async function proxyTurnRequest(
   } catch {
     await context.repository.updateChatStatus(context.chat.id, "failed");
     return errorResponse("Unable to reach Eve agent", 502);
+  }
+
+  if (remote.status === 401 && canRecoverAgentAuth(context.resolvedClient.auth)) {
+    await remote.body?.cancel().catch(() => undefined);
+    try {
+      context.resolvedClient = await recoverEveClientAfterUnauthorized(
+        context.resolvedClient,
+        0,
+        `/chats/${context.chat.id}`,
+      );
+      remote = await context.resolvedClient.client.fetch(path, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+        signal: request.signal,
+      });
+      if (remote.status === 401) {
+        await remote.body?.cancel().catch(() => undefined);
+        await recoverEveClientAfterUnauthorized(context.resolvedClient, 1);
+      }
+    } catch (error) {
+      if (error instanceof AgentAuthorizationRequiredError) return authorizationRequiredResponse(error);
+      await context.repository.updateChatStatus(context.chat.id, "failed");
+      return errorResponse("Unable to refresh Agent authorization", 502);
+    }
   }
 
   if (!remote.ok) {
@@ -200,10 +262,27 @@ async function resolveProxyContext(chatId: string): Promise<ProxyContext | Respo
   }
 
   try {
-    return { chat, repository, client: createEveClientForConnection(agent) };
-  } catch {
+    return {
+      chat,
+      repository,
+      resolvedClient: await resolveEveClientForConnection(agent, `/chats/${chat.id}`),
+    };
+  } catch (error) {
+    if (error instanceof AgentAuthorizationRequiredError) return authorizationRequiredResponse(error);
     return errorResponse("Agent authentication configuration is invalid", 500);
   }
+}
+
+function authorizationRequiredResponse(error: AgentAuthorizationRequiredError): Response {
+  return Response.json({
+    code: "interaction_required",
+    method: "oidc",
+    message: error.message,
+    interaction: { type: "redirect", url: error.interactionUrl },
+  }, {
+    status: 401,
+    headers: { "cache-control": "no-store" },
+  });
 }
 
 function createPersistedEventStream(input: {
@@ -220,24 +299,30 @@ function createPersistedEventStream(input: {
   let buffered: IteratorResult<HandleMessageStreamEvent> | null = input.first;
   let nextStreamIndex = input.startIndex;
   let latestCursor = input.session.streamIndex ?? 0;
+  let currentSession = input.session;
 
-  const persistEvent = async (event: HandleMessageStreamEvent): Promise<boolean> => {
+  const persistEvent = async (
+    event: HandleMessageStreamEvent,
+  ): Promise<{ event: HandleMessageStreamEvent; terminal: boolean }> => {
+    const continuationToken = waitingContinuationToken(event);
+    const browserEvent = replaceWaitingContinuationToken(event);
     await input.repository.appendEvent({
       chatId: input.chat.id,
       sessionId: input.sessionId,
       streamIndex: nextStreamIndex,
-      type: event.type,
-      payload: event,
+      type: browserEvent.type,
+      payload: browserEvent,
     });
     nextStreamIndex += 1;
     latestCursor = Math.max(latestCursor, nextStreamIndex);
+    currentSession = {
+      ...currentSession,
+      ...(continuationToken ? { continuationToken } : {}),
+      streamIndex: latestCursor,
+    };
     const status = chatStatusFromEvent(event);
-    await input.repository.updateChatSessionState(
-      input.chat.id,
-      { ...input.session, streamIndex: latestCursor },
-      status,
-    );
-    return status !== undefined;
+    await input.repository.updateChatSessionState(input.chat.id, currentSession, status);
+    return { event: browserEvent, terminal: status !== undefined };
   };
 
   return new ReadableStream<Uint8Array>({
@@ -250,9 +335,9 @@ function createPersistedEventStream(input: {
           return;
         }
 
-        const terminal = await persistEvent(next.value);
-        controller.enqueue(encoder.encode(`${JSON.stringify(next.value)}\n`));
-        if (terminal) {
+        const persisted = await persistEvent(next.value);
+        controller.enqueue(encoder.encode(`${JSON.stringify(persisted.event)}\n`));
+        if (persisted.terminal) {
           input.abort.abort();
           void input.iterator.return?.();
           controller.close();
@@ -270,6 +355,25 @@ function createPersistedEventStream(input: {
       void input.iterator.return?.();
     },
   });
+}
+
+function waitingContinuationToken(event: HandleMessageStreamEvent): string | undefined {
+  if (event.type !== "session.waiting") return undefined;
+  const data = event.data as unknown;
+  if (!data || typeof data !== "object" || Array.isArray(data)) return undefined;
+  return stringValue((data as Record<string, unknown>).continuationToken);
+}
+
+function replaceWaitingContinuationToken(
+  event: HandleMessageStreamEvent,
+): HandleMessageStreamEvent {
+  if (event.type !== "session.waiting") return event;
+  const data = event.data as unknown;
+  const safeData = data && typeof data === "object" && !Array.isArray(data) ? data : {};
+  return {
+    ...event,
+    data: { ...safeData, continuationToken: EVE_PROXY_CONTINUATION_TOKEN },
+  } as HandleMessageStreamEvent;
 }
 
 function chatStatusFromEvent(event: HandleMessageStreamEvent): Chat["status"] | undefined {

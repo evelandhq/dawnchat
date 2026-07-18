@@ -35,11 +35,11 @@ describe("domain validation", () => {
       name: "Support Agent",
       baseUrl: "https://support.example.com",
       authType: "bearer",
-      bearerToken: "secret-token",
+      config: { token: "secret-token" },
     });
 
     expect(parsed.authType).toBe("bearer");
-    expect(parsed.bearerToken).toBe("secret-token");
+    expect(parsed.config).toEqual({ token: "secret-token" });
   });
 
   it("trims agent names and strips URL search and hash", () => {
@@ -53,46 +53,13 @@ describe("domain validation", () => {
     expect(parsed.authType).toBe("none");
   });
 
-  it("requires bearer token for bearer auth", () => {
-    expect(() =>
-      createAgentConnectionSchema.parse({
-        name: "Support Agent",
-        baseUrl: "https://support.example.com",
-        authType: "bearer",
-      }),
-    ).toThrow();
-  });
-
-  it("requires header name and value for header auth", () => {
-    expect(() =>
-      createAgentConnectionSchema.parse({
-        name: "Support Agent",
-        baseUrl: "https://support.example.com",
-        authType: "header",
-        headerName: "X-Agent-Token",
-      }),
-    ).toThrow();
-  });
-
-  it("requires missing or empty header name for header auth", () => {
-    expect(() =>
-      createAgentConnectionSchema.parse({
-        name: "Support Agent",
-        baseUrl: "https://support.example.com",
-        authType: "header",
-        headerValue: "secret-header-value",
-      }),
-    ).toThrow();
-
-    expect(() =>
-      createAgentConnectionSchema.parse({
-        name: "Support Agent",
-        baseUrl: "https://support.example.com",
-        authType: "header",
-        headerName: "   ",
-        headerValue: "secret-header-value",
-      }),
-    ).toThrow();
+  it("rejects unsupported Agent access methods", () => {
+    expect(() => createAgentConnectionSchema.parse({
+      name: "Support Agent",
+      baseUrl: "https://support.example.com",
+      authType: "made-up",
+      config: {},
+    })).toThrow();
   });
 
   it("normalizes edit fields without requiring an unchanged secret", () => {
@@ -101,37 +68,28 @@ describe("domain validation", () => {
         name: "  Renamed Agent  ",
         baseUrl: "https://agent.example.com/?source=edit",
         authType: "bearer",
-        bearerToken: "",
+        config: {},
       }),
     ).toMatchObject({
       name: "Renamed Agent",
       baseUrl: "https://agent.example.com",
       authType: "bearer",
-      bearerToken: "",
+      config: {},
     });
   });
 
-  it("requires a valid header name while allowing an omitted edit secret", () => {
+  it("accepts the standard Custom headers config envelope", () => {
     expect(
       updateAgentConnectionSchema.parse({
         name: "Header Agent",
         baseUrl: "https://header.example.com",
-        authType: "header",
-        headerName: "X-Agent-Key",
+        authType: "headers",
+        config: { headers: { "X-Agent-Key": "secret" } },
       }),
     ).toMatchObject({
-      authType: "header",
-      headerName: "X-Agent-Key",
+      authType: "headers",
+      config: { headers: { "X-Agent-Key": "secret" } },
     });
-
-    expect(() =>
-      updateAgentConnectionSchema.parse({
-        name: "Header Agent",
-        baseUrl: "https://header.example.com",
-        authType: "header",
-        headerName: "Bad Header",
-      }),
-    ).toThrow();
   });
 
   it("trims valid chat creation messages and rejects empty chat agent ids", () => {

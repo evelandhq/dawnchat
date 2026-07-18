@@ -34,6 +34,11 @@ import {
 import { EveMessageView } from "@/components/eve-message";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { EVE_PROXY_CONTINUATION_TOKEN } from "@/eve/proxy-contract";
+import {
+  claimPendingAgentTurn,
+  handleAgentAuthInteraction,
+  type PendingAgentTurn,
+} from "@/lib/agent-auth-interaction";
 
 export type ChatThreadSummary = {
   id: string;
@@ -59,6 +64,8 @@ export function ChatThread({
 }: ChatThreadProps): React.ReactElement {
   const router = useRouter();
   const pendingSentRef = useRef(false);
+  const resumeCheckedRef = useRef(false);
+  const pendingAuthTurnRef = useRef<PendingAgentTurn | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
   const agent = useEveAgent({
     host: `/api/chats/${chat.id}/agent`,
@@ -66,6 +73,16 @@ export function ChatThread({
     initialSession: chat.sessionState
       ? { ...chat.sessionState, continuationToken: EVE_PROXY_CONTINUATION_TOKEN }
       : undefined,
+    onError: (error) => {
+      const handled = handleAgentAuthInteraction({
+        chatId: chat.id,
+        error,
+        redirect: (url) => window.location.assign(url),
+        storage: window.sessionStorage,
+        turn: pendingAuthTurnRef.current,
+      });
+      if (!handled) setLocalError(errorMessage(error));
+    },
     onFinish: () => router.refresh(),
   });
   const isBusy = agent.status === "submitted" || agent.status === "streaming";
@@ -79,16 +96,38 @@ export function ChatThread({
   const composerDisabled = chat.status === "completed" || hasPendingInteraction;
 
   useEffect(() => {
-    if (!pendingUserMessage || pendingSentRef.current || agent.status !== "ready") {
+    if (pendingSentRef.current || agent.status !== "ready") {
       return;
     }
+    if (!resumeCheckedRef.current) {
+      resumeCheckedRef.current = true;
+      const pendingTurn = claimPendingAgentTurn(window.sessionStorage, chat.id);
+      if (pendingTurn) {
+        pendingSentRef.current = true;
+        setLocalError(null);
+        void sendTurnWithAgentAuth(pendingTurn).finally(() => {
+          if (!pendingUserMessage) pendingSentRef.current = false;
+        });
+        return;
+      }
+    }
+    if (!pendingUserMessage) return;
     pendingSentRef.current = true;
     setLocalError(null);
-    void agent.send({ message: pendingUserMessage }).catch((error: unknown) => {
+    void sendTurnWithAgentAuth({ message: pendingUserMessage }).catch((error: unknown) => {
       pendingSentRef.current = false;
       setLocalError(errorMessage(error));
     });
-  }, [agent, pendingUserMessage]);
+  }, [agent, chat.id, pendingUserMessage]);
+
+  async function sendTurnWithAgentAuth(turn: PendingAgentTurn): Promise<void> {
+    pendingAuthTurnRef.current = turn;
+    try {
+      await agent.send(turn);
+    } finally {
+      pendingAuthTurnRef.current = null;
+    }
+  }
 
   const handleSubmit = async (message: PromptInputMessage): Promise<void> => {
     const text = message.text.trim();
@@ -111,7 +150,7 @@ export function ChatThread({
 
     setLocalError(null);
     try {
-      await agent.send({ message: message.files.length === 0 ? text : content });
+      await sendTurnWithAgentAuth({ message: message.files.length === 0 ? text : content });
     } catch (error) {
       setLocalError(errorMessage(error));
       throw error;
@@ -121,7 +160,7 @@ export function ChatThread({
   const handleInputResponses = async (responses: readonly InputResponse[]): Promise<void> => {
     setLocalError(null);
     try {
-      await agent.send({ inputResponses: responses });
+      await sendTurnWithAgentAuth({ inputResponses: responses });
     } catch (error) {
       setLocalError(errorMessage(error));
     }

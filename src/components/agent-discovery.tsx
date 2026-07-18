@@ -76,7 +76,7 @@ export function AgentDiscovery(): React.ReactElement {
       const response = await fetch("/api/agents", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name: agent.name, baseUrl: agent.url, authType: "none" }),
+        body: JSON.stringify({ name: agent.name, baseUrl: agent.url, authType: "none", config: {} }),
       });
 
       if (!response.ok) {

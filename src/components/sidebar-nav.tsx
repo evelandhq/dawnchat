@@ -19,7 +19,7 @@ import {
 export type SidebarAgentItem = {
   id: string;
   name: string;
-  status: 'unknown' | 'healthy' | 'unreachable';
+  status: 'unknown' | 'healthy' | 'unreachable' | 'authorization_required';
 };
 
 export type SidebarChatItem = {

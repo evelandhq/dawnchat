@@ -16,6 +16,11 @@ function connection(
     baseUrl,
     authType: "none" as const,
     authConfigEncrypted: null,
+    securityRevision: 1,
+    status: "unknown" as const,
+    lastCheckedAt: null,
+    createdAt: new Date("2026-07-19T00:00:00.000Z"),
+    updatedAt: new Date("2026-07-19T00:00:00.000Z"),
     ...overrides,
   };
 }
@@ -92,6 +97,27 @@ describe("Eve client connector", () => {
     expect(result.error).toEqual(expect.any(String));
   });
 
+  it("does not report healthy when the protected info route rejects the credential", async () => {
+    const server = await fakeServer({ infoStatus: 401 });
+
+    const result = await checkEveAgent(connection(server.baseUrl, {
+      authType: "bearer",
+      authConfigEncrypted: JSON.stringify({ token: "rejected-token" }),
+    }));
+
+    expect(result).toMatchObject({ status: "unreachable" });
+    expect(result.error).toContain("Agent info unavailable");
+  });
+
+  it("keeps compatibility with Eve deployments that do not expose the info route", async () => {
+    const server = await fakeServer({ infoStatus: 404 });
+
+    await expect(checkEveAgent(connection(server.baseUrl))).resolves.toMatchObject({
+      status: "healthy",
+      info: { ok: true, status: "ready" },
+    });
+  });
+
   it("sends bearer auth to health and info requests", async () => {
     const server = await fakeServer();
     const secured = connection(server.baseUrl, {
@@ -107,15 +133,59 @@ describe("Eve client connector", () => {
     }
   });
 
+  it("trims Bearer credentials before sending them", async () => {
+    const server = await fakeServer();
+
+    await checkEveAgent(connection(server.baseUrl, {
+      authType: "bearer",
+      authConfigEncrypted: JSON.stringify({ token: "  test-token  " }),
+    }));
+
+    expect(server.requests[0].headers.authorization).toBe("Bearer test-token");
+  });
+
+  it("sends HTTP Basic auth to health and info requests", async () => {
+    const server = await fakeServer();
+
+    await checkEveAgent(
+      connection(server.baseUrl, {
+        authType: "basic",
+        authConfigEncrypted: JSON.stringify({ username: "alice", password: "basic-secret" }),
+      }),
+    );
+
+    for (const request of server.requests) {
+      expect(request.headers.authorization).toBe(`Basic ${Buffer.from("alice:basic-secret").toString("base64")}`);
+    }
+  });
+
+  it("sends both standard Vercel OIDC headers to health and info requests", async () => {
+    const server = await fakeServer();
+
+    await checkEveAgent(
+      connection(server.baseUrl, {
+        authType: "vercel-oidc",
+        authConfigEncrypted: JSON.stringify({ token: "vercel-token" }),
+      }),
+    );
+
+    for (const request of server.requests) {
+      expect(request.headers.authorization).toBe("Bearer vercel-token");
+      expect(request.headers["x-vercel-trusted-oidc-idp-token"]).toBe("vercel-token");
+    }
+  });
+
   it("sends configured custom header auth to health and info requests", async () => {
     const server = await fakeServer();
 
     await checkEveAgent(
       connection(server.baseUrl, {
-        authType: "header",
+        authType: "headers",
         authConfigEncrypted: JSON.stringify({
-          headerName: "X-Agent-Token",
-          headerValue: "header-secret",
+          headers: {
+            "X-Agent-Token": "header-secret",
+            "X-Workspace": "workspace-secret",
+          },
         }),
       }),
     );
@@ -123,6 +193,7 @@ describe("Eve client connector", () => {
     expect(server.requests).toHaveLength(2);
     for (const request of server.requests) {
       expect(request.headers["x-agent-token"]).toBe("header-secret");
+      expect(request.headers["x-workspace"]).toBe("workspace-secret");
     }
   });
 

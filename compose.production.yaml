@@ -1,10 +1,12 @@
 # Single-machine production deployment.
 #
 #   echo "AUTH_SECRET=$(openssl rand -base64 32)" >> .env   # once, on first deploy
+#   echo "APP_ORIGIN=https://chats.example.com" >> .env
 #   docker compose -f compose.production.yaml up -d --build
 #
 # AUTH_SECRET encrypts agent bearer/header credentials stored in Postgres —
 # it must stay the same across restarts or those credentials become unreadable.
+# Required: APP_ORIGIN (the public HTTPS origin used by OIDC callbacks).
 # Optional overrides (env or .env next to this file):
 # POSTGRES_PASSWORD, APP_PORT, NPM_REGISTRY (npm mirror used at build time).
 
@@ -49,6 +51,7 @@ services:
     environment:
       DATABASE_URL: postgresql://eve_chats:${POSTGRES_PASSWORD:-eve_chats}@postgres:5432/eve_chats
       AUTH_SECRET: ${AUTH_SECRET:?AUTH_SECRET is required — put it in .env next to this compose file}
+      APP_ORIGIN: ${APP_ORIGIN:?APP_ORIGIN is required — set the public HTTPS origin}
     ports:
       - "${APP_PORT:-3010}:3010"
     depends_on:

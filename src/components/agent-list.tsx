@@ -4,6 +4,7 @@ import { Bot, ChevronRight, Plus } from "lucide-react";
 
 import { AgentAvatar } from "@/components/agent-avatar";
 import { Button } from "@/components/ui/button";
+import type { AgentConnectionStatus, AuthType } from "@/db/schema";
 import {
   Table,
   TableBody,
@@ -17,9 +18,10 @@ export type AgentListItem = {
   id: string;
   name: string;
   baseUrl: string;
-  authType: "none" | "bearer" | "header";
+  authType: AuthType;
   hasAuth: boolean;
-  status: "unknown" | "healthy" | "unreachable";
+  securityRevision: number;
+  status: AgentConnectionStatus;
   lastCheckedAt: string | null;
 };
 

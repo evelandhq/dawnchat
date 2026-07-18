@@ -1,4 +1,4 @@
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { DatabaseError } from "pg";
 import { z } from "zod";
@@ -6,6 +6,8 @@ import { z } from "zod";
 import { createId } from "@/lib/ids";
 import {
   agentConnections,
+  agentAuthCredentials,
+  agentAuthTransactions,
   chats,
   events,
   type AgentConnectionStatus,
@@ -25,6 +27,8 @@ const sessionStateSchema = z.object({
 });
 
 export type AgentConnection = typeof agentConnections.$inferSelect;
+export type AgentAuthCredential = typeof agentAuthCredentials.$inferSelect;
+export type AgentAuthTransaction = typeof agentAuthTransactions.$inferSelect;
 export type Chat = Omit<typeof chats.$inferSelect, "sessionStateJson"> & {
   sessionState: SessionState | null;
 };
@@ -33,6 +37,7 @@ export type EveEvent = Omit<typeof events.$inferSelect, "payloadJson"> & {
 };
 
 export type CreateAgentConnectionInput = {
+  id?: string;
   name: string;
   baseUrl: string;
   authType: AuthType;
@@ -44,11 +49,19 @@ export type UpdateAgentConnectionInput = {
   baseUrl: string;
   authType: AuthType;
   authConfigEncrypted: string | null;
+  expectedSecurityRevision?: number;
+  securityChanged?: boolean;
 };
+
+export type AgentAuthCredentialKey = Pick<
+  AgentAuthCredential,
+  "agentConnectionId" | "securityRevision" | "authMethod" | "credentialScope" | "scopeSubject" | "credentialKey"
+>;
 
 export type UpdateAgentHealthInput = {
   status: AgentConnectionStatus;
   lastCheckedAt?: Date | null;
+  expectedSecurityRevision?: number;
 };
 
 export type CreateChatInput = {
@@ -81,6 +94,52 @@ export type Repository = {
   updateAgentConnection(id: string, input: UpdateAgentConnectionInput): Promise<AgentConnection | null>;
   deleteAgentConnection(id: string): Promise<boolean>;
   updateAgentHealth(id: string, input: UpdateAgentHealthInput): Promise<AgentConnection>;
+  putAgentAuthCredential(input: AgentAuthCredentialKey & {
+    payloadEncrypted: string;
+    expiresAt: Date | null;
+  }): Promise<AgentAuthCredential>;
+  getAgentAuthCredential(key: AgentAuthCredentialKey): Promise<AgentAuthCredential | null>;
+  deleteAgentAuthCredential(key: AgentAuthCredentialKey, expectedRotationSeq: number): Promise<boolean>;
+  replaceAgentAuthCredential(input: AgentAuthCredentialKey & {
+    expectedRotationSeq: number;
+    payloadEncrypted: string;
+    expiresAt: Date | null;
+  }): Promise<AgentAuthCredential | null>;
+  claimAgentAuthRefreshLease(input: AgentAuthCredentialKey & {
+    expectedRotationSeq: number;
+    refreshOwner: string;
+    refreshLeaseId: string;
+    now: Date;
+    leaseUntil: Date;
+  }): Promise<AgentAuthCredential | null>;
+  completeAgentAuthRefresh(input: AgentAuthCredentialKey & {
+    expectedRotationSeq: number;
+    refreshOwner: string;
+    refreshLeaseId: string;
+    now: Date;
+    payloadEncrypted: string;
+    expiresAt: Date | null;
+  }): Promise<AgentAuthCredential | null>;
+  releaseAgentAuthRefreshLease(input: AgentAuthCredentialKey & {
+    expectedRotationSeq: number;
+    refreshOwner: string;
+    refreshLeaseId: string;
+  }): Promise<boolean>;
+  deleteAgentAuthCredentialWithRefreshLease(input: AgentAuthCredentialKey & {
+    expectedRotationSeq: number;
+    refreshOwner: string;
+    refreshLeaseId: string;
+    now: Date;
+  }): Promise<boolean>;
+  createAgentAuthTransaction(input: {
+    agentConnectionId: string;
+    stateHash: string;
+    payloadEncrypted: string;
+    expiresAt: Date;
+  }): Promise<AgentAuthTransaction>;
+  consumeAgentAuthTransaction(stateHash: string, now?: Date): Promise<AgentAuthTransaction | null>;
+  deleteExpiredAgentAuthTransactions(now?: Date, limit?: number): Promise<number>;
+  deleteStaleAgentAuthCredentials(agentConnectionId: string, currentSecurityRevision: number): Promise<number>;
   createChat(input: CreateChatInput): Promise<Chat>;
   listChats(): Promise<Chat[]>;
   getChat(id: string): Promise<Chat | null>;
@@ -135,6 +194,13 @@ export class DuplicateAgentUrlError extends Error {
   }
 }
 
+export class AgentConnectionChangedError extends Error {
+  constructor() {
+    super("Agent connection changed while an operation was in progress");
+    this.name = "AgentConnectionChangedError";
+  }
+}
+
 function isDuplicateAgentUrlError(error: unknown): boolean {
   let current = error;
 
@@ -152,12 +218,23 @@ function isDuplicateAgentUrlError(error: unknown): boolean {
   return false;
 }
 
+function agentAuthCredentialWhere(key: AgentAuthCredentialKey) {
+  return and(
+    eq(agentAuthCredentials.agentConnectionId, key.agentConnectionId),
+    eq(agentAuthCredentials.securityRevision, key.securityRevision),
+    eq(agentAuthCredentials.authMethod, key.authMethod),
+    eq(agentAuthCredentials.credentialScope, key.credentialScope),
+    eq(agentAuthCredentials.scopeSubject, key.scopeSubject),
+    eq(agentAuthCredentials.credentialKey, key.credentialKey),
+  );
+}
+
 export function createRepository(db: RepositoryDb): Repository {
   return {
     async createAgentConnection(input) {
       const now = new Date();
       const record: typeof agentConnections.$inferInsert = {
-        id: createId("agent"),
+        id: input.id ?? createId("agent"),
         name: input.name,
         baseUrl: input.baseUrl,
         authType: input.authType,
@@ -190,6 +267,12 @@ export function createRepository(db: RepositoryDb): Repository {
 
     async updateAgentConnection(id, input) {
       try {
+        const where = input.expectedSecurityRevision === undefined
+          ? eq(agentConnections.id, id)
+          : and(
+              eq(agentConnections.id, id),
+              eq(agentConnections.securityRevision, input.expectedSecurityRevision),
+            );
         const [updated] = await db
           .update(agentConnections)
           .set({
@@ -197,11 +280,14 @@ export function createRepository(db: RepositoryDb): Repository {
             baseUrl: input.baseUrl,
             authType: input.authType,
             authConfigEncrypted: input.authConfigEncrypted,
+            ...(input.securityChanged
+              ? { securityRevision: sql`${agentConnections.securityRevision} + 1` }
+              : {}),
             status: "unknown",
             lastCheckedAt: null,
             updatedAt: new Date(),
           })
-          .where(eq(agentConnections.id, id))
+          .where(where)
           .returning();
         return updated ?? null;
       } catch (error) {
@@ -222,6 +308,12 @@ export function createRepository(db: RepositoryDb): Repository {
 
     async updateAgentHealth(id, input) {
       const hasLastCheckedAt = Object.hasOwn(input, "lastCheckedAt");
+      const where = input.expectedSecurityRevision === undefined
+        ? eq(agentConnections.id, id)
+        : and(
+            eq(agentConnections.id, id),
+            eq(agentConnections.securityRevision, input.expectedSecurityRevision),
+          );
       const [updated] = await db
         .update(agentConnections)
         .set({
@@ -229,14 +321,201 @@ export function createRepository(db: RepositoryDb): Repository {
           lastCheckedAt: hasLastCheckedAt ? input.lastCheckedAt : new Date(),
           updatedAt: new Date(),
         })
-        .where(eq(agentConnections.id, id))
+        .where(where)
         .returning();
 
       if (!updated) {
+        if (input.expectedSecurityRevision !== undefined) throw new AgentConnectionChangedError();
         throw new Error(`Agent connection not found: ${id}`);
       }
 
       return updated;
+    },
+
+    async putAgentAuthCredential(input) {
+      const [stored] = await db
+        .insert(agentAuthCredentials)
+        .values(input)
+        .onConflictDoUpdate({
+          target: [
+            agentAuthCredentials.agentConnectionId,
+            agentAuthCredentials.securityRevision,
+            agentAuthCredentials.authMethod,
+            agentAuthCredentials.credentialScope,
+            agentAuthCredentials.scopeSubject,
+            agentAuthCredentials.credentialKey,
+          ],
+          set: {
+            payloadEncrypted: input.payloadEncrypted,
+            expiresAt: input.expiresAt,
+            rotationSeq: sql`${agentAuthCredentials.rotationSeq} + 1`,
+            refreshOwner: null,
+            refreshLeaseId: null,
+            refreshLeaseUntil: null,
+            updatedAt: new Date(),
+          },
+        })
+        .returning();
+      if (!stored) throw new Error("Failed to store Agent credential");
+      return stored;
+    },
+
+    async getAgentAuthCredential(key) {
+      const [credential] = await db
+        .select()
+        .from(agentAuthCredentials)
+        .where(agentAuthCredentialWhere(key))
+        .limit(1);
+      return credential ?? null;
+    },
+
+    async deleteAgentAuthCredential(key, expectedRotationSeq) {
+      const [deleted] = await db
+        .delete(agentAuthCredentials)
+        .where(and(
+          agentAuthCredentialWhere(key),
+          eq(agentAuthCredentials.rotationSeq, expectedRotationSeq),
+          isNull(agentAuthCredentials.refreshLeaseId),
+        ))
+        .returning({ rotationSeq: agentAuthCredentials.rotationSeq });
+      return Boolean(deleted);
+    },
+
+    async replaceAgentAuthCredential(input) {
+      const [updated] = await db
+        .update(agentAuthCredentials)
+        .set({
+          payloadEncrypted: input.payloadEncrypted,
+          expiresAt: input.expiresAt,
+          rotationSeq: sql`${agentAuthCredentials.rotationSeq} + 1`,
+          refreshOwner: null,
+          refreshLeaseId: null,
+          refreshLeaseUntil: null,
+          updatedAt: new Date(),
+        })
+        .where(and(
+          agentAuthCredentialWhere(input),
+          eq(agentAuthCredentials.rotationSeq, input.expectedRotationSeq),
+        ))
+        .returning();
+      return updated ?? null;
+    },
+
+    async claimAgentAuthRefreshLease(input) {
+      const [claimed] = await db
+        .update(agentAuthCredentials)
+        .set({
+          refreshOwner: input.refreshOwner,
+          refreshLeaseId: input.refreshLeaseId,
+          refreshLeaseUntil: input.leaseUntil,
+          updatedAt: input.now,
+        })
+        .where(and(
+          agentAuthCredentialWhere(input),
+          eq(agentAuthCredentials.rotationSeq, input.expectedRotationSeq),
+          or(
+            isNull(agentAuthCredentials.refreshLeaseUntil),
+            lte(agentAuthCredentials.refreshLeaseUntil, input.now),
+          ),
+        ))
+        .returning();
+      return claimed ?? null;
+    },
+
+    async completeAgentAuthRefresh(input) {
+      const [completed] = await db
+        .update(agentAuthCredentials)
+        .set({
+          payloadEncrypted: input.payloadEncrypted,
+          expiresAt: input.expiresAt,
+          rotationSeq: sql`${agentAuthCredentials.rotationSeq} + 1`,
+          refreshOwner: null,
+          refreshLeaseId: null,
+          refreshLeaseUntil: null,
+          updatedAt: input.now,
+        })
+        .where(and(
+          agentAuthCredentialWhere(input),
+          eq(agentAuthCredentials.rotationSeq, input.expectedRotationSeq),
+          eq(agentAuthCredentials.refreshOwner, input.refreshOwner),
+          eq(agentAuthCredentials.refreshLeaseId, input.refreshLeaseId),
+          gt(agentAuthCredentials.refreshLeaseUntil, input.now),
+        ))
+        .returning();
+      return completed ?? null;
+    },
+
+    async releaseAgentAuthRefreshLease(input) {
+      const [released] = await db
+        .update(agentAuthCredentials)
+        .set({
+          refreshOwner: null,
+          refreshLeaseId: null,
+          refreshLeaseUntil: null,
+          updatedAt: new Date(),
+        })
+        .where(and(
+          agentAuthCredentialWhere(input),
+          eq(agentAuthCredentials.rotationSeq, input.expectedRotationSeq),
+          eq(agentAuthCredentials.refreshOwner, input.refreshOwner),
+          eq(agentAuthCredentials.refreshLeaseId, input.refreshLeaseId),
+        ))
+        .returning({ rotationSeq: agentAuthCredentials.rotationSeq });
+      return Boolean(released);
+    },
+
+    async deleteAgentAuthCredentialWithRefreshLease(input) {
+      const [deleted] = await db
+        .delete(agentAuthCredentials)
+        .where(and(
+          agentAuthCredentialWhere(input),
+          eq(agentAuthCredentials.rotationSeq, input.expectedRotationSeq),
+          eq(agentAuthCredentials.refreshOwner, input.refreshOwner),
+          eq(agentAuthCredentials.refreshLeaseId, input.refreshLeaseId),
+          gt(agentAuthCredentials.refreshLeaseUntil, input.now),
+        ))
+        .returning({ rotationSeq: agentAuthCredentials.rotationSeq });
+      return Boolean(deleted);
+    },
+
+    async createAgentAuthTransaction(input) {
+      const [transaction] = await db.insert(agentAuthTransactions).values(input).returning();
+      if (!transaction) throw new Error("Failed to create Agent Auth transaction");
+      return transaction;
+    },
+
+    async consumeAgentAuthTransaction(stateHash, now = new Date()) {
+      const [transaction] = await db
+        .delete(agentAuthTransactions)
+        .where(eq(agentAuthTransactions.stateHash, stateHash))
+        .returning();
+      return transaction && transaction.expiresAt > now ? transaction : null;
+    },
+
+    async deleteExpiredAgentAuthTransactions(now = new Date(), limit = 100) {
+      const deleted = await db
+        .delete(agentAuthTransactions)
+        .where(inArray(
+          agentAuthTransactions.stateHash,
+          db
+            .select({ stateHash: agentAuthTransactions.stateHash })
+            .from(agentAuthTransactions)
+            .where(lte(agentAuthTransactions.expiresAt, now))
+            .limit(limit),
+        ))
+        .returning({ stateHash: agentAuthTransactions.stateHash });
+      return deleted.length;
+    },
+
+    async deleteStaleAgentAuthCredentials(agentConnectionId, currentSecurityRevision) {
+      const deleted = await db
+        .delete(agentAuthCredentials)
+        .where(and(
+          eq(agentAuthCredentials.agentConnectionId, agentConnectionId),
+          lt(agentAuthCredentials.securityRevision, currentSecurityRevision),
+        ))
+        .returning({ rotationSeq: agentAuthCredentials.rotationSeq });
+      return deleted.length;
     },
 
     async createChat(input) {

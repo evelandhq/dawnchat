@@ -5,6 +5,8 @@ import { createRepository } from "@/db/repository";
 import { getDbClient } from "@/db/provider";
 import { AgentRecheckButton } from "@/components/agent-recheck-button";
 import { NewChatComposer } from "@/components/new-chat-composer";
+import { Button } from "@/components/ui/button";
+import type { AgentConnectionStatus } from "@/db/schema";
 
 export const dynamic = "force-dynamic";
 
@@ -15,7 +17,7 @@ type AgentNewChatPageProps = {
 type AgentNewChatPageData = {
   id: string;
   name: string;
-  status: "unknown" | "healthy" | "unreachable";
+  status: AgentConnectionStatus;
 };
 
 export async function getAgentForNewChatPage(agentId: string): Promise<AgentNewChatPageData | null> {
@@ -42,10 +44,24 @@ export default async function AgentNewChatPage({ params }: AgentNewChatPageProps
   }
 
   const isHealthy = agent.status === "healthy";
+  const authorizationRequired = agent.status === "authorization_required";
 
   return (
     <section className="mx-auto flex w-full max-w-2xl flex-col items-center gap-6 px-6 py-12 sm:py-20">
-      {isHealthy ? null : (
+      {authorizationRequired ? (
+        <div className="flex flex-col items-center gap-3">
+          <p className="text-muted-foreground text-center text-sm">
+            Authorization is required before starting a chat with this agent.
+          </p>
+          <Button asChild variant="outline" size="sm">
+            <a
+              href={`/api/agents/${agent.id}/auth/oidc/start?returnPath=${encodeURIComponent(`/agents/${agent.id}/edit`)}`}
+            >
+              Authorize with identity provider
+            </a>
+          </Button>
+        </div>
+      ) : isHealthy ? null : (
         <div className="flex flex-col items-center gap-3">
           <p className="text-muted-foreground text-center text-sm">
             This agent is not available right now. Run a health check before starting a chat.

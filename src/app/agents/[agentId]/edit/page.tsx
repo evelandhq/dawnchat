@@ -7,6 +7,8 @@ import {
 } from "@/app/api/agents/api";
 import { AgentConnectionForm } from "@/components/agent-connection-form";
 import { AgentDeleteDialog } from "@/components/agent-delete-dialog";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -58,6 +60,19 @@ export default async function EditAgentPage({
           </CardDescription>
         </CardHeader>
         <CardContent>
+          {agent.authType === "oidc" && agent.status === "authorization_required" ? (
+            <Alert className="mb-6">
+              <AlertTitle>Authorization required</AlertTitle>
+              <AlertDescription className="flex flex-col items-start gap-3">
+                <span>Authorize this Agent Connection before starting a chat.</span>
+                <Button asChild variant="outline" size="sm">
+                  <a href={`/api/agents/${agent.id}/auth/oidc/start?returnPath=${encodeURIComponent(`/agents/${agent.id}/edit`)}`}>
+                    Authorize with identity provider
+                  </a>
+                </Button>
+              </AlertDescription>
+            </Alert>
+          ) : null}
           <AgentConnectionForm initialAgent={agent} />
         </CardContent>
       </Card>

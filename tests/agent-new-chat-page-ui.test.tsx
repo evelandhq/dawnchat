@@ -42,4 +42,25 @@ describe("AgentNewChatPage presentation", () => {
     expect(container.querySelector('[data-slot="avatar"]')).not.toBeInTheDocument();
     expect(screen.getByLabelText("First message")).toBeEnabled();
   });
+
+  it("offers the OIDC authorization flow when authorization is required", async () => {
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Private Bot",
+      baseUrl: "https://private-bot.example.com",
+      authType: "oidc",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "authorization_required" });
+
+    const page = await AgentNewChatPage({ params: Promise.resolve({ agentId: agent.id }) });
+    render(page);
+
+    expect(screen.getByText("Authorization is required before starting a chat with this agent.")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Authorize with identity provider" })).toHaveAttribute(
+      "href",
+      `/api/agents/${agent.id}/auth/oidc/start?returnPath=${encodeURIComponent(`/agents/${agent.id}/edit`)}`,
+    );
+    expect(screen.queryByRole("button", { name: "Check again" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("First message")).toBeDisabled();
+  });
 });

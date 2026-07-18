@@ -14,6 +14,7 @@ The repository provides PostgreSQL 16 on `127.0.0.1:55433`; it avoids both the c
 corepack pnpm install
 cp .env.example .env.local
 # Edit .env.local and replace the AUTH_SECRET placeholder with a real local secret.
+# Keep APP_ORIGIN aligned with the URL used to open EveChats.
 corepack pnpm db:up
 corepack pnpm db:migrate
 corepack pnpm dev
@@ -56,3 +57,13 @@ A local Eve Agent connection must expose the Eve HTTP routes under its configure
 - `GET /eve/v1/session/:sessionId/stream`
 
 Register that base URL in the app, then create a chat against the registered agent. A chat turn creates or continues an Eve session, consumes the stream, persists user/assistant messages, and stores the session state (`sessionId`, `continuationToken`, and `streamIndex`) for follow-up messages.
+
+Choose the Agent access method explicitly. `Local development` is accepted only for `localhost`, `*.localhost`, `127.0.0.0/8`, or `::1` URLs, matching Eve's `localDev()` identity. Credential-bearing methods use manual redirect handling so credentials cannot follow a cross-origin redirect.
+
+For `OIDC Authorization Code`, register this redirect URI with the identity provider:
+
+```text
+http://localhost:3010/agent-auth/oidc/callback
+```
+
+Use the deployed EveChats origin instead of `http://localhost:3010` in production. EveChats performs Authorization Code with PKCE, validates the access token through OIDC UserInfo or Eve's OIDC JWT verifier, and refreshes expiring credentials on the server.

@@ -1,7 +1,10 @@
-import { integer, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { check, index, integer, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 
-export const authTypes = ["none", "bearer", "header"] as const;
-export const agentConnectionStatuses = ["unknown", "healthy", "unreachable"] as const;
+import { agentAuthMethods } from "@/eve/auth-methods";
+
+export const authTypes = agentAuthMethods;
+export const agentConnectionStatuses = ["unknown", "healthy", "unreachable", "authorization_required"] as const;
 export const chatStatuses = ["active", "completed", "failed"] as const;
 export const messageRoles = ["user", "assistant", "system"] as const;
 
@@ -18,12 +21,64 @@ export const agentConnections = pgTable(
     baseUrl: text("base_url").notNull(),
     authType: text("auth_type", { enum: authTypes }).notNull(),
     authConfigEncrypted: text("auth_config_encrypted"),
+    securityRevision: integer("security_revision").notNull().default(1),
     status: text("status", { enum: agentConnectionStatuses }).notNull().default("unknown"),
     lastCheckedAt: timestamp("last_checked_at", { withTimezone: true, mode: "date" }),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull(),
   },
-  (table) => [uniqueIndex("agent_connections_base_url_unique").on(table.baseUrl)],
+  (table) => [
+    uniqueIndex("agent_connections_base_url_unique").on(table.baseUrl),
+    check("agent_connections_security_revision_check", sql`${table.securityRevision} > 0`),
+  ],
+);
+
+export const agentAuthCredentials = pgTable(
+  "agent_auth_credentials",
+  {
+    agentConnectionId: text("agent_connection_id").notNull().references(() => agentConnections.id, { onDelete: "cascade" }),
+    securityRevision: integer("security_revision").notNull(),
+    authMethod: text("auth_method").notNull(),
+    credentialScope: text("credential_scope").notNull(),
+    scopeSubject: text("scope_subject").notNull(),
+    credentialKey: text("credential_key").notNull().default(""),
+    payloadEncrypted: text("payload_encrypted").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true, mode: "date" }),
+    rotationSeq: integer("rotation_seq").notNull().default(0),
+    refreshOwner: text("refresh_owner"),
+    refreshLeaseId: text("refresh_lease_id"),
+    refreshLeaseUntil: timestamp("refresh_lease_until", { withTimezone: true, mode: "date" }),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("agent_auth_credentials_scope_idx").on(
+      table.agentConnectionId,
+      table.securityRevision,
+      table.authMethod,
+      table.credentialScope,
+      table.scopeSubject,
+      table.credentialKey,
+    ),
+    check("agent_auth_credentials_security_revision_check", sql`${table.securityRevision} > 0`),
+    check("agent_auth_credentials_rotation_seq_check", sql`${table.rotationSeq} >= 0`),
+    check(
+      "agent_auth_credentials_scope_check",
+      sql`(${table.credentialScope} = 'connection' and ${table.scopeSubject} = '') or (${table.credentialScope} = 'principal' and ${table.scopeSubject} <> '')`,
+    ),
+  ],
+);
+
+export const agentAuthTransactions = pgTable(
+  "agent_auth_transactions",
+  {
+    agentConnectionId: text("agent_connection_id").notNull().references(() => agentConnections.id, { onDelete: "cascade" }),
+    stateHash: text("state_hash").primaryKey(),
+    payloadEncrypted: text("payload_encrypted").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true, mode: "date" }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+  },
+  (table) => [index("agent_auth_transactions_expires_idx").on(table.expiresAt)],
 );
 
 export const chats = pgTable("chats", {
@@ -68,4 +123,11 @@ export const events = pgTable(
   ],
 );
 
-export const schema = { agentConnections, chats, messages, events };
+export const schema = {
+  agentConnections,
+  agentAuthCredentials,
+  agentAuthTransactions,
+  chats,
+  messages,
+  events,
+};

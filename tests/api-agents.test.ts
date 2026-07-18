@@ -128,6 +128,7 @@ describe("Agent Connection API", () => {
         baseUrl: server.baseUrl,
         authType: "bearer",
         hasAuth: true,
+        securityRevision: 1,
         status: "healthy",
         lastCheckedAt: expect.any(String),
       },
@@ -135,13 +136,84 @@ describe("Agent Connection API", () => {
     });
     expectNoSecretLeak(body, secret);
     const storedAgent = (await createRepository(testDb.db).listAgentConnections())[0];
-    expect(storedAgent.authConfigEncrypted).toEqual(expect.stringMatching(/^eve-auth:v1:/));
+    expect(storedAgent.authConfigEncrypted).toEqual(expect.stringMatching(/^eve-auth:v2:/));
     expect(storedAgent.authConfigEncrypted).not.toContain(secret);
     expect(server.requests.map((request) => `${request.method} ${request.path}`)).toEqual([
       "GET /eve/v1/health",
       "GET /eve/v1/info",
     ]);
     expect(server.requests[0].headers.authorization).toBe(`Bearer ${secret}`);
+  });
+
+  it("connects and verifies an Agent with standard HTTP Basic authentication", async () => {
+    const server = await fakeServer();
+    const password = "basic-password-secret";
+
+    const response = await postAgents({
+      name: "Basic Agent",
+      baseUrl: server.baseUrl,
+      authType: "basic",
+      config: { username: "alice", password },
+    });
+    const body = await readJson(response);
+
+    expect(response.status).toBe(201);
+    expect(body).toEqual({
+      agent: expect.objectContaining({ authType: "basic", hasAuth: true, status: "healthy" }),
+      info: expect.objectContaining({ name: "Fake Eve Agent" }),
+    });
+    expectNoSecretLeak(body, password);
+    for (const request of server.requests) {
+      expect(request.headers.authorization).toBe(`Basic ${Buffer.from(`alice:${password}`).toString("base64")}`);
+    }
+  });
+
+  it("connects and verifies an Agent with Eve's Vercel OIDC client headers", async () => {
+    const server = await fakeServer();
+    const token = "vercel-oidc-secret";
+
+    const response = await postAgents({
+      name: "Vercel Agent",
+      baseUrl: server.baseUrl,
+      authType: "vercel-oidc",
+      config: { token },
+    });
+    const body = await readJson(response);
+
+    expect(response.status).toBe(201);
+    expect(body).toEqual({
+      agent: expect.objectContaining({ authType: "vercel-oidc", hasAuth: true, status: "healthy" }),
+      info: expect.objectContaining({ name: "Fake Eve Agent" }),
+    });
+    expectNoSecretLeak(body, token);
+    for (const request of server.requests) {
+      expect(request.headers.authorization).toBe(`Bearer ${token}`);
+      expect(request.headers["x-vercel-trusted-oidc-idp-token"]).toBe(token);
+    }
+  });
+
+  it("accepts Local development only for Eve loopback targets", async () => {
+    const server = await fakeServer();
+    const local = await postAgents({
+      name: "Local Agent",
+      baseUrl: server.baseUrl,
+      authType: "local-dev",
+      config: {},
+    });
+    expect(local.status).toBe(201);
+    await expect(readJson(local)).resolves.toEqual({
+      agent: expect.objectContaining({ authType: "local-dev", hasAuth: false, status: "healthy" }),
+      info: expect.objectContaining({ name: "Fake Eve Agent" }),
+    });
+
+    const publicTarget = await postAgents({
+      name: "Unsafe Local Agent",
+      baseUrl: "https://agent.example.com",
+      authType: "local-dev",
+      config: {},
+    });
+    expect(publicTarget.status).toBe(400);
+    await expect(readJson(publicTarget)).resolves.toEqual({ error: "Invalid agent connection" });
   });
 
   it("rejects an already-registered normalized agent URL", async () => {
@@ -181,7 +253,7 @@ describe("Agent Connection API", () => {
       await postAgents({
         name: "Second Agent",
         baseUrl: secondServer.baseUrl,
-        authType: "header",
+        authType: "headers",
         headerName: "X-Agent-Token",
         headerValue: headerSecret,
       }),
@@ -199,6 +271,7 @@ describe("Agent Connection API", () => {
           baseUrl: firstServer.baseUrl,
           authType: "none",
           hasAuth: false,
+          securityRevision: 1,
           status: "healthy",
           lastCheckedAt: expect.any(String),
         },
@@ -206,8 +279,9 @@ describe("Agent Connection API", () => {
           id: second.agent.id,
           name: "Second Agent",
           baseUrl: secondServer.baseUrl,
-          authType: "header",
+          authType: "headers",
           hasAuth: true,
+          securityRevision: 1,
           status: "healthy",
           lastCheckedAt: expect.any(String),
         },
@@ -215,7 +289,7 @@ describe("Agent Connection API", () => {
     });
     expectNoSecretLeak(body, headerSecret);
     const storedSecondAgent = await createRepository(testDb.db).getAgentConnection(second.agent.id);
-    expect(storedSecondAgent?.authConfigEncrypted).toEqual(expect.stringMatching(/^eve-auth:v1:/));
+    expect(storedSecondAgent?.authConfigEncrypted).toEqual(expect.stringMatching(/^eve-auth:v2:/));
     expect(storedSecondAgent?.authConfigEncrypted).not.toContain(headerSecret);
   });
 
@@ -225,7 +299,7 @@ describe("Agent Connection API", () => {
     const response = await postAgents({
       name: "Invalid Header Agent",
       baseUrl: "https://example.com",
-      authType: "header",
+      authType: "headers",
       headerName: "Bad Header",
       headerValue: secret,
     });
@@ -253,6 +327,7 @@ describe("Agent Connection API", () => {
         baseUrl: server.baseUrl,
         authType: "none",
         hasAuth: false,
+        securityRevision: 1,
         status: "healthy",
         lastCheckedAt: expect.any(String),
       },
@@ -361,7 +436,7 @@ describe("Agent Connection API", () => {
     const agent = await repository.createAgentConnection({
       name: "Header Agent",
       baseUrl: "https://header-defaults.example.com",
-      authType: "header",
+      authType: "headers",
       authConfigEncrypted: JSON.stringify({
         headerName: "X-Agent-Key",
         headerValue: secret,
@@ -374,9 +449,11 @@ describe("Agent Connection API", () => {
       id: agent.id,
       name: "Header Agent",
       baseUrl: "https://header-defaults.example.com",
-      authType: "header",
+      authType: "headers",
       hasAuth: true,
-      headerName: "X-Agent-Key",
+      securityRevision: 1,
+      config: { headerNames: ["x-agent-key"] },
+      status: "unknown",
     });
     expect(JSON.stringify(defaults)).not.toContain(secret);
   });
@@ -410,6 +487,7 @@ describe("Agent Connection API", () => {
         baseUrl: server.baseUrl,
         authType: "bearer",
         hasAuth: true,
+        securityRevision: 1,
         status: "healthy",
         lastCheckedAt: expect.any(String),
       }),
@@ -421,14 +499,45 @@ describe("Agent Connection API", () => {
     }
   });
 
-  it("preserves a custom header value while allowing its header name to change", async () => {
+  it("rotates the authentication security revision when the Agent target changes", async () => {
+    const firstServer = await fakeServer();
+    const secondServer = await fakeServer();
+    const secret = "target-bound-bearer-secret";
+    const created = (await readJson(await postAgents({
+      name: "Target-bound Agent",
+      baseUrl: firstServer.baseUrl,
+      authType: "bearer",
+      config: { token: secret },
+    }))) as { agent: { id: string } };
+
+    const response = await patchAgent(created.agent.id, {
+      name: "Target-bound Agent",
+      baseUrl: secondServer.baseUrl,
+      authType: "bearer",
+      config: {},
+    });
+
+    expect(response.status).toBe(200);
+    await expect(readJson(response)).resolves.toEqual({
+      agent: expect.objectContaining({
+        id: created.agent.id,
+        baseUrl: secondServer.baseUrl,
+        securityRevision: 2,
+        status: "healthy",
+      }),
+      info: expect.objectContaining({ name: "Fake Eve Agent" }),
+    });
+    expect(secondServer.requests[0].headers.authorization).toBe(`Bearer ${secret}`);
+  });
+
+  it("preserves configured custom headers when an edit leaves the secret field blank", async () => {
     const server = await fakeServer();
     const secret = "preserved-header-secret";
     const created = (await readJson(
       await postAgents({
         name: "Header Agent",
         baseUrl: server.baseUrl,
-        authType: "header",
+        authType: "headers",
         headerName: "X-Old-Key",
         headerValue: secret,
       }),
@@ -438,17 +547,15 @@ describe("Agent Connection API", () => {
     const response = await patchAgent(created.agent.id, {
       name: "Header Agent",
       baseUrl: server.baseUrl,
-      authType: "header",
-      headerName: "X-New-Key",
-      headerValue: "",
+      authType: "headers",
+      config: {},
     });
 
     expect(response.status).toBe(200);
     const editedRequests = server.requests.slice(requestCountBeforeEdit);
     expect(editedRequests).toHaveLength(2);
     for (const request of editedRequests) {
-      expect(request.headers["x-new-key"]).toBe(secret);
-      expect(request.headers["x-old-key"]).toBeUndefined();
+      expect(request.headers["x-old-key"]).toBe(secret);
     }
   });
 

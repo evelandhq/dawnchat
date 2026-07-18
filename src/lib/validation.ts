@@ -1,7 +1,10 @@
 import { z } from "zod";
 
-export const authTypeSchema = z.enum(["none", "bearer", "header"]);
+import { agentAuthMethods } from "@/eve/auth-methods";
+
+export const authTypeSchema = z.enum(agentAuthMethods);
 export const agentAuthSchema = authTypeSchema;
+const legacyAuthTypeSchema = z.enum([...agentAuthMethods, "header"]);
 
 export function normalizeAgentBaseUrl(input: string): string {
   const trimmed = input.trim();
@@ -28,14 +31,6 @@ export function normalizeAgentBaseUrl(input: string): string {
 }
 
 const nonEmptyTrimmedString = z.string().trim().min(1);
-const httpHeaderNameSchema = z
-  .string()
-  .trim()
-  .optional()
-  .refine((value) => value === undefined || /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(value), {
-    message: "Header name must be a valid HTTP header name",
-  });
-
 const agentBaseUrlSchema = z.string().transform((value, ctx) => {
   try {
     return normalizeAgentBaseUrl(value);
@@ -49,61 +44,37 @@ const agentBaseUrlSchema = z.string().transform((value, ctx) => {
   }
 });
 
-export const createAgentConnectionSchema = z
-  .object({
-    name: nonEmptyTrimmedString,
-    baseUrl: agentBaseUrlSchema,
-    authType: authTypeSchema.default("none"),
-    bearerToken: z.string().optional(),
-    headerName: httpHeaderNameSchema,
-    headerValue: z.string().optional(),
-  })
-  .superRefine((value, ctx) => {
-    if (value.authType === "bearer" && !value.bearerToken?.trim()) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["bearerToken"],
-        message: "Bearer token is required for bearer auth",
-      });
-    }
+const agentConnectionInputSchema = z.object({
+  name: nonEmptyTrimmedString,
+  baseUrl: agentBaseUrlSchema,
+  authType: legacyAuthTypeSchema.default("none"),
+  config: z.unknown().optional(),
+  bearerToken: z.string().optional(),
+  headerName: z.string().trim().optional(),
+  headerValue: z.string().optional(),
+}).transform((value) => {
+  const authType = value.authType === "header" ? "headers" as const : value.authType;
+  let config = value.config;
+  if (config === undefined && authType === "bearer" && value.bearerToken !== undefined) {
+    config = value.bearerToken ? { token: value.bearerToken } : {};
+  }
+  if (config === undefined && authType === "headers") {
+    config = value.headerName && value.headerValue
+      ? { headers: { [value.headerName]: value.headerValue } }
+      : {};
+  }
+  return { name: value.name, baseUrl: value.baseUrl, authType, config: config ?? {} };
+});
 
-    if (value.authType === "header") {
-      if (!value.headerName?.trim()) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["headerName"],
-          message: "Header name is required for header auth",
-        });
-      }
+export const createAgentConnectionSchema = agentConnectionInputSchema;
+export const updateAgentConnectionSchema = agentConnectionInputSchema;
 
-      if (!value.headerValue?.trim()) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["headerValue"],
-          message: "Header value is required for header auth",
-        });
-      }
-    }
-  });
-
-export const updateAgentConnectionSchema = z
-  .object({
-    name: nonEmptyTrimmedString,
-    baseUrl: agentBaseUrlSchema,
-    authType: authTypeSchema,
-    bearerToken: z.string().optional(),
-    headerName: httpHeaderNameSchema,
-    headerValue: z.string().optional(),
-  })
-  .superRefine((value, ctx) => {
-    if (value.authType === "header" && !value.headerName?.trim()) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["headerName"],
-        message: "Header name is required for header auth",
-      });
-    }
-  });
+export const agentAuthCallbackSchema = z.object({
+  search: z.string().min(1).max(8_192).refine(
+    (value) => value.startsWith("?"),
+    "OIDC callback search must start with ?.",
+  ),
+});
 
 export const discoverAgentsSchema = z.object({
   gatewayUrl: agentBaseUrlSchema,

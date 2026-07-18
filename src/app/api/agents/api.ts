@@ -1,9 +1,24 @@
 import { z } from "zod";
 
-import { createRepository, DuplicateAgentUrlError, type AgentConnection } from "@/db/repository";
+import {
+  AgentConnectionChangedError,
+  createRepository,
+  DuplicateAgentUrlError,
+  type AgentConnection,
+} from "@/db/repository";
+import type { AgentConnectionStatus, AuthType } from "@/db/schema";
 import { getDbClient } from "@/db/provider";
 import { checkEveAgent, type EveHealthCheckResult } from "@/eve/client";
 import { encryptAuthConfig, parseAuthConfig } from "@/eve/auth";
+import {
+  agentAuthMethodStoresConfig,
+  agentAuthConfigsEqual,
+  normalizeAgentAuthConfig,
+  redactAgentAuthConfig,
+  validateAgentAuthTarget,
+} from "@/eve/auth-methods";
+import { preflightAgentAuth } from "@/eve/auth-runtime";
+import { createId } from "@/lib/ids";
 import {
   createAgentConnectionSchema,
   discoverAgentsSchema,
@@ -15,9 +30,10 @@ export type RedactedAgentConnection = {
   id: string;
   name: string;
   baseUrl: string;
-  authType: "none" | "bearer" | "header";
+  authType: AuthType;
   hasAuth: boolean;
-  status: "unknown" | "healthy" | "unreachable";
+  securityRevision: number;
+  status: AgentConnectionStatus;
   lastCheckedAt: string | null;
 };
 
@@ -25,50 +41,20 @@ export type AgentConnectionEditDefaults = {
   id: string;
   name: string;
   baseUrl: string;
-  authType: "none" | "bearer" | "header";
+  authType: AuthType;
   hasAuth: boolean;
-  headerName: string;
+  securityRevision: number;
+  config: Record<string, unknown>;
+  status: AgentConnectionStatus;
 };
-
-type StoredAuthConfig =
-  | { authType: "none" }
-  | { authType: "bearer"; bearerToken: string }
-  | { authType: "header"; headerName: string; headerValue: string };
 
 type UpdateAgentConnectionData = z.infer<typeof updateAgentConnectionSchema>;
 
 class InvalidAgentAuthUpdateError extends Error {}
 
-function readStoredAuthConfig(agent: AgentConnection): StoredAuthConfig {
-  if (agent.authType === "none") {
-    return { authType: "none" };
-  }
-
-  const config = parseAuthConfig(agent);
-  if (!config || typeof config !== "object") {
-    throw new Error("Agent auth configuration is missing");
-  }
-  const values = config as Record<string, unknown>;
-
-  if (agent.authType === "bearer") {
-    const bearerToken = values.bearerToken ?? values.token;
-    if (typeof bearerToken !== "string" || bearerToken.length === 0) {
-      throw new Error("Bearer auth configuration is missing a token");
-    }
-    return { authType: "bearer", bearerToken };
-  }
-
-  const headerName = values.headerName;
-  const headerValue = values.headerValue ?? values.value;
-  if (
-    typeof headerName !== "string" ||
-    headerName.length === 0 ||
-    typeof headerValue !== "string" ||
-    headerValue.length === 0
-  ) {
-    throw new Error("Header auth configuration is missing a header name or value");
-  }
-  return { authType: "header", headerName, headerValue };
+function readStoredAuthConfig(agent: AgentConnection): Record<string, unknown> {
+  if (!agentAuthMethodStoresConfig(agent.authType)) return {};
+  return normalizeAgentAuthConfig(agent.authType, {}, parseAuthConfig(agent));
 }
 
 export function getAgentConnectionEditDefaults(agent: AgentConnection): AgentConnectionEditDefaults {
@@ -78,57 +64,40 @@ export function getAgentConnectionEditDefaults(agent: AgentConnection): AgentCon
     name: agent.name,
     baseUrl: agent.baseUrl,
     authType: agent.authType,
-    hasAuth: auth.authType !== "none",
-    headerName: auth.authType === "header" ? auth.headerName : "",
+    hasAuth: agentAuthMethodStoresConfig(agent.authType),
+    securityRevision: agent.securityRevision,
+    config: redactAgentAuthConfig(agent.authType, auth),
+    status: agent.status,
   };
-}
-
-function hasSubmittedSecret(value: string | undefined): value is string {
-  return Boolean(value?.trim());
 }
 
 function resolveUpdatedAuthConfig(
   existing: AgentConnection,
   input: UpdateAgentConnectionData,
-): string | null {
-  if (input.authType === "none") {
-    return null;
+): { config: Record<string, unknown>; encrypted: string | null; securityChanged: boolean } {
+  let previous: Record<string, unknown> | undefined;
+  if (existing.authType === input.authType) previous = readStoredAuthConfig(existing);
+  let config: Record<string, unknown>;
+  try {
+    config = normalizeAgentAuthConfig(input.authType, input.config, previous);
+  } catch (error) {
+    throw new InvalidAgentAuthUpdateError(error instanceof Error ? error.message : "Invalid Agent Auth configuration");
   }
-
-  if (input.authType === "bearer") {
-    if (hasSubmittedSecret(input.bearerToken)) {
-      return encryptAuthConfig({ bearerToken: input.bearerToken });
-    }
-    if (existing.authType !== "bearer" || !existing.authConfigEncrypted) {
-      throw new InvalidAgentAuthUpdateError("A new bearer token is required");
-    }
-    const stored = readStoredAuthConfig(existing);
-    if (stored.authType !== "bearer") {
-      throw new Error("Stored bearer auth configuration is invalid");
-    }
-    return existing.authConfigEncrypted;
-  }
-
-  if (!input.headerName) {
-    throw new InvalidAgentAuthUpdateError("A valid header name is required");
-  }
-  if (hasSubmittedSecret(input.headerValue)) {
-    return encryptAuthConfig({
-      headerName: input.headerName,
-      headerValue: input.headerValue,
-    });
-  }
-  if (existing.authType !== "header") {
-    throw new InvalidAgentAuthUpdateError("A new header value is required");
-  }
-  const stored = readStoredAuthConfig(existing);
-  if (stored.authType !== "header") {
-    throw new Error("Stored header auth configuration is invalid");
-  }
-  return encryptAuthConfig({
-    headerName: input.headerName,
-    headerValue: stored.headerValue,
-  });
+  const securityChanged = existing.baseUrl !== input.baseUrl
+    || existing.authType !== input.authType
+    || !agentAuthConfigsEqual(previous, config);
+  const securityRevision = existing.securityRevision + (securityChanged ? 1 : 0);
+  return {
+    config,
+    encrypted: agentAuthMethodStoresConfig(input.authType)
+      ? encryptAuthConfig(config, {
+          id: existing.id,
+          authType: input.authType,
+          securityRevision,
+        })
+      : null,
+    securityChanged,
+  };
 }
 
 export function redactAgentConnection(agent: AgentConnection): RedactedAgentConnection {
@@ -137,22 +106,11 @@ export function redactAgentConnection(agent: AgentConnection): RedactedAgentConn
     name: agent.name,
     baseUrl: agent.baseUrl,
     authType: agent.authType,
-    hasAuth: agent.authType !== "none" && Boolean(agent.authConfigEncrypted),
+    hasAuth: agentAuthMethodStoresConfig(agent.authType) && Boolean(agent.authConfigEncrypted),
+    securityRevision: agent.securityRevision,
     status: agent.status,
     lastCheckedAt: agent.lastCheckedAt?.toISOString() ?? null,
   };
-}
-
-export function encodeAuthConfig(input: z.infer<typeof createAgentConnectionSchema>): string | null {
-  if (input.authType === "none") {
-    return null;
-  }
-
-  if (input.authType === "bearer") {
-    return encryptAuthConfig({ bearerToken: input.bearerToken });
-  }
-
-  return encryptAuthConfig({ headerName: input.headerName, headerValue: input.headerValue });
 }
 
 export function jsonResponse(body: unknown, init?: ResponseInit): Response {
@@ -174,20 +132,50 @@ export async function createAndCheckAgentConnection(body: unknown): Promise<Resp
   }
 
   try {
+    assertValidAuthTarget(parsed.data.authType, parsed.data.baseUrl);
+    let normalizedConfig: Record<string, unknown>;
+    try {
+      normalizedConfig = normalizeAgentAuthConfig(parsed.data.authType, parsed.data.config);
+    } catch {
+      return validationErrorResponse();
+    }
+    try {
+      await preflightAgentAuth(parsed.data.authType, normalizedConfig);
+    } catch {
+      return jsonResponse({ error: "Agent Auth provider preflight failed" }, { status: 422 });
+    }
     const repository = createRepository(getDbClient());
+    const agentId = createId("agent");
     const created = await repository.createAgentConnection({
+      id: agentId,
       name: parsed.data.name,
       baseUrl: parsed.data.baseUrl,
       authType: parsed.data.authType,
-      authConfigEncrypted: encodeAuthConfig(parsed.data),
+      authConfigEncrypted: agentAuthMethodStoresConfig(parsed.data.authType)
+        ? encryptAuthConfig(normalizedConfig, {
+            id: agentId,
+            authType: parsed.data.authType,
+            securityRevision: 1,
+          })
+        : null,
     });
 
     const check = await checkEveAgent(created);
-    const checked = await repository.updateAgentHealth(created.id, { status: check.status, lastCheckedAt: new Date() });
+    const checked = await repository.updateAgentHealth(created.id, {
+      status: check.status,
+      lastCheckedAt: new Date(),
+      expectedSecurityRevision: created.securityRevision,
+    });
 
     return jsonResponse(createCheckResponse(checked, check), { status: 201 });
   } catch (error) {
+    if (error instanceof InvalidAgentAuthUpdateError) {
+      return validationErrorResponse();
+    }
     if (error instanceof DuplicateAgentUrlError) {
+      return jsonResponse({ error: error.message }, { status: 409 });
+    }
+    if (error instanceof AgentConnectionChangedError) {
       return jsonResponse({ error: error.message }, { status: 409 });
     }
     return unknownErrorResponse();
@@ -207,20 +195,36 @@ export async function updateAndCheckAgentConnection(agentId: string, body: unkno
       return jsonResponse({ error: "Agent connection not found" }, { status: 404 });
     }
 
+    assertValidAuthTarget(parsed.data.authType, parsed.data.baseUrl);
+    const resolvedAuth = resolveUpdatedAuthConfig(existing, parsed.data);
+    if (resolvedAuth.securityChanged) {
+      try {
+        await preflightAgentAuth(parsed.data.authType, resolvedAuth.config);
+      } catch {
+        return jsonResponse({ error: "Agent Auth provider preflight failed" }, { status: 422 });
+      }
+    }
     const updated = await repository.updateAgentConnection(agentId, {
       name: parsed.data.name,
       baseUrl: parsed.data.baseUrl,
       authType: parsed.data.authType,
-      authConfigEncrypted: resolveUpdatedAuthConfig(existing, parsed.data),
+      authConfigEncrypted: resolvedAuth.encrypted,
+      expectedSecurityRevision: existing.securityRevision,
+      securityChanged: resolvedAuth.securityChanged,
     });
     if (!updated) {
-      return jsonResponse({ error: "Agent connection not found" }, { status: 404 });
+      return jsonResponse({ error: "Agent connection was updated by another request" }, { status: 409 });
+    }
+
+    if (resolvedAuth.securityChanged) {
+      await repository.deleteStaleAgentAuthCredentials(updated.id, updated.securityRevision);
     }
 
     const check = await checkEveAgent(updated);
     const checked = await repository.updateAgentHealth(updated.id, {
       status: check.status,
       lastCheckedAt: new Date(),
+      expectedSecurityRevision: updated.securityRevision,
     });
     return jsonResponse(createCheckResponse(checked, check));
   } catch (error) {
@@ -228,6 +232,9 @@ export async function updateAndCheckAgentConnection(agentId: string, body: unkno
       return validationErrorResponse();
     }
     if (error instanceof DuplicateAgentUrlError) {
+      return jsonResponse({ error: error.message }, { status: 409 });
+    }
+    if (error instanceof AgentConnectionChangedError) {
       return jsonResponse({ error: error.message }, { status: 409 });
     }
     return unknownErrorResponse();
@@ -266,10 +273,17 @@ export async function checkAgentConnection(agentId: string): Promise<Response> {
     }
 
     const check = await checkEveAgent(agent);
-    const checked = await repository.updateAgentHealth(agent.id, { status: check.status, lastCheckedAt: new Date() });
+    const checked = await repository.updateAgentHealth(agent.id, {
+      status: check.status,
+      lastCheckedAt: new Date(),
+      expectedSecurityRevision: agent.securityRevision,
+    });
 
     return jsonResponse(createCheckResponse(checked, check));
-  } catch {
+  } catch (error) {
+    if (error instanceof AgentConnectionChangedError) {
+      return jsonResponse({ error: error.message }, { status: 409 });
+    }
     return unknownErrorResponse();
   }
 }
@@ -352,5 +366,14 @@ function createCheckResponse(agent: AgentConnection, check: EveHealthCheckResult
     agent: redactAgentConnection(agent),
     ...(check.info === undefined ? {} : { info: check.info }),
     ...(check.error === undefined ? {} : { error: check.error }),
+    ...(check.authorization === undefined ? {} : { authorization: check.authorization }),
   };
+}
+
+function assertValidAuthTarget(authType: AuthType, baseUrl: string): void {
+  try {
+    validateAgentAuthTarget(authType, baseUrl);
+  } catch (error) {
+    throw new InvalidAgentAuthUpdateError(error instanceof Error ? error.message : "Invalid Agent Auth target");
+  }
 }

@@ -11,6 +11,7 @@ import { getAgentsForPage } from "@/app/agents/page";
 import { createRepository } from "@/db/repository";
 import { setDbClientForTests } from "@/db/provider";
 import { encryptAuthConfig } from "@/eve/auth";
+import { createId } from "@/lib/ids";
 import { createTestDbHandle, type TestDbHandle } from "@/test/db";
 
 const pushMock = vi.fn();
@@ -61,7 +62,7 @@ describe("AgentConnectionForm", () => {
       expect.objectContaining({
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name: "Remote Eve", baseUrl: "https://eve.example.com", authType: "none" }),
+        body: JSON.stringify({ name: "Remote Eve", baseUrl: "https://eve.example.com", authType: "none", config: {} }),
       }),
     );
     await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/agents/agent_123"));
@@ -103,7 +104,49 @@ describe("AgentConnectionForm", () => {
     expect(pushMock).not.toHaveBeenCalled();
   });
 
-  it("shows auth fields conditionally and submits custom header credentials", async () => {
+  it("lists every Eveland-standard Agent access method in the standard order", () => {
+    render(React.createElement(AgentConnectionForm));
+
+    const select = screen.getByLabelText("Agent access method") as HTMLSelectElement;
+    expect(Array.from(select.options).map((option) => [option.value, option.text])).toEqual([
+      ["local-dev", "Local development"],
+      ["none", "No authentication"],
+      ["basic", "HTTP Basic"],
+      ["bearer", "Bearer token"],
+      ["vercel-oidc", "Vercel OIDC"],
+      ["oidc", "OIDC Authorization Code"],
+      ["headers", "Custom headers"],
+    ]);
+  });
+
+  it("shows the standard generic OIDC fields and defaults", () => {
+    render(React.createElement(AgentConnectionForm));
+
+    fireEvent.change(screen.getByLabelText("Agent access method"), { target: { value: "oidc" } });
+
+    expect(screen.getByLabelText("Issuer")).toBeInTheDocument();
+    expect(screen.getByLabelText("Client ID")).toBeInTheDocument();
+    expect(screen.getByLabelText("Client secret")).toBeInTheDocument();
+    expect(screen.getByLabelText("Scopes")).toHaveValue("openid offline_access");
+    expect(screen.getByLabelText("Token endpoint auth method")).toHaveValue("none");
+    expect(screen.getByLabelText("Access token verification")).toHaveValue("userinfo");
+  });
+
+  it("restricts Local development to the loopback hosts Eve accepts", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    render(React.createElement(AgentConnectionForm));
+
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Public Agent" } });
+    fireEvent.change(screen.getByLabelText("Base URL"), { target: { value: "https://agent.example.com" } });
+    fireEvent.change(screen.getByLabelText("Agent access method"), { target: { value: "local-dev" } });
+    fireEvent.click(screen.getByRole("button", { name: "Register agent" }));
+
+    expect(await screen.findByText("Local development requires a loopback Agent URL.")).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("shows standard Agent access fields and submits custom headers", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ agent: { id: "agent_123" } }), {
         status: 201,
@@ -114,22 +157,22 @@ describe("AgentConnectionForm", () => {
 
     render(React.createElement(AgentConnectionForm));
 
-    expect(screen.queryByLabelText("Bearer Token")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Header Name")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Token")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Headers (JSON)")).not.toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText("Auth Type"), { target: { value: "bearer" } });
-    expect(screen.getByLabelText("Bearer Token")).toBeInTheDocument();
-    expect(screen.queryByLabelText("Header Name")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Agent access method"), { target: { value: "bearer" } });
+    expect(screen.getByLabelText("Token")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Headers (JSON)")).not.toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText("Auth Type"), { target: { value: "header" } });
-    expect(screen.queryByLabelText("Bearer Token")).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Header Name")).toBeInTheDocument();
-    expect(screen.getByLabelText("Header Value")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Agent access method"), { target: { value: "headers" } });
+    expect(screen.queryByLabelText("Token")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Headers (JSON)")).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Header Eve" } });
     fireEvent.change(screen.getByLabelText("Base URL"), { target: { value: "https://header-eve.example.com" } });
-    fireEvent.change(screen.getByLabelText("Header Name"), { target: { value: "X-Eve-Key" } });
-    fireEvent.change(screen.getByLabelText("Header Value"), { target: { value: "secret-test-value" } });
+    fireEvent.change(screen.getByLabelText("Headers (JSON)"), {
+      target: { value: JSON.stringify({ "X-Eve-Key": "secret-test-value" }) },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Register agent" }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
@@ -139,9 +182,8 @@ describe("AgentConnectionForm", () => {
         body: JSON.stringify({
           name: "Header Eve",
           baseUrl: "https://header-eve.example.com",
-          authType: "header",
-          headerName: "X-Eve-Key",
-          headerValue: "secret-test-value",
+          authType: "headers",
+          config: { headers: { "X-Eve-Key": "secret-test-value" } },
         }),
       }),
     );
@@ -149,20 +191,19 @@ describe("AgentConnectionForm", () => {
     expect(refreshMock).toHaveBeenCalledTimes(1);
   });
 
-  it("rejects invalid custom header names before submitting", async () => {
+  it("rejects malformed custom-header JSON before submitting", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
     render(React.createElement(AgentConnectionForm));
 
-    fireEvent.change(screen.getByLabelText("Auth Type"), { target: { value: "header" } });
+    fireEvent.change(screen.getByLabelText("Agent access method"), { target: { value: "headers" } });
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Header Eve" } });
     fireEvent.change(screen.getByLabelText("Base URL"), { target: { value: "https://header-eve.example.com" } });
-    fireEvent.change(screen.getByLabelText("Header Name"), { target: { value: "Bad Header" } });
-    fireEvent.change(screen.getByLabelText("Header Value"), { target: { value: "secret-test-value" } });
+    fireEvent.change(screen.getByLabelText("Headers (JSON)"), { target: { value: "not-json" } });
     fireEvent.click(screen.getByRole("button", { name: "Register agent" }));
 
-    expect(await screen.findByText("Header name must be a valid HTTP header name."));
+    expect(await screen.findByText(/Unexpected token|not valid JSON/));
     expect(fetchMock).not.toHaveBeenCalled();
     expect(pushMock).not.toHaveBeenCalled();
   });
@@ -184,14 +225,16 @@ describe("AgentConnectionForm", () => {
           baseUrl: "https://eve.example.com",
           authType: "bearer",
           hasAuth: true,
-          headerName: "",
+          securityRevision: 1,
+          config: { tokenConfigured: true },
+          status: "healthy",
         },
       }),
     );
 
     expect(screen.getByLabelText("Name")).toHaveValue("Remote Eve");
     expect(screen.getByLabelText("Base URL")).toHaveValue("https://eve.example.com");
-    expect(screen.getByText("Leave blank to keep the current bearer token.")).toBeInTheDocument();
+    expect(screen.getByText("Leave blank to keep the configured value.")).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Renamed Eve" } });
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
@@ -203,6 +246,7 @@ describe("AgentConnectionForm", () => {
         name: "Renamed Eve",
         baseUrl: "https://eve.example.com",
         authType: "bearer",
+        config: {},
       }),
     });
     expect(pushMock).toHaveBeenCalledWith("/agents");
@@ -225,7 +269,9 @@ describe("AgentConnectionForm", () => {
           baseUrl: "https://eve.example.com",
           authType: "none",
           hasAuth: false,
-          headerName: "",
+          securityRevision: 1,
+          config: {},
+          status: "healthy",
         },
       }),
     );
@@ -266,17 +312,19 @@ describe("AgentConnectionForm", () => {
           id: "agent_123",
           name: "Remote Eve",
           baseUrl: "https://eve.example.com",
-          authType: "header",
+          authType: "headers",
           hasAuth: true,
-          headerName: "X-Agent-Key",
+          securityRevision: 1,
+          config: { headerNames: ["x-agent-key"] },
+          status: "healthy",
         },
       }),
     );
 
-    fireEvent.change(screen.getByLabelText("Auth Type"), { target: { value: "bearer" } });
+    fireEvent.change(screen.getByLabelText("Agent access method"), { target: { value: "bearer" } });
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
-    expect(await screen.findByText("Bearer token is required.")).toBeInTheDocument();
+    expect(await screen.findByText("Token is required.")).toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -297,7 +345,9 @@ describe("AgentConnectionForm", () => {
           baseUrl: "https://eve.example.com",
           authType: "none",
           hasAuth: false,
-          headerName: "",
+          securityRevision: 1,
+          config: {},
+          status: "healthy",
         },
       }),
     );
@@ -364,7 +414,7 @@ describe("AgentDiscovery", () => {
       expect.objectContaining({
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name: "Fresh Eve", baseUrl: "http://gateway.example/a/bbb", authType: "none" }),
+        body: JSON.stringify({ name: "Fresh Eve", baseUrl: "http://gateway.example/a/bbb", authType: "none", config: {} }),
       }),
     );
     expect(await screen.findByText("healthy")).toBeInTheDocument();
@@ -447,13 +497,18 @@ describe("AgentsPage data loading", () => {
   it("loads only safe edit defaults from storage", async () => {
     const repository = createRepository(testDb.db);
     const secret = "header-secret-not-for-client";
+    const id = createId("agent");
     const agent = await repository.createAgentConnection({
+      id,
       name: "Header Eve",
       baseUrl: "https://header.example.com",
-      authType: "header",
+      authType: "headers",
       authConfigEncrypted: encryptAuthConfig({
-        headerName: "X-Agent-Key",
-        headerValue: secret,
+        headers: { "X-Agent-Key": secret },
+      }, {
+        id,
+        authType: "headers",
+        securityRevision: 1,
       }),
     });
 
@@ -463,9 +518,11 @@ describe("AgentsPage data loading", () => {
       id: agent.id,
       name: "Header Eve",
       baseUrl: "https://header.example.com",
-      authType: "header",
+      authType: "headers",
       hasAuth: true,
-      headerName: "X-Agent-Key",
+      securityRevision: 1,
+      config: { headerNames: ["x-agent-key"] },
+      status: "unknown",
     });
     expect(JSON.stringify(defaults)).not.toContain(secret);
     await expect(getAgentForEditPage("agent_missing")).resolves.toBeNull();
@@ -480,6 +537,7 @@ describe("AgentList", () => {
       baseUrl: "https://eve.example.com",
       authType: "bearer",
       hasAuth: true,
+      securityRevision: 1,
       status: "healthy",
       lastCheckedAt: "2026-07-10T00:00:00.000Z",
     },
