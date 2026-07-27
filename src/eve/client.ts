@@ -10,17 +10,26 @@ export interface EveHealthCheckResult {
   readonly error?: string;
 }
 
-export function createEveClientForConnection(connection: EveAgentConnectionLike): Client {
+export function createEveClientForConnection(
+  connection: EveAgentConnectionLike,
+  callerToken?: string,
+): Client {
   return new Client({
     host: connection.baseUrl,
     preserveCompletedSessions: true,
-    ...buildEveClientAuthOptions(connection),
+    ...buildEveClientAuthOptions(connection, callerToken),
   });
 }
 
 export async function checkEveAgent(connection: EveAgentConnectionLike): Promise<EveHealthCheckResult> {
   try {
-    const client = createEveClientForConnection(connection);
+    const client = connection.evelandProjectId
+      ? new Client({
+          host: connection.baseUrl,
+          preserveCompletedSessions: true,
+          redirect: "manual",
+        })
+      : createEveClientForConnection(connection);
     const health = await client.health();
     const info = await fetchAgentInfo(client, health);
 

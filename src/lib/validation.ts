@@ -49,16 +49,26 @@ const agentBaseUrlSchema = z.string().transform((value, ctx) => {
   }
 });
 
+const evelandProjectIdSchema = z.string().trim().min(1).nullable().optional();
+
 export const createAgentConnectionSchema = z
   .object({
     name: nonEmptyTrimmedString,
     baseUrl: agentBaseUrlSchema,
     authType: authTypeSchema.default("none"),
+    evelandProjectId: evelandProjectIdSchema,
     bearerToken: z.string().optional(),
     headerName: httpHeaderNameSchema,
     headerValue: z.string().optional(),
   })
   .superRefine((value, ctx) => {
+    if (value.evelandProjectId && value.authType !== "none") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["authType"],
+        message: "Eveland project identity cannot be combined with legacy agent auth",
+      });
+    }
     if (value.authType === "bearer" && !value.bearerToken?.trim()) {
       ctx.addIssue({
         code: "custom",
@@ -91,11 +101,19 @@ export const updateAgentConnectionSchema = z
     name: nonEmptyTrimmedString,
     baseUrl: agentBaseUrlSchema,
     authType: authTypeSchema,
+    evelandProjectId: evelandProjectIdSchema,
     bearerToken: z.string().optional(),
     headerName: httpHeaderNameSchema,
     headerValue: z.string().optional(),
   })
   .superRefine((value, ctx) => {
+    if (value.evelandProjectId && value.authType !== "none") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["authType"],
+        message: "Eveland project identity cannot be combined with legacy agent auth",
+      });
+    }
     if (value.authType === "header" && !value.headerName?.trim()) {
       ctx.addIssue({
         code: "custom",

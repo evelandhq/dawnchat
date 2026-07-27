@@ -50,18 +50,21 @@ type ChatThreadProps = {
   chat: ChatThreadSummary;
   events: HandleMessageStreamEvent[];
   pendingUserMessage?: string | null;
+  getCallerToken?: () => Promise<string>;
 };
 
 export function ChatThread({
   chat,
   events,
   pendingUserMessage = null,
+  getCallerToken,
 }: ChatThreadProps): React.ReactElement {
   const router = useRouter();
   const pendingSentRef = useRef(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const agent = useEveAgent({
     host: `/api/chats/${chat.id}/agent`,
+    auth: getCallerToken ? { bearer: getCallerToken } : undefined,
     initialEvents: events,
     initialSession: chat.sessionState
       ? { ...chat.sessionState, continuationToken: EVE_PROXY_CONTINUATION_TOKEN }
@@ -127,6 +130,33 @@ export function ChatThread({
     }
   };
 
+  const handleStop = (): void => {
+    agent.stop();
+    const sessionId = agent.session.sessionId;
+    if (!sessionId || !getCallerToken) {
+      return;
+    }
+
+    void getCallerToken()
+      .then((callerToken) =>
+        fetch(
+          `/api/chats/${encodeURIComponent(chat.id)}/agent/eve/v1/session/${encodeURIComponent(sessionId)}/cancel`,
+          {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${callerToken}`,
+              "content-type": "application/json",
+            },
+            body: "{}",
+          },
+        ),
+      )
+      .catch(() => {
+        // The local stream is already stopped. A later stream replay will
+        // reconcile the authoritative turn state if cooperative cancel fails.
+      });
+  };
+
   return (
     <TooltipProvider>
       <section className="flex h-full min-h-0 flex-col bg-background">
@@ -182,7 +212,7 @@ export function ChatThread({
               <PromptInputSubmit
                 aria-label={isBusy ? "Stop generating" : "Send message"}
                 disabled={composerDisabled && !isBusy}
-                onStop={agent.stop}
+                onStop={handleStop}
                 status={agent.status}
               />
             </PromptInputFooter>

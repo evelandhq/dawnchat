@@ -48,6 +48,39 @@ describe("NewChatComposer", () => {
     expect(refreshMock).toHaveBeenCalledTimes(1);
   });
 
+  it("requests and sends an in-memory Caller Token for an Eveland project", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      Response.json({ chat: { id: "chat_identity" } }, { status: 201 }),
+    );
+    const getCallerToken = vi.fn(async () => "short-lived-token");
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <NewChatComposer
+        agentId="agent_a"
+        agentName="Data Bot"
+        evelandProjectId="project_support"
+        getCallerToken={getCallerToken}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText("First message"), {
+      target: { value: "Hello" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Start chat" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(getCallerToken).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/chats",
+      expect.objectContaining({
+        headers: {
+          authorization: "Bearer short-lived-token",
+          "content-type": "application/json",
+        },
+      }),
+    );
+  });
+
   it("navigates to a persisted failed chat instead of showing a creation error", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ chat: { id: "chat_failed", status: "failed" }, error: "Eve turn failed" }), {

@@ -255,6 +255,51 @@ describe("repository", () => {
     await expect(repository.listEvents(chat.id)).resolves.toEqual([firstEvent, secondEvent]);
   });
 
+  it("isolates chats by principal, realm, and Eveland project", async () => {
+    const repository = createRepository(db);
+    const agent = await repository.createAgentConnection({
+      name: "Identity Agent",
+      baseUrl: "https://identity.example.com",
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    const owned = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Owned conversation",
+      ownerIdentityPrincipalId: "ipr_user_1",
+      ownerIdentityRealmId: "irl_account_1",
+      evelandProjectId: "project_support",
+    });
+    await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Other realm",
+      ownerIdentityPrincipalId: "ipr_user_1",
+      ownerIdentityRealmId: "irl_account_2",
+      evelandProjectId: "project_support",
+    });
+    await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Legacy owner-null",
+    });
+
+    const scope = {
+      principalId: "ipr_user_1",
+      realmId: "irl_account_1",
+      projectId: "project_support",
+    };
+    await expect(repository.listChatsForIdentity(scope)).resolves.toEqual([owned]);
+    await expect(repository.getChatForIdentity(owned.id, scope)).resolves.toEqual(owned);
+    await expect(
+      repository.getChatForIdentity(owned.id, { ...scope, principalId: "ipr_user_2" }),
+    ).resolves.toBeNull();
+    await expect(
+      repository.getChatForIdentity(owned.id, { ...scope, realmId: "irl_account_2" }),
+    ).resolves.toBeNull();
+    await expect(
+      repository.getChatForIdentity(owned.id, { ...scope, projectId: "project_other" }),
+    ).resolves.toBeNull();
+  });
+
   it("deduplicates replayed remote events by session cursor", async () => {
     const repository = createRepository(db);
     const agent = await repository.createAgentConnection({

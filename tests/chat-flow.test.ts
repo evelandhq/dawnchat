@@ -9,6 +9,10 @@ import { setDbClientForTests } from "@/db/provider";
 import { createRepository } from "@/db/repository";
 import { startFakeEveServer, type FakeEveServer } from "@/eve/fake-eve-server.test-helper";
 import { createTestDbHandle, type TestDbHandle } from "@/test/db";
+import {
+  setCallerTokenVerifierForTests,
+  type CallerTokenVerifier,
+} from "@/identity/server";
 
 describe("Eve chat flow smoke", () => {
   let server: FakeEveServer;
@@ -17,11 +21,13 @@ describe("Eve chat flow smoke", () => {
   beforeEach(async () => {
     testDb = await createTestDbHandle();
     setDbClientForTests(testDb.db);
+    setCallerTokenVerifierForTests(testVerifier);
     server = await startFakeEveServer();
   });
 
   afterEach(async () => {
     setDbClientForTests(null);
+    setCallerTokenVerifierForTests(null);
     await testDb.close();
     await server.close();
   });
@@ -35,6 +41,7 @@ describe("Eve chat flow smoke", () => {
           name: "Smoke Eve Agent",
           baseUrl: server.baseUrl,
           authType: "none",
+          evelandProjectId: "project_support",
         }),
       }),
     );
@@ -42,7 +49,10 @@ describe("Eve chat flow smoke", () => {
     const chatResponse = await POST_CHAT(
       new Request("http://localhost/api/chats", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          authorization: "Bearer caller-token",
+          "content-type": "application/json",
+        },
         body: JSON.stringify({ agentId: agent.agent.id, message: "Hello from the smoke test" }),
       }),
     );
@@ -57,7 +67,9 @@ describe("Eve chat flow smoke", () => {
     );
     expect(firstTurn.status).toBe(200);
     const firstStream = await STREAM_SESSION(
-      new Request(`http://localhost/api/chats/${chatId}/agent/eve/v1/session/ses_1/stream`),
+      new Request(`http://localhost/api/chats/${chatId}/agent/eve/v1/session/ses_1/stream`, {
+        headers: { authorization: "Bearer caller-token" },
+      }),
       { params: Promise.resolve({ chatId, sessionId: "ses_1" }) },
     );
     expect((await firstStream.text()).trim().split("\n")).toHaveLength(3);
@@ -72,6 +84,7 @@ describe("Eve chat flow smoke", () => {
     const secondStream = await STREAM_SESSION(
       new Request(
         `http://localhost/api/chats/${chatId}/agent/eve/v1/session/ses_1/stream?startIndex=3`,
+        { headers: { authorization: "Bearer caller-token" } },
       ),
       { params: Promise.resolve({ chatId, sessionId: "ses_1" }) },
     );
@@ -90,6 +103,9 @@ describe("Eve chat flow smoke", () => {
       message: "Can you continue?",
       continuationToken: "eve:1",
     });
+    for (const request of server.requests.slice(2)) {
+      expect(request.headers.authorization).toBe("Bearer caller-token");
+    }
     await expect(createRepository(testDb.db).getChat(chatId)).resolves.toMatchObject({
       agentConnectionId: agent.agent.id,
       pendingUserMessage: null,
@@ -103,7 +119,21 @@ describe("Eve chat flow smoke", () => {
 function jsonRequest(url: string, body: unknown): Request {
   return new Request(url, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      authorization: "Bearer caller-token",
+      "content-type": "application/json",
+    },
     body: JSON.stringify(body),
   });
 }
+
+const testVerifier: CallerTokenVerifier = {
+  async verifyAuthorization(_authorization, expectedProjectId) {
+    return {
+      principalId: "ipr_user_1",
+      realmId: "irl_account_1",
+      projectId: expectedProjectId ?? "project_support",
+      expiresAt: 1_900_000_000,
+    };
+  },
+};

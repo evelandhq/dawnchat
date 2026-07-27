@@ -1,17 +1,24 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { getChatThreadForPage } from "@/app/chats/[chatId]/page";
+import { GET as GET_CHAT } from "@/app/api/chats/[chatId]/route";
 import { POST as POST_CHAT } from "@/app/api/chats/route";
 import { setDbClientForTests } from "@/db/provider";
 import { createRepository } from "@/db/repository";
 import { startFakeEveServer, type FakeEveServer } from "@/eve/fake-eve-server.test-helper";
 import { createTestDbHandle, type TestDbHandle } from "@/test/db";
+import {
+  setCallerTokenVerifierForTests,
+  type CallerTokenVerifier,
+} from "@/identity/server";
 
 function createChat(agentId: string, message: string): Promise<Response> {
   return POST_CHAT(
     new Request("http://localhost/api/chats", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        authorization: "Bearer caller-token",
+        "content-type": "application/json",
+      },
       body: JSON.stringify({ agentId, message }),
     }),
   );
@@ -24,10 +31,12 @@ describe("chat bootstrap", () => {
   beforeEach(async () => {
     testDb = await createTestDbHandle();
     setDbClientForTests(testDb.db);
+    setCallerTokenVerifierForTests(testVerifier);
   });
 
   afterEach(async () => {
     setDbClientForTests(null);
+    setCallerTokenVerifierForTests(null);
     await testDb.close();
     await Promise.all(servers.splice(0).map((server) => server.close()));
   });
@@ -40,6 +49,7 @@ describe("chat bootstrap", () => {
       name: "Bootstrap Eve",
       baseUrl: server.baseUrl,
       authType: "none",
+      evelandProjectId: "project_support",
     });
     await repository.updateAgentHealth(agent.id, { status: "healthy" });
     return { id: agent.id, server };
@@ -63,10 +73,13 @@ describe("chat bootstrap", () => {
     await expect(createRepository(testDb.db).getChat(body.chat.id)).resolves.toMatchObject({
       pendingUserMessage: "Explain this report",
       sessionState: null,
+      ownerIdentityPrincipalId: "ipr_user_1",
+      ownerIdentityRealmId: "irl_account_1",
+      evelandProjectId: "project_support",
     });
   });
 
-  it("loads raw Eve events and the pending first message for useEveAgent hydration", async () => {
+  it("loads raw Eve events without exposing the stored continuation token", async () => {
     const { id: agentId } = await createAgent();
     const response = await createChat(agentId, "Start from the saved draft");
     const body = (await response.json()) as { chat: { id: string } };
@@ -92,14 +105,35 @@ describe("chat bootstrap", () => {
       streamIndex: 5,
     });
 
-    const pageData = await getChatThreadForPage(body.chat.id);
+    const responseData = await GET_CHAT(
+      new Request(`http://localhost/api/chats/${body.chat.id}`, {
+        headers: { authorization: "Bearer caller-token" },
+      }),
+      { params: Promise.resolve({ chatId: body.chat.id }) },
+    );
+    const pageData = await responseData.json();
 
     expect(pageData).toMatchObject({
-      chat: { id: body.chat.id, agentName: "Bootstrap Eve" },
-      pendingUserMessage: "Start from the saved draft",
+      chat: {
+        id: body.chat.id,
+        agentName: "Bootstrap Eve",
+        pendingUserMessage: "Start from the saved draft",
+      },
       events: [event],
     });
     expect(pageData?.chat.sessionState).toEqual({ sessionId: "ses_private", streamIndex: 5 });
     expect(pageData).not.toHaveProperty("messages");
+    expect(JSON.stringify(pageData)).not.toContain("server-only-token");
   });
 });
+
+const testVerifier: CallerTokenVerifier = {
+  async verifyAuthorization(_authorization, expectedProjectId) {
+    return {
+      principalId: "ipr_user_1",
+      realmId: "irl_account_1",
+      projectId: expectedProjectId ?? "project_support",
+      expiresAt: 1_900_000_000,
+    };
+  },
+};

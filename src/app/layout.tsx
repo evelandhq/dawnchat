@@ -8,6 +8,7 @@ import "./globals.css";
 import { AppHeader } from "@/components/app-header";
 import { AppSidebar, getAppNavigationData } from "@/components/app-sidebar";
 import { ThemeProvider } from "@/components/theme-provider";
+import { IdentityProvider } from "@/components/identity-provider";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { cn } from "@/lib/utils";
 
@@ -29,13 +30,24 @@ export default async function RootLayout({ children }: { children: ReactNode }):
     <html lang="en" className={cn("font-sans", inter.variable)} suppressHydrationWarning>
       <body className="antialiased">
         <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
-          <SidebarProvider defaultOpen={defaultOpen}>
-            <AppSidebar data={navigationData} />
-            <SidebarInset className="h-svh overflow-hidden">
-              <AppHeader {...navigationData} />
-              <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
-            </SidebarInset>
-          </SidebarProvider>
+          <IdentityProvider
+            baseUrl={
+              process.env.NEXT_PUBLIC_EVELAND_IDENTITY_URL ??
+              "http://localhost:4000"
+            }
+            returnTarget={
+              process.env.NEXT_PUBLIC_EVELAND_IDENTITY_RETURN_TARGET ??
+              "eve-chats"
+            }
+          >
+            <SidebarProvider defaultOpen={defaultOpen}>
+              <AppSidebar data={navigationData} />
+              <SidebarInset className="h-svh overflow-hidden">
+                <AppHeader {...navigationData} />
+                <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
+              </SidebarInset>
+            </SidebarProvider>
+          </IdentityProvider>
         </ThemeProvider>
       </body>
     </html>

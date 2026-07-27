@@ -4,6 +4,11 @@ import { setDbClientForTests } from "@/db/provider";
 import { createRepository } from "@/db/repository";
 import { startFakeEveServer, type FakeEveServer } from "@/eve/fake-eve-server.test-helper";
 import { EVE_PROXY_CONTINUATION_TOKEN } from "@/eve/proxy-contract";
+import {
+  CallerTokenError,
+  setCallerTokenVerifierForTests,
+  type CallerTokenVerifier,
+} from "@/identity/server";
 import { createTestDbHandle, type TestDbHandle } from "@/test/db";
 
 type RouteContext<TParams extends Record<string, string>> = {
@@ -23,23 +28,26 @@ type GetRoute<TParams extends Record<string, string>> = (
 async function loadProxyRoutes(): Promise<{
   createSession: PostRoute<{ chatId: string }>;
   continueSession: PostRoute<{ chatId: string; sessionId: string }>;
+  cancelSession: PostRoute<{ chatId: string; sessionId: string }>;
   streamSession: GetRoute<{ chatId: string; sessionId: string }>;
 }> {
   const modules = await Promise.all([
     loadRouteModule("../src/app/api/chats/[chatId]/agent/eve/v1/session/route.ts"),
     loadRouteModule("../src/app/api/chats/[chatId]/agent/eve/v1/session/[sessionId]/route.ts"),
+    loadRouteModule("../src/app/api/chats/[chatId]/agent/eve/v1/session/[sessionId]/cancel/route.ts"),
     loadRouteModule("../src/app/api/chats/[chatId]/agent/eve/v1/session/[sessionId]/stream/route.ts"),
   ]);
 
   expect(modules.every(Boolean), "per-chat Eve proxy routes should exist").toBe(true);
-  const [createModule, continueModule, streamModule] = modules;
-  if (!createModule || !continueModule || !streamModule) {
+  const [createModule, continueModule, cancelModule, streamModule] = modules;
+  if (!createModule || !continueModule || !cancelModule || !streamModule) {
     throw new Error("Per-chat Eve proxy routes are missing");
   }
 
   return {
     createSession: createModule.POST as PostRoute<{ chatId: string }>,
     continueSession: continueModule.POST as PostRoute<{ chatId: string; sessionId: string }>,
+    cancelSession: cancelModule.POST as PostRoute<{ chatId: string; sessionId: string }>,
     streamSession: streamModule.GET as GetRoute<{ chatId: string; sessionId: string }>,
   };
 }
@@ -62,10 +70,12 @@ describe("per-chat Eve protocol proxy", () => {
   beforeEach(async () => {
     testDb = await createTestDbHandle();
     setDbClientForTests(testDb.db);
+    setCallerTokenVerifierForTests(testVerifier);
   });
 
   afterEach(async () => {
     setDbClientForTests(null);
+    setCallerTokenVerifierForTests(null);
     await testDb.close();
     await Promise.all(servers.splice(0).map((server) => server.close()));
   });
@@ -76,20 +86,21 @@ describe("per-chat Eve protocol proxy", () => {
     return server;
   }
 
-  it("forwards multimodal turns with server-side auth and persists the remote session cursor", async () => {
+  it("forwards the same Caller Token and persists the remote session cursor", async () => {
     const server = await fakeServer();
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
       name: "Secured Eve",
       baseUrl: server.baseUrl,
-      authType: "bearer",
-      authConfigEncrypted: JSON.stringify({ bearerToken: "server-secret" }),
+      authType: "none",
+      evelandProjectId: "project_support",
     });
     await repository.updateAgentHealth(agent.id, { status: "healthy" });
     const chat = await repository.createChat({
       agentConnectionId: agent.id,
       title: "Inspect file",
       pendingUserMessage: "Inspect this file",
+      ...chatIdentity,
     });
     const routes = await loadProxyRoutes();
     const message = [
@@ -105,7 +116,7 @@ describe("per-chat Eve protocol proxy", () => {
     const response = await routes.createSession(
       new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: callerHeaders({ "content-type": "application/json" }),
         body: JSON.stringify({ message, clientContext: { surface: "eve-chats" } }),
       }),
       { params: Promise.resolve({ chatId: chat.id }) },
@@ -121,7 +132,7 @@ describe("per-chat Eve protocol proxy", () => {
       path: "/eve/v1/session",
       body: { message, clientContext: { surface: "eve-chats" } },
     });
-    expect(server.requests[0].headers.authorization).toBe("Bearer server-secret");
+    expect(server.requests[0].headers.authorization).toBe("Bearer caller-token");
     await expect(repository.getChat(chat.id)).resolves.toMatchObject({
       status: "active",
       pendingUserMessage: null,
@@ -190,15 +201,20 @@ describe("per-chat Eve protocol proxy", () => {
       name: "Structured Eve",
       baseUrl: server.baseUrl,
       authType: "none",
+      evelandProjectId: "project_support",
     });
     await repository.updateAgentHealth(agent.id, { status: "healthy" });
-    const chat = await repository.createChat({ agentConnectionId: agent.id, title: "Structured turn" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Structured turn",
+      ...chatIdentity,
+    });
     const routes = await loadProxyRoutes();
 
     await routes.createSession(
       new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: callerHeaders({ "content-type": "application/json" }),
         body: JSON.stringify({ message: "Read this" }),
       }),
       { params: Promise.resolve({ chatId: chat.id }) },
@@ -206,7 +222,9 @@ describe("per-chat Eve protocol proxy", () => {
 
     const stream = () =>
       routes.streamSession(
-        new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1/stream`),
+        new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1/stream`, {
+          headers: callerHeaders(),
+        }),
         { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
       );
     const firstResponse = await stream();
@@ -271,9 +289,14 @@ describe("per-chat Eve protocol proxy", () => {
       name: "Eve 0.25",
       baseUrl: server.baseUrl,
       authType: "none",
+      evelandProjectId: "project_support",
     });
     await repository.updateAgentHealth(agent.id, { status: "healthy" });
-    const chat = await repository.createChat({ agentConnectionId: agent.id, title: "Rotating token" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Rotating token",
+      ...chatIdentity,
+    });
     await repository.updateChatSessionState(chat.id, {
       sessionId: "ses_1",
       continuationToken: "eve:1",
@@ -282,7 +305,9 @@ describe("per-chat Eve protocol proxy", () => {
     const routes = await loadProxyRoutes();
 
     const response = await routes.streamSession(
-      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1/stream`),
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1/stream`, {
+        headers: callerHeaders(),
+      }),
       { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
     );
 
@@ -317,9 +342,14 @@ describe("per-chat Eve protocol proxy", () => {
       name: "Approval Eve",
       baseUrl: server.baseUrl,
       authType: "none",
+      evelandProjectId: "project_support",
     });
     await repository.updateAgentHealth(agent.id, { status: "healthy" });
-    const chat = await repository.createChat({ agentConnectionId: agent.id, title: "Approval" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Approval",
+      ...chatIdentity,
+    });
     await repository.updateChatSessionState(chat.id, {
       sessionId: "ses_1",
       continuationToken: "eve:1",
@@ -330,7 +360,7 @@ describe("per-chat Eve protocol proxy", () => {
     const response = await routes.continueSession(
       new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: callerHeaders({ "content-type": "application/json" }),
         body: JSON.stringify({
           continuationToken: "untrusted-browser-token",
           inputResponses: [{ requestId: "req_1", optionId: "approve" }],
@@ -348,7 +378,7 @@ describe("per-chat Eve protocol proxy", () => {
     const mismatched = await routes.continueSession(
       new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_2`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: callerHeaders({ "content-type": "application/json" }),
         body: JSON.stringify({ message: "wrong session" }),
       }),
       { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_2" }) },
@@ -358,4 +388,122 @@ describe("per-chat Eve protocol proxy", () => {
     await expect(mismatched.json()).resolves.toEqual({ error: "Eve session does not belong to this chat" });
     expect(server.requests).toHaveLength(1);
   });
+
+  it("authenticates cancel with the same Caller Token and forwards only the turn guard", async () => {
+    const server = await fakeServer();
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Cancelable Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Cancelable",
+      ...chatIdentity,
+    });
+    await repository.updateChatSessionState(chat.id, {
+      sessionId: "ses_1",
+      continuationToken: "eve:1",
+      streamIndex: 3,
+    });
+    const routes = await loadProxyRoutes();
+
+    const response = await routes.cancelSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1/cancel`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({
+          turnId: "turn_1",
+          continuationToken: "must-not-forward",
+        }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      sessionId: "ses_1",
+      status: "accepted",
+    });
+    expect(server.requests).toHaveLength(1);
+    expect(server.requests[0]).toMatchObject({
+      method: "POST",
+      path: "/eve/v1/session/ses_1/cancel",
+      body: { turnId: "turn_1" },
+    });
+    expect(server.requests[0].headers.authorization).toBe("Bearer caller-token");
+  });
+
+  it("returns 404 instead of revealing another principal's chat", async () => {
+    const server = await fakeServer();
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Private Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Private",
+      ...chatIdentity,
+    });
+    const routes = await loadProxyRoutes();
+
+    const response = await routes.createSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session`, {
+        method: "POST",
+        headers: callerHeaders(
+          { "content-type": "application/json" },
+          "other-caller-token",
+        ),
+        body: JSON.stringify({ message: "Steal this chat" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id }) },
+    );
+
+    expect(response.status).toBe(404);
+    expect(server.requests).toEqual([]);
+  });
 });
+
+const chatIdentity = {
+  ownerIdentityPrincipalId: "ipr_user_1",
+  ownerIdentityRealmId: "irl_account_1",
+  evelandProjectId: "project_support",
+} as const;
+
+function callerHeaders(
+  headers: Record<string, string> = {},
+  token = "caller-token",
+): Record<string, string> {
+  return { authorization: `Bearer ${token}`, ...headers };
+}
+
+const testVerifier: CallerTokenVerifier = {
+  async verifyAuthorization(authorization, expectedProjectId) {
+    const principalId =
+      authorization === "Bearer caller-token"
+        ? "ipr_user_1"
+        : authorization === "Bearer other-caller-token"
+          ? "ipr_user_2"
+          : null;
+    if (!principalId || (expectedProjectId && expectedProjectId !== "project_support")) {
+      throw new CallerTokenError(
+        "caller_token_invalid",
+        401,
+        "The Eveland Caller Token is invalid.",
+      );
+    }
+    return {
+      principalId,
+      realmId: "irl_account_1",
+      projectId: "project_support",
+      expiresAt: 1_900_000_000,
+    };
+  },
+};

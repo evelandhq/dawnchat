@@ -19,6 +19,7 @@ export type RedactedAgentConnection = {
   hasAuth: boolean;
   status: "unknown" | "healthy" | "unreachable";
   lastCheckedAt: string | null;
+  evelandProjectId?: string;
 };
 
 export type AgentConnectionEditDefaults = {
@@ -28,6 +29,7 @@ export type AgentConnectionEditDefaults = {
   authType: "none" | "bearer" | "header";
   hasAuth: boolean;
   headerName: string;
+  evelandProjectId?: string;
 };
 
 type StoredAuthConfig =
@@ -80,6 +82,7 @@ export function getAgentConnectionEditDefaults(agent: AgentConnection): AgentCon
     authType: agent.authType,
     hasAuth: auth.authType !== "none",
     headerName: auth.authType === "header" ? auth.headerName : "",
+    ...(agent.evelandProjectId ? { evelandProjectId: agent.evelandProjectId } : {}),
   };
 }
 
@@ -140,6 +143,7 @@ export function redactAgentConnection(agent: AgentConnection): RedactedAgentConn
     hasAuth: agent.authType !== "none" && Boolean(agent.authConfigEncrypted),
     status: agent.status,
     lastCheckedAt: agent.lastCheckedAt?.toISOString() ?? null,
+    ...(agent.evelandProjectId ? { evelandProjectId: agent.evelandProjectId } : {}),
   };
 }
 
@@ -180,6 +184,7 @@ export async function createAndCheckAgentConnection(body: unknown): Promise<Resp
       baseUrl: parsed.data.baseUrl,
       authType: parsed.data.authType,
       authConfigEncrypted: encodeAuthConfig(parsed.data),
+      evelandProjectId: parsed.data.evelandProjectId ?? null,
     });
 
     const check = await checkEveAgent(created);
@@ -212,6 +217,7 @@ export async function updateAndCheckAgentConnection(agentId: string, body: unkno
       baseUrl: parsed.data.baseUrl,
       authType: parsed.data.authType,
       authConfigEncrypted: resolveUpdatedAuthConfig(existing, parsed.data),
+      evelandProjectId: parsed.data.evelandProjectId ?? null,
     });
     if (!updated) {
       return jsonResponse({ error: "Agent connection not found" }, { status: 404 });

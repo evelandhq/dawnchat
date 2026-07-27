@@ -12,9 +12,9 @@ export const dynamic = "force-dynamic";
 
 export default async function HomePage(): Promise<React.ReactElement> {
   const repository = createRepository(getDbClient());
-  const [agents, chats] = await Promise.all([repository.listAgentConnections(), repository.listChats()]);
+  const agents = await repository.listAgentConnections();
   const defaultAgentId = pickDefaultAgentId(
-    chats.map((chat) => ({ id: chat.id, agentConnectionId: chat.agentConnectionId })).reverse(),
+    [],
     agents.map((agent) => agent.id),
   );
 

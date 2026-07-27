@@ -39,7 +39,7 @@ describe("app routing", () => {
     await testDb.close();
   });
 
-  it("redirects / to the agent owning the newest chat when chats are listed oldest-first", async () => {
+  it("redirects / to the first catalog agent without reading global chat history", async () => {
     const repository = createRepository(testDb.db);
     const olderAgent = await repository.createAgentConnection({
       name: "Older chat agent",
@@ -72,7 +72,7 @@ describe("app routing", () => {
     expect((await repository.listChats()).map((chat) => chat.id)).toEqual([olderChat.id, newerChat.id]);
     await expect(HomePage()).rejects.toBe(redirectSentinel);
     expect(redirectMock).toHaveBeenCalledOnce();
-    expect(redirectMock).toHaveBeenCalledWith(`/agents/${newerAgent.id}`);
+    expect(redirectMock).toHaveBeenCalledWith(`/agents/${olderAgent.id}`);
   });
 
   it("redirects / to the first-created agent when there are agents but no chats", async () => {

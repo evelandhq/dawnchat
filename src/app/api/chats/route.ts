@@ -1,7 +1,7 @@
 import { createChatWithFirstMessage, listChats } from "@/app/api/chats/api";
 
-export async function GET(): Promise<Response> {
-  return listChats();
+export async function GET(request: Request): Promise<Response> {
+  return listChats(request);
 }
 
 export async function POST(request: Request): Promise<Response> {
@@ -12,5 +12,5 @@ export async function POST(request: Request): Promise<Response> {
     return Response.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  return createChatWithFirstMessage(body);
+  return createChatWithFirstMessage(request, body);
 }

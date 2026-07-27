@@ -17,13 +17,14 @@ export type AgentConnectionFormInitialAgent = {
   authType: AuthType;
   hasAuth: boolean;
   headerName: string;
+  evelandProjectId?: string;
 };
 
 type AgentConnectionFormProps = {
   initialAgent?: AgentConnectionFormInitialAgent;
 };
 
-type FormErrors = Partial<Record<"name" | "baseUrl" | "bearerToken" | "headerName" | "headerValue" | "submit", string>>;
+type FormErrors = Partial<Record<"name" | "baseUrl" | "evelandProjectId" | "bearerToken" | "headerName" | "headerValue" | "submit", string>>;
 
 function isValidHttpUrl(value: string): boolean {
   try {
@@ -56,6 +57,9 @@ export function AgentConnectionForm({
   const isEditing = initialAgent !== undefined;
   const [name, setName] = useState(initialAgent?.name ?? "");
   const [baseUrl, setBaseUrl] = useState(initialAgent?.baseUrl ?? "");
+  const [evelandProjectId, setEvelandProjectId] = useState(
+    initialAgent?.evelandProjectId ?? "",
+  );
   const [authType, setAuthType] = useState<AuthType>(initialAgent?.authType ?? "none");
   const [bearerToken, setBearerToken] = useState("");
   const [headerName, setHeaderName] = useState(initialAgent?.headerName ?? "");
@@ -75,6 +79,10 @@ export function AgentConnectionForm({
 
     if (!isValidHttpUrl(baseUrl.trim())) {
       nextErrors.baseUrl = "Base URL must be a valid http(s) URL.";
+    }
+    if (evelandProjectId.trim() && authType !== "none") {
+      nextErrors.evelandProjectId =
+        "Eveland Project ID cannot be combined with legacy Agent authentication.";
     }
 
     if (authType === "bearer" && !bearerToken.trim() && !canPreserveSelectedSecret) {
@@ -108,11 +116,16 @@ export function AgentConnectionForm({
     }
 
     isSubmittingRef.current = true;
-    const payload: Record<string, string> = {
+    const payload: Record<string, string | null> = {
       name: name.trim(),
       baseUrl: baseUrl.trim(),
       authType,
     };
+    if (evelandProjectId.trim()) {
+      payload.evelandProjectId = evelandProjectId.trim();
+    } else if (initialAgent?.evelandProjectId) {
+      payload.evelandProjectId = null;
+    }
 
     if (authType === "bearer" && bearerToken.trim()) {
       payload.bearerToken = bearerToken;
@@ -201,6 +214,21 @@ export function AgentConnectionForm({
           <option value="bearer">Bearer Token</option>
           <option value="header">Custom Header</option>
         </NativeSelect>
+      </div>
+
+      <div className="grid gap-2">
+        <Label htmlFor="agent-eveland-project-id">Eveland Project ID</Label>
+        <Input
+          id="agent-eveland-project-id"
+          name="evelandProjectId"
+          placeholder="project_…"
+          value={evelandProjectId}
+          onChange={(event) => setEvelandProjectId(event.target.value)}
+        />
+        <p className="text-muted-foreground text-sm">
+          Non-secret project identity used to request audience-bound Caller Tokens.
+        </p>
+        <FieldError message={errors.evelandProjectId} />
       </div>
 
       {authType === "bearer" ? (

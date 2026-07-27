@@ -37,6 +37,7 @@ export type CreateAgentConnectionInput = {
   baseUrl: string;
   authType: AuthType;
   authConfigEncrypted?: string | null;
+  evelandProjectId?: string | null;
 };
 
 export type UpdateAgentConnectionInput = {
@@ -44,6 +45,7 @@ export type UpdateAgentConnectionInput = {
   baseUrl: string;
   authType: AuthType;
   authConfigEncrypted: string | null;
+  evelandProjectId?: string | null;
 };
 
 export type UpdateAgentHealthInput = {
@@ -55,6 +57,15 @@ export type CreateChatInput = {
   agentConnectionId: string;
   title: string;
   pendingUserMessage?: string | null;
+  ownerIdentityPrincipalId?: string | null;
+  ownerIdentityRealmId?: string | null;
+  evelandProjectId?: string | null;
+};
+
+export type ChatIdentityScope = {
+  principalId: string;
+  realmId: string;
+  projectId: string;
 };
 
 export type AppendEventInput = {
@@ -84,6 +95,8 @@ export type Repository = {
   createChat(input: CreateChatInput): Promise<Chat>;
   listChats(): Promise<Chat[]>;
   getChat(id: string): Promise<Chat | null>;
+  listChatsForIdentity(scope: ChatIdentityScope): Promise<Chat[]>;
+  getChatForIdentity(id: string, scope: ChatIdentityScope): Promise<Chat | null>;
   appendEvent(input: AppendEventInput): Promise<EveEvent>;
   listEvents(chatId: string): Promise<EveEvent[]>;
   clearPendingUserMessage(chatId: string): Promise<Chat>;
@@ -162,6 +175,7 @@ export function createRepository(db: RepositoryDb): Repository {
         baseUrl: input.baseUrl,
         authType: input.authType,
         authConfigEncrypted: input.authConfigEncrypted ?? null,
+        evelandProjectId: input.evelandProjectId ?? null,
         status: "unknown",
         lastCheckedAt: null,
         createdAt: now,
@@ -197,6 +211,7 @@ export function createRepository(db: RepositoryDb): Repository {
             baseUrl: input.baseUrl,
             authType: input.authType,
             authConfigEncrypted: input.authConfigEncrypted,
+            evelandProjectId: input.evelandProjectId ?? null,
             status: "unknown",
             lastCheckedAt: null,
             updatedAt: new Date(),
@@ -245,6 +260,9 @@ export function createRepository(db: RepositoryDb): Repository {
         id: createId("chat"),
         agentConnectionId: input.agentConnectionId,
         title: input.title,
+        ownerIdentityPrincipalId: input.ownerIdentityPrincipalId ?? null,
+        ownerIdentityRealmId: input.ownerIdentityRealmId ?? null,
+        evelandProjectId: input.evelandProjectId ?? null,
         sessionStateJson: null,
         pendingUserMessage: input.pendingUserMessage ?? null,
         status: "active" satisfies ChatStatus,
@@ -263,6 +281,37 @@ export function createRepository(db: RepositoryDb): Repository {
 
     async getChat(id) {
       const [row] = await db.select().from(chats).where(eq(chats.id, id)).limit(1);
+      return row ? mapChat(row) : null;
+    },
+
+    async listChatsForIdentity(scope) {
+      const rows = await db
+        .select()
+        .from(chats)
+        .where(
+          and(
+            eq(chats.ownerIdentityPrincipalId, scope.principalId),
+            eq(chats.ownerIdentityRealmId, scope.realmId),
+            eq(chats.evelandProjectId, scope.projectId),
+          ),
+        )
+        .orderBy(asc(chats.createdAt), asc(chats.id));
+      return rows.map(mapChat);
+    },
+
+    async getChatForIdentity(id, scope) {
+      const [row] = await db
+        .select()
+        .from(chats)
+        .where(
+          and(
+            eq(chats.id, id),
+            eq(chats.ownerIdentityPrincipalId, scope.principalId),
+            eq(chats.ownerIdentityRealmId, scope.realmId),
+            eq(chats.evelandProjectId, scope.projectId),
+          ),
+        )
+        .limit(1);
       return row ? mapChat(row) : null;
     },
 

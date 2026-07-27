@@ -24,6 +24,7 @@ describe("getAgentForNewChatPage", () => {
       name: "Data Bot",
       baseUrl: "https://data-bot.example.com",
       authType: "none",
+      evelandProjectId: "project_support",
     });
     await repository.updateAgentHealth(agent.id, { status: "healthy" });
 
@@ -31,6 +32,7 @@ describe("getAgentForNewChatPage", () => {
       id: agent.id,
       name: "Data Bot",
       status: "healthy",
+      evelandProjectId: "project_support",
     });
   });
 
