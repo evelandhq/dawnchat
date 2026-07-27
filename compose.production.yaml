@@ -6,7 +6,8 @@
 # AUTH_SECRET encrypts agent bearer/header credentials stored in Postgres —
 # it must stay the same across restarts or those credentials become unreadable.
 # Optional overrides (env or .env next to this file):
-# POSTGRES_PASSWORD, APP_PORT, NPM_REGISTRY (npm mirror used at build time).
+# POSTGRES_PASSWORD, APP_PORT, NPM_REGISTRY (npm mirror used at build time),
+# EVELAND_IDENTITY_URL, and EVELAND_IDENTITY_ISSUER.
 
 name: eve-chats-prod
 
@@ -45,10 +46,14 @@ services:
       target: runner
       args:
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
+        NEXT_PUBLIC_EVELAND_IDENTITY_URL: ${EVELAND_IDENTITY_URL:?EVELAND_IDENTITY_URL is required}
+        NEXT_PUBLIC_EVELAND_IDENTITY_RETURN_TARGET: ${EVELAND_IDENTITY_RETURN_TARGET:-eve-chats}
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://eve_chats:${POSTGRES_PASSWORD:-eve_chats}@postgres:5432/eve_chats
       AUTH_SECRET: ${AUTH_SECRET:?AUTH_SECRET is required — put it in .env next to this compose file}
+      EVELAND_IDENTITY_ISSUER: ${EVELAND_IDENTITY_ISSUER:?EVELAND_IDENTITY_ISSUER is required}
+      EVELAND_IDENTITY_JWKS_URL: ${EVELAND_IDENTITY_JWKS_URL:?EVELAND_IDENTITY_JWKS_URL is required}
     ports:
       - "${APP_PORT:-3010}:3010"
     depends_on:

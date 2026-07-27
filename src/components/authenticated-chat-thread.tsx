@@ -1,0 +1,177 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import type { HandleMessageStreamEvent } from "eve/client";
+import { CircleAlert } from "lucide-react";
+
+import {
+  ChatThread,
+  type ChatThreadSummary,
+} from "@/components/chat-thread";
+import { useEvelandIdentity } from "@/components/identity-provider";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
+import { EvelandIdentityError } from "@/identity/client";
+
+type ChatPayload = {
+  chat: ChatThreadSummary & { pendingUserMessage: string | null };
+  events: HandleMessageStreamEvent[];
+};
+
+export function AuthenticatedChatThread({
+  chatId,
+  evelandProjectId,
+}: {
+  chatId: string;
+  evelandProjectId: string;
+}): React.ReactElement {
+  const { getCallerToken, switchRealm } = useEvelandIdentity();
+  const returnPath = `/chats/${chatId}`;
+  const [attempt, setAttempt] = useState(0);
+  const [state, setState] = useState<
+    | { kind: "loading" }
+    | { kind: "ready"; data: ChatPayload }
+    | { kind: "forbidden"; message: string }
+    | { kind: "missing" }
+    | { kind: "error"; message: string }
+  >({ kind: "loading" });
+
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        const token = await getCallerToken(evelandProjectId, returnPath);
+        const response = await fetch(`/api/chats/${encodeURIComponent(chatId)}`, {
+          headers: { authorization: `Bearer ${token}` },
+          cache: "no-store",
+        });
+        if (response.status === 404) {
+          if (active) setState({ kind: "missing" });
+          return;
+        }
+        if (!response.ok) throw await apiError(response);
+        const data = (await response.json()) as ChatPayload;
+        if (active) setState({ kind: "ready", data });
+      } catch (error) {
+        if (
+          !active ||
+          (error instanceof EvelandIdentityError &&
+            error.code === "identity_redirecting")
+        ) {
+          return;
+        }
+        if (error instanceof EvelandIdentityError && error.status === 403) {
+          setState({ kind: "forbidden", message: error.message });
+        } else {
+          setState({
+            kind: "error",
+            message:
+              error instanceof Error ? error.message : "Unable to load this chat.",
+          });
+        }
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [attempt, chatId, evelandProjectId, getCallerToken, returnPath]);
+
+  if (state.kind === "loading") {
+    return (
+      <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
+        <Spinner />
+        Loading conversation…
+      </div>
+    );
+  }
+  if (state.kind === "missing") {
+    return (
+      <CenteredAlert
+        title="Chat not found"
+        message="This conversation does not exist or belongs to another identity scope."
+      />
+    );
+  }
+  if (state.kind === "forbidden") {
+    return (
+      <div className="mx-auto w-full max-w-xl p-6">
+        <Alert variant="destructive">
+          <CircleAlert />
+          <AlertTitle>This identity scope cannot open the chat</AlertTitle>
+          <AlertDescription className="space-y-3">
+            <p>{state.message}</p>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => switchRealm(returnPath)}
+            >
+              Switch identity scope
+            </Button>
+          </AlertDescription>
+        </Alert>
+      </div>
+    );
+  }
+  if (state.kind === "error") {
+    return (
+      <div className="mx-auto w-full max-w-xl p-6">
+        <Alert>
+          <CircleAlert />
+          <AlertTitle>Unable to load chat</AlertTitle>
+          <AlertDescription className="space-y-3">
+            <p>{state.message}</p>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                setState({ kind: "loading" });
+                setAttempt((current) => current + 1);
+              }}
+            >
+              Retry
+            </Button>
+          </AlertDescription>
+        </Alert>
+      </div>
+    );
+  }
+
+  return (
+    <ChatThread
+      chat={state.data.chat}
+      events={state.data.events}
+      pendingUserMessage={state.data.chat.pendingUserMessage}
+      getCallerToken={() =>
+        getCallerToken(evelandProjectId, returnPath)
+      }
+    />
+  );
+}
+
+function CenteredAlert({
+  title,
+  message,
+}: {
+  title: string;
+  message: string;
+}): React.ReactElement {
+  return (
+    <div className="mx-auto w-full max-w-xl p-6">
+      <Alert>
+        <CircleAlert />
+        <AlertTitle>{title}</AlertTitle>
+        <AlertDescription>{message}</AlertDescription>
+      </Alert>
+    </div>
+  );
+}
+
+async function apiError(response: Response): Promise<Error> {
+  const body = (await response.json().catch(() => null)) as
+    | { error?: unknown }
+    | null;
+  return new Error(
+    typeof body?.error === "string" ? body.error : "Unable to load this chat.",
+  );
+}

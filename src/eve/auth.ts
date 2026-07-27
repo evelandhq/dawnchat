@@ -8,6 +8,7 @@ export interface EveAgentConnectionLike {
   readonly baseUrl: string;
   readonly authType: AuthType;
   readonly authConfigEncrypted?: string | null;
+  readonly evelandProjectId?: string | null;
 }
 
 interface BearerAuthConfig {
@@ -87,7 +88,20 @@ export function parseAuthConfig(connection: EveAgentConnectionLike): unknown {
 
 export function buildEveClientAuthOptions(
   connection: EveAgentConnectionLike,
+  callerToken?: string,
 ): Pick<ClientOptions, "auth" | "headers" | "redirect"> {
+  if (connection.evelandProjectId) {
+    if (connection.authType !== "none" || connection.authConfigEncrypted) {
+      throw new Error(
+        "Eveland project identity conflicts with legacy Agent authentication",
+      );
+    }
+    if (!callerToken) {
+      throw new Error("An Eveland Caller Token is required");
+    }
+    return { auth: { bearer: callerToken }, redirect: "manual" };
+  }
+
   if (connection.authType === "none") {
     return {};
   }

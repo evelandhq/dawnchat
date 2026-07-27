@@ -12,6 +12,8 @@ type NewChatComposerProps = {
   agentId: string;
   agentName: string;
   disabled?: boolean;
+  evelandProjectId?: string;
+  getCallerToken?: () => Promise<string>;
 };
 
 type CreateChatResponse = {
@@ -31,7 +33,13 @@ function parseCreateChatResponse(value: unknown): CreateChatResponse {
   return { chatId, error };
 }
 
-export function NewChatComposer({ agentId, agentName, disabled = false }: NewChatComposerProps): React.ReactElement {
+export function NewChatComposer({
+  agentId,
+  agentName,
+  disabled = false,
+  evelandProjectId,
+  getCallerToken,
+}: NewChatComposerProps): React.ReactElement {
   const router = useRouter();
   const [message, setMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -57,9 +65,14 @@ export function NewChatComposer({ agentId, agentName, disabled = false }: NewCha
 
     setIsSubmitting(true);
     try {
+      const callerToken =
+        evelandProjectId && getCallerToken ? await getCallerToken() : null;
       const response = await fetch("/api/chats", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          ...(callerToken ? { authorization: `Bearer ${callerToken}` } : {}),
+          "content-type": "application/json",
+        },
         body: JSON.stringify({ agentId, message: trimmedMessage }),
       });
       const body = parseCreateChatResponse(await response.json());

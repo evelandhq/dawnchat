@@ -21,6 +21,22 @@ corepack pnpm dev
 
 `db:up` waits for the PostgreSQL health check. Open http://localhost:3010 after starting the app.
 
+Start Eveland API/Web/Worker as well, then in Eveland System > Identity:
+
+1. create and enable the Internal Provider;
+2. create its exact allowed Internal Realm;
+3. save `http://localhost:3010` as the `eve-chats` return target;
+4. grant that Realm to the Greeter Project.
+
+Register the Greeter Agent here with `authType=none` and its Eveland Project ID. The
+browser enters Eveland through `/identity/login`; it never reads Better Auth or selects
+Internal/OIDC itself. Caller Tokens stay in memory and are refreshed before expiry.
+
+Localhost ports are the same schemeful site, so the `SameSite=Lax` Identity
+cookie is available to credentialed browser requests. Production deployments
+must preserve that topology under one HTTPS site; an unrelated EveChats site
+requires an explicit authorization-code handoff that is outside this phase.
+
 ## Tests and verification
 
 Tests require the real PostgreSQL server above. Every test database handle creates a unique schema, applies the generated Drizzle migration, and drops the schema during teardown, so Vitest workers can run in parallel safely.
@@ -55,4 +71,8 @@ A local Eve Agent connection must expose the Eve HTTP routes under its configure
 - `POST /eve/v1/session/:sessionId`
 - `GET /eve/v1/session/:sessionId/stream`
 
-Register that base URL in the app, then create a chat against the registered agent. A chat turn creates or continues an Eve session, consumes the stream, persists user/assistant messages, and stores the session state (`sessionId`, `continuationToken`, and `streamIndex`) for follow-up messages.
+Register that base URL and its Eveland Project ID in the app, then create a chat against
+the registered agent. Every list/detail/create/continue/stream request requires a valid
+Caller Token whose principal, Realm, and project match the chat. A chat turn creates or
+continues an Eve session, consumes the stream, persists canonical events, and stores
+`sessionId`, server-only `continuationToken`, and `streamIndex` for follow-up messages.

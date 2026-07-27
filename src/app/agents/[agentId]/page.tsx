@@ -4,7 +4,9 @@ import { notFound } from "next/navigation";
 import { createRepository } from "@/db/repository";
 import { getDbClient } from "@/db/provider";
 import { AgentRecheckButton } from "@/components/agent-recheck-button";
-import { NewChatComposer } from "@/components/new-chat-composer";
+import { IdentityAgentAccess } from "@/components/identity-agent-access";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { CircleAlert } from "lucide-react";
 
 export const dynamic = "force-dynamic";
 
@@ -16,6 +18,7 @@ type AgentNewChatPageData = {
   id: string;
   name: string;
   status: "unknown" | "healthy" | "unreachable";
+  evelandProjectId: string | null;
 };
 
 export async function getAgentForNewChatPage(agentId: string): Promise<AgentNewChatPageData | null> {
@@ -25,7 +28,12 @@ export async function getAgentForNewChatPage(agentId: string): Promise<AgentNewC
     return null;
   }
 
-  return { id: agent.id, name: agent.name, status: agent.status };
+  return {
+    id: agent.id,
+    name: agent.name,
+    status: agent.status,
+    evelandProjectId: agent.evelandProjectId,
+  };
 }
 
 export async function generateMetadata({ params }: AgentNewChatPageProps): Promise<Metadata> {
@@ -53,7 +61,22 @@ export default async function AgentNewChatPage({ params }: AgentNewChatPageProps
           <AgentRecheckButton agentId={agent.id} />
         </div>
       )}
-      <NewChatComposer agentId={agent.id} agentName={agent.name} disabled={!isHealthy} />
+      {agent.evelandProjectId ? (
+        <IdentityAgentAccess
+          agentId={agent.id}
+          agentName={agent.name}
+          disabled={!isHealthy}
+          evelandProjectId={agent.evelandProjectId}
+        />
+      ) : (
+        <Alert>
+          <CircleAlert />
+          <AlertTitle>Eveland Identity is not configured</AlertTitle>
+          <AlertDescription>
+            Add this Agent&apos;s Eveland Project ID before starting a chat.
+          </AlertDescription>
+        </Alert>
+      )}
     </section>
   );
 }

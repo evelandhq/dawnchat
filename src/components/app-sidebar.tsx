@@ -26,7 +26,7 @@ type AppSidebarProps = {
 
 export async function getAppNavigationData(): Promise<AppNavigationData> {
   const repository = createRepository(getDbClient());
-  const [agents, chats] = await Promise.all([repository.listAgentConnections(), repository.listChats()]);
+  const agents = await repository.listAgentConnections();
 
   return {
     agents: agents.map((agent) => ({
@@ -34,9 +34,8 @@ export async function getAppNavigationData(): Promise<AppNavigationData> {
       name: agent.name,
       status: agent.status,
     })),
-    chats: chats
-      .map((chat) => ({ id: chat.id, title: chat.title, agentConnectionId: chat.agentConnectionId }))
-      .reverse(),
+    // Identity-scoped chat history is loaded in the browser with a Caller Token.
+    chats: [],
   };
 }
 

@@ -12,6 +12,18 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), refresh: vi.fn() }),
 }));
 
+vi.mock("@/components/identity-provider", () => ({
+  useEvelandIdentity: () => ({
+    session: {
+      authenticated: true,
+      principal: { id: "ipr_1", name: "Test User", email: null },
+      activeRealm: { id: "irl_1", name: "Account 1" },
+    },
+    getCallerToken: async () => "caller-token",
+    switchRealm: vi.fn(),
+  }),
+}));
+
 describe("AgentNewChatPage presentation", () => {
   let testDb: TestDbHandle;
 
@@ -21,6 +33,7 @@ describe("AgentNewChatPage presentation", () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllGlobals();
     setDbClientForTests(null);
     await testDb.close();
   });
@@ -31,15 +44,20 @@ describe("AgentNewChatPage presentation", () => {
       name: "Data Bot",
       baseUrl: "https://data-bot.example.com",
       authType: "none",
+      evelandProjectId: "project_support",
     });
     await repository.updateAgentHealth(agent.id, { status: "healthy" });
 
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ chats: [] })),
+    );
     const page = await AgentNewChatPage({ params: Promise.resolve({ agentId: agent.id }) });
     const { container } = render(page);
 
     expect(screen.queryByRole("heading", { name: "Data Bot" })).not.toBeInTheDocument();
     expect(screen.queryByText("healthy")).not.toBeInTheDocument();
     expect(container.querySelector('[data-slot="avatar"]')).not.toBeInTheDocument();
-    expect(screen.getByLabelText("First message")).toBeEnabled();
+    expect(await screen.findByLabelText("First message")).toBeEnabled();
   });
 });

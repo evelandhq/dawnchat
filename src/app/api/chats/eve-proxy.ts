@@ -9,6 +9,11 @@ import {
 import { getDbClient } from "@/db/provider";
 import { createEveClientForConnection } from "@/eve/client";
 import { EVE_PROXY_CONTINUATION_TOKEN } from "@/eve/proxy-contract";
+import {
+  CallerTokenError,
+  callerTokenErrorResponse,
+  getCallerTokenVerifier,
+} from "@/identity/server";
 
 const NDJSON_CONTENT_TYPE = "application/x-ndjson; charset=utf-8";
 
@@ -19,7 +24,7 @@ type ProxyContext = {
 };
 
 export async function proxyCreateEveSession(request: Request, chatId: string): Promise<Response> {
-  const resolved = await resolveProxyContext(chatId);
+  const resolved = await resolveProxyContext(request, chatId);
   if (resolved instanceof Response) {
     return resolved;
   }
@@ -39,7 +44,7 @@ export async function proxyContinueEveSession(
   chatId: string,
   sessionId: string,
 ): Promise<Response> {
-  const resolved = await resolveProxyContext(chatId);
+  const resolved = await resolveProxyContext(request, chatId);
   if (resolved instanceof Response) {
     return resolved;
   }
@@ -54,12 +59,50 @@ export async function proxyContinueEveSession(
   return proxyTurnRequest(request, resolved, sessionId);
 }
 
+export async function proxyCancelEveTurn(
+  request: Request,
+  chatId: string,
+  sessionId: string,
+): Promise<Response> {
+  const resolved = await resolveProxyContext(request, chatId);
+  if (resolved instanceof Response) {
+    return resolved;
+  }
+
+  const session = resolved.chat.sessionState;
+  if (session?.sessionId !== sessionId) {
+    return errorResponse("Eve session does not belong to this chat", 409);
+  }
+
+  const input = await readOptionalObjectBody(request);
+  if (input instanceof Response) {
+    return input;
+  }
+  const turnId = stringValue(input.turnId);
+
+  try {
+    const result = await resolved.client
+      .session({
+        sessionId,
+        continuationToken: session.continuationToken,
+        streamIndex: session.streamIndex ?? 0,
+      })
+      .cancel(turnId ? { turnId } : undefined);
+    return Response.json(result, {
+      status: 200,
+      headers: { "cache-control": "no-store" },
+    });
+  } catch {
+    return errorResponse("Unable to cancel the Eve turn", 502);
+  }
+}
+
 export async function proxyEveSessionStream(
   request: Request,
   chatId: string,
   sessionId: string,
 ): Promise<Response> {
-  const resolved = await resolveProxyContext(chatId);
+  const resolved = await resolveProxyContext(request, chatId);
   if (resolved instanceof Response) {
     return resolved;
   }
@@ -184,9 +227,31 @@ async function proxyTurnRequest(
   );
 }
 
-async function resolveProxyContext(chatId: string): Promise<ProxyContext | Response> {
+async function resolveProxyContext(
+  request: Request,
+  chatId: string,
+): Promise<ProxyContext | Response> {
   const repository = createRepository(getDbClient());
-  const chat = await repository.getChat(chatId);
+  const candidate = await repository.getChat(chatId);
+  if (!candidate?.evelandProjectId) {
+    return errorResponse("Chat not found", 404);
+  }
+
+  let identity;
+  try {
+    identity = await getCallerTokenVerifier().verifyAuthorization(
+      request.headers.get("authorization"),
+      candidate.evelandProjectId,
+    );
+  } catch (error) {
+    if (error instanceof CallerTokenError) return callerTokenErrorResponse(error);
+    return errorResponse("Unable to verify Eveland Caller Token", 503);
+  }
+  const chat = await repository.getChatForIdentity(chatId, {
+    principalId: identity.principalId,
+    realmId: identity.realmId,
+    projectId: identity.projectId,
+  });
   if (!chat) {
     return errorResponse("Chat not found", 404);
   }
@@ -195,12 +260,29 @@ async function resolveProxyContext(chatId: string): Promise<ProxyContext | Respo
   if (!agent) {
     return errorResponse("Agent connection not found", 404);
   }
+  if (agent.evelandProjectId !== identity.projectId) {
+    return errorResponse("Chat not found", 404);
+  }
+  if (agent.authType !== "none" || agent.authConfigEncrypted) {
+    return errorResponse(
+      "Eveland project identity conflicts with legacy Agent auth",
+      409,
+    );
+  }
   if (agent.status === "unreachable") {
     return errorResponse("Agent connection is unreachable", 409);
   }
 
   try {
-    return { chat, repository, client: createEveClientForConnection(agent) };
+    const authorization = request.headers.get("authorization");
+    const callerToken = authorization?.startsWith("Bearer ")
+      ? authorization.slice("Bearer ".length)
+      : "";
+    return {
+      chat,
+      repository,
+      client: createEveClientForConnection(agent, callerToken),
+    };
   } catch {
     return errorResponse("Agent authentication configuration is invalid", 500);
   }
@@ -314,6 +396,23 @@ function parseStartIndex(value: string | null): number | null {
 async function readObjectBody(request: Request): Promise<Record<string, unknown> | Response> {
   try {
     const value = (await request.json()) as unknown;
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : errorResponse("Invalid Eve request body", 400);
+  } catch {
+    return errorResponse("Invalid JSON", 400);
+  }
+}
+
+async function readOptionalObjectBody(
+  request: Request,
+): Promise<Record<string, unknown> | Response> {
+  const text = await request.text();
+  if (!text.trim()) {
+    return {};
+  }
+  try {
+    const value = JSON.parse(text) as unknown;
     return value && typeof value === "object" && !Array.isArray(value)
       ? (value as Record<string, unknown>)
       : errorResponse("Invalid Eve request body", 400);

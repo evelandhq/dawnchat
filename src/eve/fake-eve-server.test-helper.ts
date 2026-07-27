@@ -133,6 +133,16 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
         return;
       }
 
+      const cancelMatch = url.pathname.match(/^\/eve\/v1\/session\/(ses_\d+)\/cancel$/);
+      if (request.method === "POST" && cancelMatch) {
+        writeJson(response, 200, {
+          ok: true,
+          sessionId: cancelMatch[1],
+          status: "accepted",
+        });
+        return;
+      }
+
       writeJson(response, 404, { error: "Not found" });
     } catch (error) {
       writeJson(response, 500, { error: error instanceof Error ? error.message : "Unknown error" });

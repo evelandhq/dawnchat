@@ -406,6 +406,84 @@ describe("ChatThread with Eve and AI Elements", () => {
     });
   });
 
+  it("requests authenticated cooperative cancellation when stopping a turn", async () => {
+    const getCallerToken = vi.fn(async () => "caller-token");
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (url.endsWith("/cancel")) {
+          return Response.json({
+            ok: true,
+            sessionId: "ses_1",
+            status: "accepted",
+          });
+        }
+        if (init?.method === "POST") {
+          return Response.json(
+            { sessionId: "ses_1", continuationToken: EVE_PROXY_CONTINUATION_TOKEN },
+            { headers: { "x-eve-session-id": "ses_1" } },
+          );
+        }
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              new TextEncoder().encode(
+                `${JSON.stringify({
+                  type: "message.appended",
+                  data: {
+                    messageDelta: "Working",
+                    messageSoFar: "Working",
+                    sequence: 1,
+                    stepIndex: 0,
+                    turnId: "turn_1",
+                  },
+                })}\n`,
+              ),
+            );
+            init?.signal?.addEventListener("abort", () => {
+              controller.error(new DOMException("Aborted", "AbortError"));
+            });
+          },
+        });
+        return new Response(body, {
+          headers: { "content-type": "application/x-ndjson; charset=utf-8" },
+        });
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({ sessionState: { sessionId: "ses_1", streamIndex: 0 } })}
+        events={[]}
+        getCallerToken={getCallerToken}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "Start a long task" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Stop generating" }));
+
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([input]) => String(input).endsWith("/cancel")),
+      ).toBe(true),
+    );
+    const cancelCall = fetchMock.mock.calls.find(([input]) =>
+      String(input).endsWith("/cancel"),
+    );
+    expect(cancelCall?.[1]).toMatchObject({
+      method: "POST",
+      headers: {
+        authorization: "Bearer caller-token",
+        "content-type": "application/json",
+      },
+      body: "{}",
+    });
+  });
+
   it("renders connection authorization challenges without exposing credentials", () => {
     const events: HandleMessageStreamEvent[] = [
       { type: "step.started", data: { sequence: 1, stepIndex: 0, turnId: "turn_1" } },

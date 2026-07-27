@@ -144,6 +144,36 @@ describe("Agent Connection API", () => {
     expect(server.requests[0].headers.authorization).toBe(`Bearer ${secret}`);
   });
 
+  it("stores a non-secret Eveland project identity and rejects legacy auth conflicts", async () => {
+    const server = await fakeServer();
+
+    const response = await postAgents({
+      name: "Eveland Support",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: " project_support ",
+    });
+    expect(response.status).toBe(201);
+    await expect(readJson(response)).resolves.toMatchObject({
+      agent: { evelandProjectId: "project_support", hasAuth: false },
+    });
+    await expect(createRepository(testDb.db).listAgentConnections()).resolves.toEqual([
+      expect.objectContaining({ evelandProjectId: "project_support" }),
+    ]);
+
+    const conflicting = await postAgents({
+      name: "Conflicting Agent",
+      baseUrl: `${server.baseUrl}/another`,
+      authType: "bearer",
+      bearerToken: "legacy-secret",
+      evelandProjectId: "project_support",
+    });
+    expect(conflicting.status).toBe(400);
+    await expect(readJson(conflicting)).resolves.toMatchObject({
+      error: "Invalid agent connection",
+    });
+  });
+
   it("rejects an already-registered normalized agent URL", async () => {
     const server = await fakeServer();
 
