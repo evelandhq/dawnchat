@@ -10,7 +10,11 @@ import {
   type SendTurnPayload,
   type SessionState,
 } from "eve/client";
-import { useEveAgent } from "eve/react";
+import {
+  type EveMessage,
+  type EveMessagePart,
+  useEveAgent,
+} from "eve/react";
 import { AlertCircleIcon, MessageCircleIcon } from "lucide-react";
 
 import {
@@ -168,6 +172,10 @@ function ChatThreadSession({
   const latestInputRef = useRef<SendTurnPayload | null>(null);
   const retrySentRef = useRef(false);
   const [localError, setLocalError] = useState<string | null>(null);
+  const [showPendingUserMessage, setShowPendingUserMessage] = useState(
+    Boolean(pendingUserMessage) &&
+      !events.some((event) => event.type === "message.received"),
+  );
   const agent = useEveAgent({
     host: `/api/chats/${chat.id}/agent`,
     auth: getAccessToken ? { bearer: getAccessToken } : undefined,
@@ -197,6 +205,11 @@ function ChatThreadSession({
         });
       }
     },
+    onEvent(event) {
+      if (event.type === "message.received") {
+        setShowPendingUserMessage(false);
+      }
+    },
     onFinish(snapshot) {
       if (snapshot.status === "ready") {
         router.refresh();
@@ -214,6 +227,15 @@ function ChatThreadSession({
   );
   const composerDisabled =
     readOnly || chat.status === "completed" || hasPendingInteraction;
+  const visibleMessages =
+    showPendingUserMessage && pendingUserMessage
+      ? [
+          pendingUserContentMessage(chat.id, pendingUserMessage),
+          ...agent.data.messages.filter(
+            (message) => !message.metadata?.optimistic,
+          ),
+        ]
+      : agent.data.messages;
 
   useEffect(() => {
     if (!retryInput || retrySentRef.current || agent.status !== "ready") {
@@ -302,18 +324,19 @@ function ChatThreadSession({
       <section className="flex h-full min-h-0 flex-col bg-background">
         <Conversation className="min-h-0 flex-1">
           <ConversationContent className="mx-auto w-full max-w-3xl gap-6 px-4 py-8 sm:px-6">
-            {agent.data.messages.length === 0 ? (
+            {visibleMessages.length === 0 ? (
               <ConversationEmptyState
                 description={`Send a message to ${chat.agentName}.`}
                 icon={<MessageCircleIcon className="size-6" />}
                 title="Start this conversation"
               />
             ) : (
-              agent.data.messages.map((message, index) => (
+              visibleMessages.map((message, index) => (
                 <EveMessageView
                   canRespond={!readOnly && !isBusy && chat.status !== "completed"}
                   isStreaming={
-                    agent.status === "streaming" && index === agent.data.messages.length - 1
+                    agent.status === "streaming" &&
+                    index === visibleMessages.length - 1
                   }
                   key={message.id}
                   message={message}
@@ -365,6 +388,38 @@ function ChatThreadSession({
       </section>
     </TooltipProvider>
   );
+}
+
+function pendingUserContentMessage(
+  chatId: string,
+  content: UserContent,
+): EveMessage {
+  const parts: EveMessagePart[] =
+    typeof content === "string"
+      ? [{ state: "done", text: content, type: "text" }]
+      : content.flatMap((part): EveMessagePart[] => {
+          if (part.type === "text") {
+            return [{ state: "done", text: part.text, type: "text" }];
+          }
+          if (part.type === "file") {
+            return [
+              {
+                filename: part.filename,
+                mediaType: part.mediaType,
+                type: "file",
+                url: typeof part.data === "string" ? part.data : undefined,
+              },
+            ];
+          }
+          return [];
+        });
+
+  return {
+    id: `pending:${chatId}:user`,
+    metadata: { optimistic: true, status: "submitted" },
+    parts,
+    role: "user",
+  };
 }
 
 function composerPlaceholder(
