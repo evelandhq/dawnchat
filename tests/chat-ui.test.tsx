@@ -360,6 +360,46 @@ describe("ChatThread with Eve and AI Elements", () => {
     expect(refreshMock).toHaveBeenCalledTimes(1);
   });
 
+  it("sends persisted first-message attachments after the chat route mounts", async () => {
+    const pendingMessage = [
+      { type: "text" as const, text: "Review this" },
+      {
+        type: "file" as const,
+        data: "data:text/plain;base64,aGVsbG8=",
+        filename: "report.txt",
+        mediaType: "text/plain",
+      },
+    ];
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ sessionId: "ses_1", continuationToken: "eve:1" }), {
+          status: 200,
+          headers: { "content-type": "application/json", "x-eve-session-id": "ses_1" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        ndjson([{ type: "session.waiting", data: { wait: "next-user-message" } }]),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({ id: "chat_pending_file", sessionState: null })}
+        events={[]}
+        pendingUserMessage={pendingMessage}
+      />,
+    );
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "/api/chats/chat_pending_file/agent/eve/v1/session",
+    );
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      message: pendingMessage,
+    });
+  });
+
   it("converts an attached file into Eve UserContent before sending", async () => {
     const file = new File(["hello"], "report.txt", { type: "text/plain" });
     vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:report");

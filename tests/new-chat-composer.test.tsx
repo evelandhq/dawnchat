@@ -80,6 +80,43 @@ describe("NewChatComposer", () => {
     );
   });
 
+  it("previews and submits an attachment with the first message", async () => {
+    const file = new File(["hello"], "report.txt", { type: "text/plain" });
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:report");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      if (String(input) === "blob:report") {
+        return new Response("hello", { headers: { "content-type": "text/plain" } });
+      }
+      return Response.json({ chat: { id: "chat_with_file" } }, { status: 201 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(React.createElement(NewChatComposer, { agentId: "agent_a", agentName: "Data Bot" }));
+
+    expect(screen.getByRole("button", { name: "Attach files" })).toBeEnabled();
+    fireEvent.change(screen.getByLabelText("Upload files"), { target: { files: [file] } });
+    expect(screen.getByText("report.txt")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("First message"), { target: { value: "Review this" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start chat" }));
+
+    await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/chats/chat_with_file"));
+    const createCall = fetchMock.mock.calls.find(([input]) => input === "/api/chats");
+    expect(createCall).toBeDefined();
+    expect(JSON.parse(String(createCall?.[1]?.body))).toEqual({
+      agentId: "agent_a",
+      message: [
+        { type: "text", text: "Review this" },
+        {
+          type: "file",
+          data: "data:text/plain;base64,aGVsbG8=",
+          filename: "report.txt",
+          mediaType: "text/plain",
+        },
+      ],
+    });
+  });
+
   it("navigates to a persisted failed chat instead of showing a creation error", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ chat: { id: "chat_failed", status: "failed" }, error: "Eve turn failed" }), {

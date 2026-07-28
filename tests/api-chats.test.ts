@@ -100,6 +100,38 @@ describe("Chat API", () => {
     });
   });
 
+  it("persists attachments as structured pending user content", async () => {
+    const agent = await createAgent();
+    const response = await postChats({
+      agentId: agent.id,
+      message: [
+        { type: "text", text: "Review this" },
+        {
+          type: "file",
+          data: "data:text/plain;base64,aGVsbG8=",
+          filename: "report.txt",
+          mediaType: "text/plain",
+        },
+      ],
+    });
+
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toMatchObject({
+      chat: {
+        title: "Review this",
+        pendingUserMessage: [
+          { type: "text", text: "Review this" },
+          {
+            type: "file",
+            data: "data:text/plain;base64,aGVsbG8=",
+            filename: "report.txt",
+            mediaType: "text/plain",
+          },
+        ],
+      },
+    });
+  });
+
   it("lists the newest chats first", async () => {
     const agent = await createAgent();
     const olderResponse = await postChats({

@@ -5,8 +5,24 @@ import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
 import { ArrowUp } from "lucide-react";
 
+import {
+  PromptInput,
+  PromptInputFooter,
+  type PromptInputMessage,
+  PromptInputTextarea,
+  PromptInputTools,
+} from "@/components/ai-elements/prompt-input";
+import {
+  ChatAttachmentButton,
+  ChatComposerAttachments,
+} from "@/components/chat-composer-attachments";
 import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import {
+  CHAT_ATTACHMENT_MAX_FILES,
+  CHAT_ATTACHMENT_MAX_FILE_SIZE,
+  promptMessageToUserContent,
+} from "@/lib/chat-messages";
 
 type NewChatComposerProps = {
   agentId: string;
@@ -44,8 +60,7 @@ export function NewChatComposer({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const isSubmittingRef = useRef(false);
 
-  async function onSubmit(event: React.FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault();
+  async function onSubmit(submission: PromptInputMessage): Promise<void> {
     if (disabled || isSubmittingRef.current) {
       return;
     }
@@ -53,12 +68,12 @@ export function NewChatComposer({
     isSubmittingRef.current = true;
     setError(null);
 
-    const trimmedMessage = message.trim();
-    if (!trimmedMessage) {
+    const firstMessage = promptMessageToUserContent(submission);
+    if (typeof firstMessage === "string" && !firstMessage) {
       setError("Enter a first message.");
       isSubmittingRef.current = false;
       setIsSubmitting(false);
-      return;
+      throw new Error("Enter a first message.");
     }
 
     setIsSubmitting(true);
@@ -71,59 +86,63 @@ export function NewChatComposer({
           ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}),
           "content-type": "application/json",
         },
-        body: JSON.stringify({ agentId, message: trimmedMessage }),
+        body: JSON.stringify({
+          agentId,
+          message: firstMessage,
+        }),
       });
       const body = parseCreateChatResponse(await response.json());
       if (!body.chatId) {
-        setError(body.error ?? "Unable to start chat.");
-        isSubmittingRef.current = false;
-        setIsSubmitting(false);
-        return;
+        throw new Error(body.error ?? "Unable to start chat.");
       }
       router.push(`/chats/${body.chatId}` as Route);
-    } catch {
-      setError("Unable to start chat.");
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Unable to start chat.");
       isSubmittingRef.current = false;
       setIsSubmitting(false);
+      throw error;
     }
   }
 
   return (
-    <div className="w-full space-y-3">
-      <form
-        onSubmit={onSubmit}
-        className="border-border/60 bg-muted/30 focus-within:border-border flex flex-col gap-2 rounded-3xl border p-3 shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08)] transition-colors"
-      >
-        <Label htmlFor="new-chat-message" className="sr-only">
-          First message
-        </Label>
-        <textarea
-          id="new-chat-message"
-          value={message}
-          disabled={disabled || isSubmitting}
-          onChange={(event) => setMessage(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-              event.preventDefault();
-              event.currentTarget.form?.requestSubmit();
-            }
-          }}
-          rows={3}
-          placeholder={`Message ${agentName}...`}
-          className="placeholder:text-muted-foreground/80 max-h-48 w-full resize-none bg-transparent px-2.5 py-1 text-base outline-none disabled:cursor-not-allowed disabled:opacity-60"
-        />
-        <div className="flex items-center justify-end">
-          <Button type="submit" size="sm" disabled={disabled || isSubmitting} className="rounded-full">
-            <ArrowUp />
-            {isSubmitting ? "Starting…" : "Start chat"}
-          </Button>
-        </div>
-      </form>
-      {error ? (
-        <p role="alert" className="text-destructive text-center text-sm">
-          {error}
-        </p>
-      ) : null}
-    </div>
+    <TooltipProvider>
+      <div className="w-full space-y-3">
+        <PromptInput
+          maxFileSize={CHAT_ATTACHMENT_MAX_FILE_SIZE}
+          maxFiles={CHAT_ATTACHMENT_MAX_FILES}
+          multiple
+          onError={(promptError) => setError(promptError.message)}
+          onSubmit={onSubmit}
+        >
+          <ChatComposerAttachments />
+          <PromptInputTextarea
+            aria-label="First message"
+            disabled={disabled || isSubmitting}
+            onChange={(event) => setMessage(event.target.value)}
+            placeholder={`Message ${agentName}...`}
+            value={message}
+          />
+          <PromptInputFooter>
+            <PromptInputTools>
+              <ChatAttachmentButton disabled={disabled || isSubmitting} />
+            </PromptInputTools>
+            <Button
+              className="rounded-full"
+              disabled={disabled || isSubmitting}
+              size="sm"
+              type="submit"
+            >
+              <ArrowUp />
+              {isSubmitting ? "Starting…" : "Start chat"}
+            </Button>
+          </PromptInputFooter>
+        </PromptInput>
+        {error ? (
+          <p role="alert" className="text-destructive text-center text-sm">
+            {error}
+          </p>
+        ) : null}
+      </div>
+    </TooltipProvider>
   );
 }

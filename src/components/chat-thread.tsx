@@ -11,15 +11,8 @@ import {
   type SessionState,
 } from "eve/client";
 import { useEveAgent } from "eve/react";
-import { AlertCircleIcon, MessageCircleIcon, PaperclipIcon } from "lucide-react";
+import { AlertCircleIcon, MessageCircleIcon } from "lucide-react";
 
-import {
-  Attachment,
-  AttachmentInfo,
-  AttachmentPreview,
-  AttachmentRemove,
-  Attachments,
-} from "@/components/ai-elements/attachments";
 import {
   Conversation,
   ConversationContent,
@@ -28,18 +21,24 @@ import {
 } from "@/components/ai-elements/conversation";
 import {
   PromptInput,
-  PromptInputButton,
   PromptInputFooter,
-  PromptInputHeader,
   type PromptInputMessage,
   PromptInputSubmit,
   PromptInputTextarea,
   PromptInputTools,
-  usePromptInputAttachments,
 } from "@/components/ai-elements/prompt-input";
+import {
+  ChatAttachmentButton,
+  ChatComposerAttachments,
+} from "@/components/chat-composer-attachments";
 import { EveMessageView } from "@/components/eve-message";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { EVE_PROXY_CONTINUATION_TOKEN } from "@/eve/proxy-contract";
+import {
+  CHAT_ATTACHMENT_MAX_FILES,
+  CHAT_ATTACHMENT_MAX_FILE_SIZE,
+  promptMessageToUserContent,
+} from "@/lib/chat-messages";
 
 export type ChatThreadSummary = {
   id: string;
@@ -55,7 +54,7 @@ export type ChatThreadSummary = {
 type ChatThreadProps = {
   chat: ChatThreadSummary;
   events: HandleMessageStreamEvent[];
-  pendingUserMessage?: string | null;
+  pendingUserMessage?: UserContent | null;
   getAccessToken?: () => Promise<string>;
   getCallerToken?: () => Promise<string>;
   respondToAuthenticationChallenge?: (
@@ -252,22 +251,9 @@ function ChatThreadSession({
       return;
     }
 
-    const content: UserContent = [];
-    if (text) {
-      content.push({ type: "text", text });
-    }
-    for (const file of message.files) {
-      content.push({
-        type: "file",
-        data: file.url,
-        filename: file.filename,
-        mediaType: file.mediaType,
-      });
-    }
-
     setLocalError(null);
     try {
-      await agent.send({ message: message.files.length === 0 ? text : content });
+      await agent.send({ message: promptMessageToUserContent(message) });
     } catch (error) {
       setLocalError(errorMessage(error));
       throw error;
@@ -347,13 +333,13 @@ function ChatThreadSession({
             </div>
           ) : null}
           <PromptInput
-            maxFileSize={20 * 1024 * 1024}
-            maxFiles={8}
+            maxFileSize={CHAT_ATTACHMENT_MAX_FILE_SIZE}
+            maxFiles={CHAT_ATTACHMENT_MAX_FILES}
             multiple
             onError={(error) => setLocalError(error.message)}
             onSubmit={handleSubmit}
           >
-            <ComposerAttachments />
+            <ChatComposerAttachments />
             <PromptInputTextarea
               aria-label="Message"
               disabled={composerDisabled}
@@ -365,7 +351,7 @@ function ChatThreadSession({
             />
             <PromptInputFooter>
               <PromptInputTools>
-                <AddAttachmentButton disabled={composerDisabled || isBusy} />
+                <ChatAttachmentButton disabled={composerDisabled || isBusy} />
               </PromptInputTools>
               <PromptInputSubmit
                 aria-label={isBusy ? "Stop generating" : "Send message"}
@@ -378,41 +364,6 @@ function ChatThreadSession({
         </div>
       </section>
     </TooltipProvider>
-  );
-}
-
-function ComposerAttachments(): React.ReactElement | null {
-  const attachments = usePromptInputAttachments();
-  if (attachments.files.length === 0) {
-    return null;
-  }
-
-  return (
-    <PromptInputHeader>
-      <Attachments variant="inline">
-        {attachments.files.map((file) => (
-          <Attachment data={file} key={file.id} onRemove={() => attachments.remove(file.id)}>
-            <AttachmentPreview />
-            <AttachmentInfo />
-            <AttachmentRemove />
-          </Attachment>
-        ))}
-      </Attachments>
-    </PromptInputHeader>
-  );
-}
-
-function AddAttachmentButton({ disabled }: { disabled: boolean }): React.ReactElement {
-  const attachments = usePromptInputAttachments();
-  return (
-    <PromptInputButton
-      aria-label="Attach files"
-      disabled={disabled}
-      onClick={attachments.openFileDialog}
-      tooltip="Attach files"
-    >
-      <PaperclipIcon className="size-4" />
-    </PromptInputButton>
   );
 }
 
