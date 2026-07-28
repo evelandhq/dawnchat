@@ -58,28 +58,20 @@ export function AgentCatalog(): React.ReactElement {
           getCatalog(returnPath),
           getSession(),
         ]);
-        if (!session.authenticated) {
-          if (active) {
-            setState({
-              kind: "ready",
-              catalog,
-              chats: [],
-              externalAgents: [],
-            });
-          }
-          return;
-        }
-        const appToken = await getAppToken(returnPath);
-        const response = await fetch("/api/chats", {
-          headers: { authorization: `Bearer ${appToken}` },
-          cache: "no-store",
-        });
+        const appToken = session.authenticated
+          ? await getAppToken(returnPath)
+          : null;
+        const [response, agentsResponse] = await Promise.all([
+          fetch("/api/chats", {
+            ...(appToken
+              ? { headers: { authorization: `Bearer ${appToken}` } }
+              : {}),
+            cache: "no-store",
+          }),
+          fetch("/api/agents", { cache: "no-store" }),
+        ]);
         if (!response.ok) throw new Error("Unable to load conversation history.");
         const body = (await response.json()) as { chats?: HistoricalChat[] };
-        const agentsResponse = await fetch("/api/agents", {
-          headers: { authorization: `Bearer ${appToken}` },
-          cache: "no-store",
-        });
         if (!agentsResponse.ok) throw new Error("Unable to load external Agents.");
         const agentsBody = (await agentsResponse.json()) as {
           agents?: ExternalAgent[];
