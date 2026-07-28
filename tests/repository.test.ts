@@ -300,6 +300,104 @@ describe("repository", () => {
     ).resolves.toBeNull();
   });
 
+  it("upserts managed Catalog Agents by issuer and Project while preserving history", async () => {
+    const repository = createRepository(db);
+    const first = await repository.upsertCatalogAgent({
+      identityIssuer: "https://eveland.example.com",
+      evelandProjectId: "project_support",
+      name: "Support",
+      description: "Answers support questions.",
+      baseUrl: "https://support-v1.agents.example.com",
+    });
+    const chat = await repository.createChat({
+      agentConnectionId: first.id,
+      title: "Keep this history",
+      ownerIdentityIssuer: "https://eveland.example.com",
+      ownerIdentityPrincipalId: "ipr_user_1",
+      ownerIdentityRealmId: "irl_account_1",
+      evelandProjectId: "project_support",
+    });
+    const updated = await repository.upsertCatalogAgent({
+      identityIssuer: "https://eveland.example.com",
+      evelandProjectId: "project_support",
+      name: "Support Agent",
+      description: "Updated description.",
+      baseUrl: "https://support-v2.agents.example.com",
+    });
+
+    expect(updated).toMatchObject({
+      id: first.id,
+      source: "managed",
+      identityIssuer: "https://eveland.example.com",
+      evelandProjectId: "project_support",
+      baseUrl: "https://support-v2.agents.example.com",
+    });
+
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      id: chat.id,
+      title: "Keep this history",
+    });
+  });
+
+  it("lists historical chats by app identity after Catalog availability changes", async () => {
+    const repository = createRepository(db);
+    const agent = await repository.upsertCatalogAgent({
+      identityIssuer: "https://eveland.example.com",
+      evelandProjectId: "project_support",
+      name: "Support",
+      description: null,
+      baseUrl: "https://support.agents.example.com",
+    });
+    const owned = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Historical conversation",
+      ownerIdentityIssuer: "https://eveland.example.com",
+      ownerIdentityPrincipalId: "ipr_user_1",
+      ownerIdentityRealmId: "irl_account_1",
+      evelandProjectId: "project_support",
+    });
+
+    await expect(
+      repository.listChatsForAppIdentity({
+        issuer: "https://eveland.example.com",
+        principalId: "ipr_user_1",
+        realmId: "irl_account_1",
+      }),
+    ).resolves.toEqual([owned]);
+    await expect(
+      repository.listChatsForAppIdentity({
+        issuer: "https://other.example.com",
+        principalId: "ipr_user_1",
+        realmId: "irl_account_1",
+      }),
+    ).resolves.toEqual([]);
+  });
+
+  it("keeps pre-App-Token chat history readable for the configured issuer", async () => {
+    const repository = createRepository(db);
+    const agent = await repository.createAgentConnection({
+      name: "Legacy Support",
+      baseUrl: "https://legacy-support.example.com",
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    const legacy = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Before App Tokens",
+      ownerIdentityPrincipalId: "ipr_user_1",
+      ownerIdentityRealmId: "irl_account_1",
+      evelandProjectId: "project_support",
+    });
+
+    await expect(
+      repository.listChatsForAppIdentity({
+        issuer: "https://eveland.example.com",
+        principalId: "ipr_user_1",
+        realmId: "irl_account_1",
+      }),
+    ).resolves.toEqual([legacy]);
+  });
+
   it("deduplicates replayed remote events by session cursor", async () => {
     const repository = createRepository(db);
     const agent = await repository.createAgentConnection({

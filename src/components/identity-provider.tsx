@@ -11,13 +11,21 @@ import {
 
 import {
   createEvelandIdentityClient,
+  type IdentityCatalog,
   type IdentitySession,
 } from "@/identity/client";
 
 type IdentityContextValue = {
   session: IdentitySession | null;
   getSession(force?: boolean): Promise<IdentitySession>;
+  getCatalog(returnPath?: string): Promise<IdentityCatalog>;
+  getAppToken(returnPath?: string): Promise<string>;
   getCallerToken(projectId: string, returnPath: string): Promise<string>;
+  respondToAuthenticationChallenge(
+    header: string | null,
+    expectedProjectId: string,
+    returnPath: string,
+  ): Promise<string | null>;
   switchRealm(returnPath: string): never;
   logout(): Promise<void>;
 };
@@ -26,16 +34,23 @@ const IdentityContext = createContext<IdentityContextValue | null>(null);
 
 export function IdentityProvider({
   baseUrl,
+  requestBaseUrl,
   returnTarget,
   children,
 }: {
   baseUrl: string;
+  requestBaseUrl?: string;
   returnTarget: string;
   children: ReactNode;
 }): React.ReactElement {
   const client = useMemo(
-    () => createEvelandIdentityClient({ baseUrl, returnTarget }),
-    [baseUrl, returnTarget],
+    () =>
+      createEvelandIdentityClient({
+        baseUrl,
+        requestBaseUrl,
+        returnTarget,
+      }),
+    [baseUrl, requestBaseUrl, returnTarget],
   );
   const [session, setSession] = useState<IdentitySession | null>(null);
   const getSession = useCallback(
@@ -60,7 +75,11 @@ export function IdentityProvider({
     () => ({
       session,
       getSession,
+      getCatalog: client.getCatalog,
+      getAppToken: client.getAppToken,
       getCallerToken,
+      respondToAuthenticationChallenge:
+        client.respondToAuthenticationChallenge,
       switchRealm: client.switchRealm,
       async logout() {
         await client.logout();

@@ -24,14 +24,26 @@ export function AuthenticatedChatThread({
   evelandProjectId,
 }: {
   chatId: string;
-  evelandProjectId: string;
+  evelandProjectId?: string;
 }): React.ReactElement {
-  const { getCallerToken, switchRealm } = useEvelandIdentity();
+  const {
+    getAppToken,
+    getCallerToken,
+    getCatalog,
+    getSession,
+    respondToAuthenticationChallenge,
+    switchRealm,
+  } = useEvelandIdentity();
   const returnPath = `/chats/${chatId}`;
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<
     | { kind: "loading" }
-    | { kind: "ready"; data: ChatPayload }
+    | {
+        kind: "ready";
+        data: ChatPayload;
+        available: boolean;
+        authenticated: boolean;
+      }
     | { kind: "forbidden"; message: string }
     | { kind: "missing" }
     | { kind: "error"; message: string }
@@ -41,9 +53,17 @@ export function AuthenticatedChatThread({
     let active = true;
     void (async () => {
       try {
-        const token = await getCallerToken(evelandProjectId, returnPath);
+        const session = await getSession();
+        const token = session.authenticated
+          ? await getAppToken(returnPath)
+          : null;
+        const catalog = evelandProjectId
+          ? await getCatalog(returnPath)
+          : null;
         const response = await fetch(`/api/chats/${encodeURIComponent(chatId)}`, {
-          headers: { authorization: `Bearer ${token}` },
+          ...(token
+            ? { headers: { authorization: `Bearer ${token}` } }
+            : {}),
           cache: "no-store",
         });
         if (response.status === 404) {
@@ -52,7 +72,20 @@ export function AuthenticatedChatThread({
         }
         if (!response.ok) throw await apiError(response);
         const data = (await response.json()) as ChatPayload;
-        if (active) setState({ kind: "ready", data });
+        if (active) {
+          setState({
+            kind: "ready",
+            data,
+            authenticated: session.authenticated,
+            available:
+              !evelandProjectId ||
+              Boolean(
+                catalog?.agents.some(
+                  (agent) => agent.projectId === evelandProjectId,
+                ),
+              ),
+          });
+        }
       } catch (error) {
         if (
           !active ||
@@ -75,7 +108,15 @@ export function AuthenticatedChatThread({
     return () => {
       active = false;
     };
-  }, [attempt, chatId, evelandProjectId, getCallerToken, returnPath]);
+  }, [
+    attempt,
+    chatId,
+    evelandProjectId,
+    getAppToken,
+    getCatalog,
+    getSession,
+    returnPath,
+  ]);
 
   if (state.kind === "loading") {
     return (
@@ -98,7 +139,7 @@ export function AuthenticatedChatThread({
       <div className="mx-auto w-full max-w-xl p-6">
         <Alert variant="destructive">
           <CircleAlert />
-          <AlertTitle>This identity scope cannot open the chat</AlertTitle>
+          <AlertTitle>Eveland rejected access to this chat</AlertTitle>
           <AlertDescription className="space-y-3">
             <p>{state.message}</p>
             <Button
@@ -138,14 +179,45 @@ export function AuthenticatedChatThread({
   }
 
   return (
-    <ChatThread
-      chat={state.data.chat}
-      events={state.data.events}
-      pendingUserMessage={state.data.chat.pendingUserMessage}
-      getCallerToken={() =>
-        getCallerToken(evelandProjectId, returnPath)
-      }
-    />
+    <div className="flex h-full min-h-0 flex-col">
+      {!state.available ? (
+        <Alert className="m-4 mb-0">
+          <CircleAlert />
+          <AlertTitle>This Agent is currently unavailable</AlertTitle>
+          <AlertDescription>
+            Your conversation history is preserved, but new messages are disabled.
+          </AlertDescription>
+        </Alert>
+      ) : null}
+      <div className="min-h-0 flex-1">
+        <ChatThread
+          chat={state.data.chat}
+          events={state.data.events}
+          pendingUserMessage={state.data.chat.pendingUserMessage}
+          readOnly={!state.available}
+          getAccessToken={
+            state.authenticated
+              ? () => getAppToken(returnPath)
+              : undefined
+          }
+          getCallerToken={
+            evelandProjectId
+              ? () => getCallerToken(evelandProjectId, returnPath)
+              : undefined
+          }
+          respondToAuthenticationChallenge={
+            evelandProjectId
+              ? (header) =>
+                  respondToAuthenticationChallenge(
+                    header,
+                    evelandProjectId,
+                    returnPath,
+                  )
+              : undefined
+          }
+        />
+      </div>
+    </div>
   );
 }
 

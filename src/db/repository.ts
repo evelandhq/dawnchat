@@ -1,4 +1,4 @@
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, isNull, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { DatabaseError } from "pg";
 import { z } from "zod";
@@ -40,6 +40,14 @@ export type CreateAgentConnectionInput = {
   evelandProjectId?: string | null;
 };
 
+export type UpsertCatalogAgentInput = {
+  identityIssuer: string;
+  evelandProjectId: string;
+  name: string;
+  description: string | null;
+  baseUrl: string;
+};
+
 export type UpdateAgentConnectionInput = {
   name: string;
   baseUrl: string;
@@ -57,6 +65,8 @@ export type CreateChatInput = {
   agentConnectionId: string;
   title: string;
   pendingUserMessage?: string | null;
+  ownerClientId?: string | null;
+  ownerIdentityIssuer?: string | null;
   ownerIdentityPrincipalId?: string | null;
   ownerIdentityRealmId?: string | null;
   evelandProjectId?: string | null;
@@ -66,6 +76,12 @@ export type ChatIdentityScope = {
   principalId: string;
   realmId: string;
   projectId: string;
+};
+
+export type AppIdentityScope = {
+  issuer: string;
+  principalId: string;
+  realmId: string;
 };
 
 export type AppendEventInput = {
@@ -87,6 +103,7 @@ export type AppendEventInput = {
 
 export type Repository = {
   createAgentConnection(input: CreateAgentConnectionInput): Promise<AgentConnection>;
+  upsertCatalogAgent(input: UpsertCatalogAgentInput): Promise<AgentConnection>;
   listAgentConnections(): Promise<AgentConnection[]>;
   getAgentConnection(id: string): Promise<AgentConnection | null>;
   updateAgentConnection(id: string, input: UpdateAgentConnectionInput): Promise<AgentConnection | null>;
@@ -95,8 +112,12 @@ export type Repository = {
   createChat(input: CreateChatInput): Promise<Chat>;
   listChats(): Promise<Chat[]>;
   getChat(id: string): Promise<Chat | null>;
+  listChatsForClient(clientId: string): Promise<Chat[]>;
+  getChatForClient(id: string, clientId: string): Promise<Chat | null>;
   listChatsForIdentity(scope: ChatIdentityScope): Promise<Chat[]>;
   getChatForIdentity(id: string, scope: ChatIdentityScope): Promise<Chat | null>;
+  listChatsForAppIdentity(scope: AppIdentityScope): Promise<Chat[]>;
+  getChatForAppIdentity(id: string, scope: AppIdentityScope): Promise<Chat | null>;
   appendEvent(input: AppendEventInput): Promise<EveEvent>;
   listEvents(chatId: string): Promise<EveEvent[]>;
   clearPendingUserMessage(chatId: string): Promise<Chat>;
@@ -139,7 +160,7 @@ function mapEvent(row: typeof events.$inferSelect): EveEvent {
   };
 }
 
-const duplicateAgentUrlConstraint = "agent_connections_base_url_unique";
+const duplicateAgentUrlConstraint = "agent_connections_external_base_url_unique";
 
 export class DuplicateAgentUrlError extends Error {
   constructor(cause: unknown) {
@@ -191,6 +212,89 @@ export function createRepository(db: RepositoryDb): Repository {
         }
         throw error;
       }
+    },
+
+    async upsertCatalogAgent(input) {
+      const now = new Date();
+      const [managed] = await db
+        .select()
+        .from(agentConnections)
+        .where(
+          and(
+            eq(agentConnections.source, "managed"),
+            eq(agentConnections.identityIssuer, input.identityIssuer),
+            eq(agentConnections.evelandProjectId, input.evelandProjectId),
+          ),
+        )
+        .limit(1);
+      const [legacy] = managed
+        ? []
+        : await db
+            .select()
+            .from(agentConnections)
+            .where(
+              and(
+                eq(agentConnections.evelandProjectId, input.evelandProjectId),
+                isNull(agentConnections.identityIssuer),
+                eq(agentConnections.authType, "none"),
+                isNull(agentConnections.authConfigEncrypted),
+              ),
+            )
+            .limit(1);
+      const existing = managed ?? legacy;
+      if (existing) {
+        const [updated] = await db
+          .update(agentConnections)
+          .set({
+            name: input.name,
+            description: input.description,
+            baseUrl: input.baseUrl,
+            source: "managed",
+            identityIssuer: input.identityIssuer,
+            evelandProjectId: input.evelandProjectId,
+            catalogLastSeenAt: now,
+            updatedAt: now,
+          })
+          .where(eq(agentConnections.id, existing.id))
+          .returning();
+        if (!updated) throw new Error("Failed to update Catalog Agent.");
+        return updated;
+      }
+      const [created] = await db
+        .insert(agentConnections)
+        .values({
+          id: createId("agent"),
+          name: input.name,
+          description: input.description,
+          baseUrl: input.baseUrl,
+          source: "managed",
+          authType: "none",
+          authConfigEncrypted: null,
+          identityIssuer: input.identityIssuer,
+          evelandProjectId: input.evelandProjectId,
+          catalogLastSeenAt: now,
+          status: "unknown",
+          lastCheckedAt: null,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .onConflictDoUpdate({
+          target: [
+            agentConnections.identityIssuer,
+            agentConnections.evelandProjectId,
+          ],
+          targetWhere: sql`${agentConnections.source} = 'managed'`,
+          set: {
+            name: input.name,
+            description: input.description,
+            baseUrl: input.baseUrl,
+            catalogLastSeenAt: now,
+            updatedAt: now,
+          },
+        })
+        .returning();
+      if (!created) throw new Error("Failed to create Catalog Agent.");
+      return created;
     },
 
     async listAgentConnections() {
@@ -260,6 +364,8 @@ export function createRepository(db: RepositoryDb): Repository {
         id: createId("chat"),
         agentConnectionId: input.agentConnectionId,
         title: input.title,
+        ownerClientId: input.ownerClientId ?? null,
+        ownerIdentityIssuer: input.ownerIdentityIssuer ?? null,
         ownerIdentityPrincipalId: input.ownerIdentityPrincipalId ?? null,
         ownerIdentityRealmId: input.ownerIdentityRealmId ?? null,
         evelandProjectId: input.evelandProjectId ?? null,
@@ -281,6 +387,29 @@ export function createRepository(db: RepositoryDb): Repository {
 
     async getChat(id) {
       const [row] = await db.select().from(chats).where(eq(chats.id, id)).limit(1);
+      return row ? mapChat(row) : null;
+    },
+
+    async listChatsForClient(clientId) {
+      const rows = await db
+        .select()
+        .from(chats)
+        .where(eq(chats.ownerClientId, clientId))
+        .orderBy(asc(chats.createdAt), asc(chats.id));
+      return rows.map(mapChat);
+    },
+
+    async getChatForClient(id, clientId) {
+      const [row] = await db
+        .select()
+        .from(chats)
+        .where(
+          and(
+            eq(chats.id, id),
+            eq(chats.ownerClientId, clientId),
+          ),
+        )
+        .limit(1);
       return row ? mapChat(row) : null;
     },
 
@@ -309,6 +438,43 @@ export function createRepository(db: RepositoryDb): Repository {
             eq(chats.ownerIdentityPrincipalId, scope.principalId),
             eq(chats.ownerIdentityRealmId, scope.realmId),
             eq(chats.evelandProjectId, scope.projectId),
+          ),
+        )
+        .limit(1);
+      return row ? mapChat(row) : null;
+    },
+
+    async listChatsForAppIdentity(scope) {
+      const rows = await db
+        .select()
+        .from(chats)
+        .where(
+          and(
+            or(
+              eq(chats.ownerIdentityIssuer, scope.issuer),
+              isNull(chats.ownerIdentityIssuer),
+            ),
+            eq(chats.ownerIdentityPrincipalId, scope.principalId),
+            eq(chats.ownerIdentityRealmId, scope.realmId),
+          ),
+        )
+        .orderBy(asc(chats.createdAt), asc(chats.id));
+      return rows.map(mapChat);
+    },
+
+    async getChatForAppIdentity(id, scope) {
+      const [row] = await db
+        .select()
+        .from(chats)
+        .where(
+          and(
+            eq(chats.id, id),
+            or(
+              eq(chats.ownerIdentityIssuer, scope.issuer),
+              isNull(chats.ownerIdentityIssuer),
+            ),
+            eq(chats.ownerIdentityPrincipalId, scope.principalId),
+            eq(chats.ownerIdentityRealmId, scope.realmId),
           ),
         )
         .limit(1);

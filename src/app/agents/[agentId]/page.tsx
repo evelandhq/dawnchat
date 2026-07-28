@@ -5,8 +5,6 @@ import { createRepository } from "@/db/repository";
 import { getDbClient } from "@/db/provider";
 import { AgentRecheckButton } from "@/components/agent-recheck-button";
 import { IdentityAgentAccess } from "@/components/identity-agent-access";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { CircleAlert } from "lucide-react";
 
 export const dynamic = "force-dynamic";
 
@@ -61,22 +59,11 @@ export default async function AgentNewChatPage({ params }: AgentNewChatPageProps
           <AgentRecheckButton agentId={agent.id} />
         </div>
       )}
-      {agent.evelandProjectId ? (
-        <IdentityAgentAccess
-          agentId={agent.id}
-          agentName={agent.name}
-          disabled={!isHealthy}
-          evelandProjectId={agent.evelandProjectId}
-        />
-      ) : (
-        <Alert>
-          <CircleAlert />
-          <AlertTitle>Eveland Identity is not configured</AlertTitle>
-          <AlertDescription>
-            Add this Agent&apos;s Eveland Project ID before starting a chat.
-          </AlertDescription>
-        </Alert>
-      )}
+      <IdentityAgentAccess
+        agentId={agent.id}
+        agentName={agent.name}
+        disabled={!isHealthy}
+      />
     </section>
   );
 }

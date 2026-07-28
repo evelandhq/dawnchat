@@ -25,17 +25,39 @@ Start Eveland API/Web/Worker as well, then in Eveland System > Identity:
 
 1. create and enable the Internal Provider;
 2. create its exact allowed Internal Realm;
-3. save `http://localhost:3010` as the `eve-chats` return target;
-4. grant that Realm to the Greeter Project.
+3. save `http://localhost:3010` as the `eve-chats` return target.
 
-Register the Greeter Agent here with `authType=none` and its Eveland Project ID. The
-browser enters Eveland through `/identity/login`; it never reads Better Auth or selects
-Internal/OIDC itself. Caller Tokens stay in memory and are refreshed before expiry.
+Deploy a Greeter source revision that uses the standard
+`agent/channels/eve.ts` `eveChannel`, and make that running Deployment the
+Project's Stable route. EveChats then displays Greeter automatically at
+`/agents`; no Gateway URL, manual Project ID, or login is required to browse the
+Catalog. `/` opens the most recent Chat visible to the current browser/Identity
+scope and falls back to `/agents` when there is no history. Clicking a Catalog
+Agent lazily creates the local connection keyed by Eveland issuer and Project
+ID without starting login.
 
-Localhost ports are the same schemeful site, so the `SameSite=Lax` Identity
-cookie is available to credentialed browser requests. Production deployments
-must preserve that topology under one HTTPS site; an unrelated EveChats site
-requires an explicit authorization-code handoff that is outside this phase.
+The browser enters Eveland through `/identity/login`; it never reads Better
+Auth or selects Internal/OIDC itself. App Tokens and Caller Tokens stay in
+memory and are refreshed before expiry. An anonymous session check on `/` or
+`/agents` does not redirect and does not request an App Token. A signed, HttpOnly
+EveChats browser-session cookie owns anonymous local chats. When an Eveland
+Identity Session already exists, App Tokens additionally scope history and
+mutations to that identity without being forwarded upstream. If the Agent
+advertises Eveland Identity in its `WWW-Authenticate` challenge, EveChats
+follows the Agent-provided continuation, obtains a Project Caller Token, and
+retries the original request. Catalog membership alone never starts login or
+causes a Caller Token to be requested or forwarded.
+
+Because local Eveland Identity and EveChats share the `localhost` hostname,
+cookie-bearing Identity session, App Token, Caller Token, and logout requests
+use EveChats' same-origin `/identity/*` path, which Next proxies to the
+configured Eveland Identity origin. Top-level login and Agent-provided
+continuation navigation still go directly to Eveland. This prevents Safari
+from losing the Identity cookie on a cross-port credentialed request and
+restarting the login flow. Deployments with different hostnames retain direct
+Identity requests and must preserve one HTTPS schemeful site; an unrelated
+EveChats site requires an explicit authorization-code handoff that is outside
+this phase.
 
 ## Tests and verification
 
@@ -71,8 +93,14 @@ A local Eve Agent connection must expose the Eve HTTP routes under its configure
 - `POST /eve/v1/session/:sessionId`
 - `GET /eve/v1/session/:sessionId/stream`
 
-Register that base URL and its Eveland Project ID in the app, then create a chat against
-the registered agent. Every list/detail/create/continue/stream request requires a valid
-Caller Token whose principal, Realm, and project match the chat. A chat turn creates or
-continues an Eve session, consumes the stream, persists canonical events, and stores
-`sessionId`, server-only `continuationToken`, and `streamIndex` for follow-up messages.
+Use the manual form only for an external Agent and configure its own bearer or
+header authentication when needed. Eveland-managed Agents come from the
+Identity Catalog instead. History list/detail requests require either the
+signed browser-session cookie that owns an anonymous chat or an App Token whose
+issuer, principal, and Realm match an identity-owned chat. Neither credential
+is forwarded upstream. After an Eveland challenge, a Caller Token for the exact
+Project is accepted and forwarded only to the signed Catalog endpoint.
+External turns forward only the external Agent's stored authentication. A turn
+creates or continues an Eve session, consumes the stream, persists canonical
+events, and stores `sessionId`, server-only `continuationToken`, and
+`streamIndex` for follow-up messages.

@@ -7,6 +7,13 @@ import { createRepository } from "@/db/repository";
 import { setDbClientForTests } from "@/db/provider";
 import { createTestDbHandle, type TestDbHandle } from "@/test/db";
 
+const getAppToken = vi.fn(async () => "app-token");
+const getSession = vi.fn(async () => ({
+  authenticated: true as const,
+  principal: { id: "ipr_1", name: "Test User", email: null },
+  activeRealm: { id: "irl_1", name: "Account 1" },
+}));
+
 vi.mock("next/navigation", () => ({
   notFound: vi.fn(),
   useRouter: () => ({ push: vi.fn(), refresh: vi.fn() }),
@@ -20,6 +27,8 @@ vi.mock("@/components/identity-provider", () => ({
       activeRealm: { id: "irl_1", name: "Account 1" },
     },
     getCallerToken: async () => "caller-token",
+    getAppToken,
+    getSession,
     switchRealm: vi.fn(),
   }),
 }));

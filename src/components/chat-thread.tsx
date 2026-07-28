@@ -3,7 +3,13 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { UserContent } from "ai";
-import type { HandleMessageStreamEvent, InputResponse, SessionState } from "eve/client";
+import {
+  ClientError,
+  type HandleMessageStreamEvent,
+  type InputResponse,
+  type SendTurnPayload,
+  type SessionState,
+} from "eve/client";
 import { useEveAgent } from "eve/react";
 import { AlertCircleIcon, MessageCircleIcon, PaperclipIcon } from "lucide-react";
 
@@ -50,27 +56,155 @@ type ChatThreadProps = {
   chat: ChatThreadSummary;
   events: HandleMessageStreamEvent[];
   pendingUserMessage?: string | null;
+  getAccessToken?: () => Promise<string>;
   getCallerToken?: () => Promise<string>;
+  respondToAuthenticationChallenge?: (
+    header: string | null,
+  ) => Promise<string | null>;
+  readOnly?: boolean;
 };
 
 export function ChatThread({
   chat,
   events,
   pendingUserMessage = null,
+  getAccessToken,
   getCallerToken,
+  respondToAuthenticationChallenge,
+  readOnly = false,
 }: ChatThreadProps): React.ReactElement {
-  const router = useRouter();
   const pendingSentRef = useRef(false);
+  const challengeInFlightRef = useRef(false);
+  const authenticationAttemptedRef = useRef(false);
+  const [authentication, setAuthentication] = useState<{
+    revision: number;
+    mode: "app" | "caller";
+    events: HandleMessageStreamEvent[];
+    session?: SessionState;
+    retryInput?: SendTurnPayload;
+  }>({
+    revision: 0,
+    mode: "app",
+    events,
+  });
+
+  const handleAuthenticationError = async (
+    error: ClientError,
+    retryInput: SendTurnPayload,
+    currentEvents: HandleMessageStreamEvent[],
+    currentSession: SessionState,
+  ): Promise<void> => {
+    if (
+      error.status !== 401 ||
+      !respondToAuthenticationChallenge ||
+      !getCallerToken ||
+      challengeInFlightRef.current ||
+      authenticationAttemptedRef.current
+    ) {
+      return;
+    }
+    challengeInFlightRef.current = true;
+    try {
+      const token = await respondToAuthenticationChallenge(
+        error.headers["www-authenticate"] ?? null,
+      );
+      if (!token) return;
+      authenticationAttemptedRef.current = true;
+      pendingSentRef.current = true;
+      setAuthentication((current) => ({
+        revision: current.revision + 1,
+        mode: "caller",
+        events: currentEvents,
+        session: currentSession,
+        retryInput,
+      }));
+    } finally {
+      challengeInFlightRef.current = false;
+    }
+  };
+
+  return (
+    <ChatThreadSession
+      key={authentication.revision}
+      chat={chat}
+      events={authentication.events}
+      initialSession={authentication.session}
+      pendingUserMessage={pendingUserMessage}
+      pendingSentRef={pendingSentRef}
+      getAccessToken={
+        authentication.mode === "caller" ? getCallerToken : getAccessToken
+      }
+      getCallerToken={getCallerToken}
+      onAuthenticationError={handleAuthenticationError}
+      readOnly={readOnly}
+      retryInput={authentication.retryInput}
+    />
+  );
+}
+
+function ChatThreadSession({
+  chat,
+  events,
+  initialSession,
+  pendingUserMessage,
+  pendingSentRef,
+  getAccessToken,
+  getCallerToken,
+  onAuthenticationError,
+  readOnly,
+  retryInput,
+}: ChatThreadProps & {
+  initialSession?: SessionState;
+  pendingSentRef: React.MutableRefObject<boolean>;
+  onAuthenticationError(
+    error: ClientError,
+    retryInput: SendTurnPayload,
+    events: HandleMessageStreamEvent[],
+    session: SessionState,
+  ): Promise<void>;
+  retryInput?: SendTurnPayload;
+}): React.ReactElement {
+  const router = useRouter();
+  const agentRef = useRef<ReturnType<typeof useEveAgent> | null>(null);
+  const latestInputRef = useRef<SendTurnPayload | null>(null);
+  const retrySentRef = useRef(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const agent = useEveAgent({
     host: `/api/chats/${chat.id}/agent`,
-    auth: getCallerToken ? { bearer: getCallerToken } : undefined,
+    auth: getAccessToken ? { bearer: getAccessToken } : undefined,
     initialEvents: events,
-    initialSession: chat.sessionState
+    initialSession: initialSession ?? (chat.sessionState
       ? { ...chat.sessionState, continuationToken: EVE_PROXY_CONTINUATION_TOKEN }
-      : undefined,
-    onFinish: () => router.refresh(),
+      : undefined),
+    prepareSend(input) {
+      latestInputRef.current = input;
+      return input;
+    },
+    onError(error) {
+      const current = agentRef.current;
+      const retry = latestInputRef.current;
+      if (
+        error instanceof ClientError &&
+        current &&
+        retry
+      ) {
+        void onAuthenticationError(
+          error,
+          retry,
+          [...current.events],
+          current.session,
+        ).catch((authenticationError: unknown) => {
+          setLocalError(errorMessage(authenticationError));
+        });
+      }
+    },
+    onFinish(snapshot) {
+      if (snapshot.status === "ready") {
+        router.refresh();
+      }
+    },
   });
+  agentRef.current = agent;
   const isBusy = agent.status === "submitted" || agent.status === "streaming";
   const hasPendingInteraction = agent.data.messages.some((message) =>
     message.parts.some(
@@ -79,10 +213,29 @@ export function ChatThread({
         (part.type === "dynamic-tool" && part.state === "approval-requested"),
     ),
   );
-  const composerDisabled = chat.status === "completed" || hasPendingInteraction;
+  const composerDisabled =
+    readOnly || chat.status === "completed" || hasPendingInteraction;
 
   useEffect(() => {
-    if (!pendingUserMessage || pendingSentRef.current || agent.status !== "ready") {
+    if (!retryInput || retrySentRef.current || agent.status !== "ready") {
+      return;
+    }
+    retrySentRef.current = true;
+    setLocalError(null);
+    void agent.send(retryInput).catch((error: unknown) => {
+      retrySentRef.current = false;
+      setLocalError(errorMessage(error));
+    });
+  }, [agent, retryInput]);
+
+  useEffect(() => {
+    if (
+      readOnly ||
+      retryInput ||
+      !pendingUserMessage ||
+      pendingSentRef.current ||
+      agent.status !== "ready"
+    ) {
       return;
     }
     pendingSentRef.current = true;
@@ -91,7 +244,7 @@ export function ChatThread({
       pendingSentRef.current = false;
       setLocalError(errorMessage(error));
     });
-  }, [agent, pendingUserMessage]);
+  }, [agent, pendingUserMessage, readOnly]);
 
   const handleSubmit = async (message: PromptInputMessage): Promise<void> => {
     const text = message.text.trim();
@@ -133,18 +286,19 @@ export function ChatThread({
   const handleStop = (): void => {
     agent.stop();
     const sessionId = agent.session.sessionId;
-    if (!sessionId || !getCallerToken) {
+    const getCancelToken = getAccessToken ?? getCallerToken;
+    if (!sessionId || !getCancelToken) {
       return;
     }
 
-    void getCallerToken()
-      .then((callerToken) =>
+    void getCancelToken()
+      .then((accessToken) =>
         fetch(
           `/api/chats/${encodeURIComponent(chat.id)}/agent/eve/v1/session/${encodeURIComponent(sessionId)}/cancel`,
           {
             method: "POST",
             headers: {
-              authorization: `Bearer ${callerToken}`,
+              authorization: `Bearer ${accessToken}`,
               "content-type": "application/json",
             },
             body: "{}",
@@ -171,7 +325,7 @@ export function ChatThread({
             ) : (
               agent.data.messages.map((message, index) => (
                 <EveMessageView
-                  canRespond={!isBusy && chat.status !== "completed"}
+                  canRespond={!readOnly && !isBusy && chat.status !== "completed"}
                   isStreaming={
                     agent.status === "streaming" && index === agent.data.messages.length - 1
                   }
@@ -203,7 +357,11 @@ export function ChatThread({
             <PromptInputTextarea
               aria-label="Message"
               disabled={composerDisabled}
-              placeholder={composerPlaceholder(chat.status, hasPendingInteraction)}
+              placeholder={
+                readOnly
+                  ? "This Agent is currently unavailable"
+                  : composerPlaceholder(chat.status, hasPendingInteraction)
+              }
             />
             <PromptInputFooter>
               <PromptInputTools>

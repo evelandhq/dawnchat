@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { GET as GET_CHAT } from "@/app/api/chats/[chatId]/route";
 import { POST as POST_CHAT } from "@/app/api/chats/route";
+import { getChatAccessHintForPage } from "@/app/chats/[chatId]/page";
 import { setDbClientForTests } from "@/db/provider";
 import { createRepository } from "@/db/repository";
 import { startFakeEveServer, type FakeEveServer } from "@/eve/fake-eve-server.test-helper";
@@ -79,6 +80,20 @@ describe("chat bootstrap", () => {
     });
   });
 
+  it("allows the chat page to bootstrap a browser-session-owned conversation", async () => {
+    const { id: agentId } = await createAgent();
+    const chat = await createRepository(testDb.db).createChat({
+      agentConnectionId: agentId,
+      title: "Anonymous conversation",
+      ownerClientId: "client_0123456789abcdef0123456789abcdef",
+      evelandProjectId: "project_support",
+    });
+
+    await expect(getChatAccessHintForPage(chat.id)).resolves.toEqual({
+      evelandProjectId: "project_support",
+    });
+  });
+
   it("loads raw Eve events without exposing the stored continuation token", async () => {
     const { id: agentId } = await createAgent();
     const response = await createChat(agentId, "Start from the saved draft");
@@ -130,9 +145,19 @@ describe("chat bootstrap", () => {
 const testVerifier: CallerTokenVerifier = {
   async verifyAuthorization(_authorization, expectedProjectId) {
     return {
+      issuer: "https://identity.example.com",
       principalId: "ipr_user_1",
       realmId: "irl_account_1",
       projectId: expectedProjectId ?? "project_support",
+      agentUrl: null,
+      expiresAt: 1_900_000_000,
+    };
+  },
+  async verifyAppAuthorization() {
+    return {
+      issuer: "https://identity.example.com",
+      principalId: "ipr_user_1",
+      realmId: "irl_account_1",
       expiresAt: 1_900_000_000,
     };
   },

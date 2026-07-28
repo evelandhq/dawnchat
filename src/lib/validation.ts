@@ -62,13 +62,6 @@ export const createAgentConnectionSchema = z
     headerValue: z.string().optional(),
   })
   .superRefine((value, ctx) => {
-    if (value.evelandProjectId && value.authType !== "none") {
-      ctx.addIssue({
-        code: "custom",
-        path: ["authType"],
-        message: "Eveland project identity cannot be combined with legacy agent auth",
-      });
-    }
     if (value.authType === "bearer" && !value.bearerToken?.trim()) {
       ctx.addIssue({
         code: "custom",
@@ -107,13 +100,6 @@ export const updateAgentConnectionSchema = z
     headerValue: z.string().optional(),
   })
   .superRefine((value, ctx) => {
-    if (value.evelandProjectId && value.authType !== "none") {
-      ctx.addIssue({
-        code: "custom",
-        path: ["authType"],
-        message: "Eveland project identity cannot be combined with legacy agent auth",
-      });
-    }
     if (value.authType === "header" && !value.headerName?.trim()) {
       ctx.addIssue({
         code: "custom",
@@ -122,10 +108,6 @@ export const updateAgentConnectionSchema = z
       });
     }
   });
-
-export const discoverAgentsSchema = z.object({
-  gatewayUrl: agentBaseUrlSchema,
-});
 
 export const createChatSchema = z.object({
   agentId: nonEmptyTrimmedString,

@@ -12,8 +12,7 @@ type NewChatComposerProps = {
   agentId: string;
   agentName: string;
   disabled?: boolean;
-  evelandProjectId?: string;
-  getCallerToken?: () => Promise<string>;
+  getAccessToken?: () => Promise<string>;
 };
 
 type CreateChatResponse = {
@@ -37,8 +36,7 @@ export function NewChatComposer({
   agentId,
   agentName,
   disabled = false,
-  evelandProjectId,
-  getCallerToken,
+  getAccessToken,
 }: NewChatComposerProps): React.ReactElement {
   const router = useRouter();
   const [message, setMessage] = useState("");
@@ -65,12 +63,12 @@ export function NewChatComposer({
 
     setIsSubmitting(true);
     try {
-      const callerToken =
-        evelandProjectId && getCallerToken ? await getCallerToken() : null;
+      const accessToken =
+        getAccessToken ? await getAccessToken() : null;
       const response = await fetch("/api/chats", {
         method: "POST",
         headers: {
-          ...(callerToken ? { authorization: `Bearer ${callerToken}` } : {}),
+          ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}),
           "content-type": "application/json",
         },
         body: JSON.stringify({ agentId, message: trimmedMessage }),
@@ -83,7 +81,6 @@ export function NewChatComposer({
         return;
       }
       router.push(`/chats/${body.chatId}` as Route);
-      router.refresh();
     } catch {
       setError("Unable to start chat.");
       isSubmittingRef.current = false;
