@@ -7,7 +7,6 @@ import { CircleAlert, ShieldCheck } from "lucide-react";
 
 import { NewChatComposer } from "@/components/new-chat-composer";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { useEvelandIdentity } from "@/components/identity-provider";
@@ -23,20 +22,22 @@ type RecentChat = {
 export function IdentityAgentAccess({
   agentId,
   agentName,
-  evelandProjectId,
   disabled,
 }: {
   agentId: string;
   agentName: string;
-  evelandProjectId: string;
   disabled: boolean;
 }): React.ReactElement {
-  const { getCallerToken, session, switchRealm } = useEvelandIdentity();
+  const {
+    getAppToken,
+    getSession,
+    switchRealm,
+  } = useEvelandIdentity();
   const returnPath = `/agents/${agentId}`;
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<
     | { kind: "loading" }
-    | { kind: "ready"; chats: RecentChat[] }
+    | { kind: "ready"; chats: RecentChat[]; authenticated: boolean }
     | { kind: "forbidden"; message: string }
     | { kind: "error"; message: string }
   >({ kind: "loading" });
@@ -45,9 +46,14 @@ export function IdentityAgentAccess({
     let active = true;
     void (async () => {
       try {
-        const token = await getCallerToken(evelandProjectId, returnPath);
+        const session = await getSession();
+        const token = session.authenticated
+          ? await getAppToken(returnPath)
+          : null;
         const response = await fetch("/api/chats", {
-          headers: { authorization: `Bearer ${token}` },
+          ...(token
+            ? { headers: { authorization: `Bearer ${token}` } }
+            : {}),
           cache: "no-store",
         });
         if (!response.ok) throw await localApiError(response);
@@ -58,6 +64,7 @@ export function IdentityAgentAccess({
             chats: (body.chats ?? []).filter(
               (chat) => chat.agentConnectionId === agentId,
             ),
+            authenticated: session.authenticated,
           });
         }
       } catch (error) {
@@ -78,7 +85,7 @@ export function IdentityAgentAccess({
     return () => {
       active = false;
     };
-  }, [agentId, attempt, evelandProjectId, getCallerToken, returnPath]);
+  }, [agentId, attempt, getAppToken, getSession, returnPath]);
 
   if (state.kind === "loading") {
     return (
@@ -93,7 +100,7 @@ export function IdentityAgentAccess({
     return (
       <Alert variant="destructive">
         <CircleAlert />
-        <AlertTitle>This identity scope cannot use {agentName}</AlertTitle>
+        <AlertTitle>Eveland rejected access to {agentName}</AlertTitle>
         <AlertDescription className="space-y-3">
           <p>{state.message}</p>
           <Button
@@ -130,36 +137,35 @@ export function IdentityAgentAccess({
     );
   }
 
-  const authenticatedSession = session?.authenticated ? session : null;
   return (
     <div className="grid w-full gap-8">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b pb-4">
-        <div className="flex min-w-0 items-center gap-2">
-          <ShieldCheck className="size-4 text-primary" />
-          <span className="truncate text-sm font-medium">
-            {authenticatedSession?.principal.name ?? "Eveland identity"}
-          </span>
-          {authenticatedSession ? (
-            <Badge variant="outline">{authenticatedSession.activeRealm.name}</Badge>
-          ) : null}
+      {state.authenticated ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b pb-4">
+          <div className="flex min-w-0 items-center gap-2">
+            <ShieldCheck className="size-4 text-primary" />
+            <span className="truncate text-sm font-medium">
+              Eveland identity
+            </span>
+          </div>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            onClick={() => switchRealm(returnPath)}
+          >
+            Switch scope
+          </Button>
         </div>
-        <Button
-          type="button"
-          size="sm"
-          variant="ghost"
-          onClick={() => switchRealm(returnPath)}
-        >
-          Switch scope
-        </Button>
-      </div>
+      ) : null}
 
       <NewChatComposer
         agentId={agentId}
         agentName={agentName}
         disabled={disabled}
-        evelandProjectId={evelandProjectId}
-        getCallerToken={() =>
-          getCallerToken(evelandProjectId, returnPath)
+        getAccessToken={
+          state.authenticated
+            ? () => getAppToken(returnPath)
+            : undefined
         }
       />
 

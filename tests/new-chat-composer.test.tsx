@@ -21,7 +21,7 @@ describe("NewChatComposer", () => {
     refreshMock.mockReset();
   });
 
-  it("posts the first message for the bound agent and navigates to the created chat", async () => {
+  it("navigates once without starting a concurrent RSC refresh", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ chat: { id: "chat_created" } }), {
         status: 201,
@@ -45,22 +45,21 @@ describe("NewChatComposer", () => {
       }),
     );
     await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/chats/chat_created"));
-    expect(refreshMock).toHaveBeenCalledTimes(1);
+    expect(refreshMock).not.toHaveBeenCalled();
   });
 
-  it("requests and sends an in-memory Caller Token for an Eveland project", async () => {
+  it("uses the app-scoped token without prefetching a Caller Token", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       Response.json({ chat: { id: "chat_identity" } }, { status: 201 }),
     );
-    const getCallerToken = vi.fn(async () => "short-lived-token");
+    const getAccessToken = vi.fn(async () => "app-token");
     vi.stubGlobal("fetch", fetchMock);
 
     render(
       <NewChatComposer
         agentId="agent_a"
         agentName="Data Bot"
-        evelandProjectId="project_support"
-        getCallerToken={getCallerToken}
+        getAccessToken={getAccessToken}
       />,
     );
     fireEvent.change(screen.getByLabelText("First message"), {
@@ -69,12 +68,12 @@ describe("NewChatComposer", () => {
     fireEvent.click(screen.getByRole("button", { name: "Start chat" }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
-    expect(getCallerToken).toHaveBeenCalledTimes(1);
+    expect(getAccessToken).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/chats",
       expect.objectContaining({
         headers: {
-          authorization: "Bearer short-lived-token",
+          authorization: "Bearer app-token",
           "content-type": "application/json",
         },
       }),
@@ -96,7 +95,7 @@ describe("NewChatComposer", () => {
     fireEvent.click(screen.getByRole("button", { name: "Start chat" }));
 
     await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/chats/chat_failed"));
-    expect(refreshMock).toHaveBeenCalledTimes(1);
+    expect(refreshMock).not.toHaveBeenCalled();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 

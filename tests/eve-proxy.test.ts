@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { resolveAppBrowserSession } from "@/app-session";
 import { setDbClientForTests } from "@/db/provider";
 import { createRepository } from "@/db/repository";
 import { startFakeEveServer, type FakeEveServer } from "@/eve/fake-eve-server.test-helper";
@@ -10,6 +11,7 @@ import {
   type CallerTokenVerifier,
 } from "@/identity/server";
 import { createTestDbHandle, type TestDbHandle } from "@/test/db";
+import { encryptAuthConfig } from "@/eve/auth";
 
 type RouteContext<TParams extends Record<string, string>> = {
   params: Promise<TParams>;
@@ -25,6 +27,13 @@ type GetRoute<TParams extends Record<string, string>> = (
   context: RouteContext<TParams>,
 ) => Promise<Response>;
 
+type SessionOperationRoute = (
+  request: Request,
+  context: {
+    params: Promise<{ chatId: string; sessionPath: string[] }>;
+  },
+) => Promise<Response>;
+
 async function loadProxyRoutes(): Promise<{
   createSession: PostRoute<{ chatId: string }>;
   continueSession: PostRoute<{ chatId: string; sessionId: string }>;
@@ -33,22 +42,48 @@ async function loadProxyRoutes(): Promise<{
 }> {
   const modules = await Promise.all([
     loadRouteModule("../src/app/api/chats/[chatId]/agent/eve/v1/session/route.ts"),
-    loadRouteModule("../src/app/api/chats/[chatId]/agent/eve/v1/session/[sessionId]/route.ts"),
-    loadRouteModule("../src/app/api/chats/[chatId]/agent/eve/v1/session/[sessionId]/cancel/route.ts"),
-    loadRouteModule("../src/app/api/chats/[chatId]/agent/eve/v1/session/[sessionId]/stream/route.ts"),
+    loadRouteModule("../src/app/api/chats/[chatId]/agent/eve/v1/session/[...sessionPath]/route.ts"),
   ]);
 
-  expect(modules.every(Boolean), "per-chat Eve proxy routes should exist").toBe(true);
-  const [createModule, continueModule, cancelModule, streamModule] = modules;
-  if (!createModule || !continueModule || !cancelModule || !streamModule) {
+  expect(
+    modules.every(Boolean),
+    "the create-session and catch-all session operation routes should exist",
+  ).toBe(true);
+  const [createModule, sessionOperationModule] = modules;
+  if (!createModule || !sessionOperationModule) {
     throw new Error("Per-chat Eve proxy routes are missing");
   }
+  const postSessionOperation =
+    sessionOperationModule.POST as SessionOperationRoute;
+  const getSessionOperation =
+    sessionOperationModule.GET as SessionOperationRoute;
 
   return {
     createSession: createModule.POST as PostRoute<{ chatId: string }>,
-    continueSession: continueModule.POST as PostRoute<{ chatId: string; sessionId: string }>,
-    cancelSession: cancelModule.POST as PostRoute<{ chatId: string; sessionId: string }>,
-    streamSession: streamModule.GET as GetRoute<{ chatId: string; sessionId: string }>,
+    continueSession: (request, context) =>
+      context.params.then(({ chatId, sessionId }) =>
+        postSessionOperation(request, {
+          params: Promise.resolve({ chatId, sessionPath: [sessionId] }),
+        }),
+      ),
+    cancelSession: (request, context) =>
+      context.params.then(({ chatId, sessionId }) =>
+        postSessionOperation(request, {
+          params: Promise.resolve({
+            chatId,
+            sessionPath: [sessionId, "cancel"],
+          }),
+        }),
+      ),
+    streamSession: (request, context) =>
+      context.params.then(({ chatId, sessionId }) =>
+        getSessionOperation(request, {
+          params: Promise.resolve({
+            chatId,
+            sessionPath: [sessionId, "stream"],
+          }),
+        }),
+      ),
   };
 }
 
@@ -86,7 +121,45 @@ describe("per-chat Eve protocol proxy", () => {
     return server;
   }
 
-  it("forwards the same Caller Token and persists the remote session cursor", async () => {
+  it("proxies an anonymous browser-session chat without an Eveland token", async () => {
+    const server = await fakeServer();
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Public Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const session = resolveAppBrowserSession(
+      new Request("http://localhost/api/chats"),
+    );
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Hello",
+      pendingUserMessage: "Hello",
+      ownerClientId: session.clientId,
+      evelandProjectId: "project_support",
+    });
+    const routes = await loadProxyRoutes();
+
+    const response = await routes.createSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session`, {
+        method: "POST",
+        headers: {
+          cookie: session.setCookie!.split(";")[0]!,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ message: "Hello" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(server.requests[0]?.headers.authorization).toBeUndefined();
+  });
+
+  it("uses the App Token only for local ownership and does not infer Agent auth from Project ID", async () => {
     const server = await fakeServer();
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
@@ -116,7 +189,10 @@ describe("per-chat Eve protocol proxy", () => {
     const response = await routes.createSession(
       new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session`, {
         method: "POST",
-        headers: callerHeaders({ "content-type": "application/json" }),
+        headers: {
+          authorization: "Bearer app-token",
+          "content-type": "application/json",
+        },
         body: JSON.stringify({ message, clientContext: { surface: "eve-chats" } }),
       }),
       { params: Promise.resolve({ chatId: chat.id }) },
@@ -132,12 +208,125 @@ describe("per-chat Eve protocol proxy", () => {
       path: "/eve/v1/session",
       body: { message, clientContext: { surface: "eve-chats" } },
     });
-    expect(server.requests[0].headers.authorization).toBe("Bearer caller-token");
+    expect(server.requests[0].headers.authorization).toBeUndefined();
     await expect(repository.getChat(chat.id)).resolves.toMatchObject({
       status: "active",
       pendingUserMessage: null,
       sessionState: { sessionId: "ses_1", continuationToken: "eve:1", streamIndex: 0 },
     });
+  });
+
+  it("forwards an Eveland authentication challenge, then sends a Caller Token only on retry", async () => {
+    const challenge =
+      'Bearer realm="eveland", authorization_uri="https://identity.example.com/identity/login", project_id="project_support", display_name="Eveland"';
+    const server = await fakeServer({
+      authenticationChallenge: {
+        header: challenge,
+        body: {
+          code: "authentication_required",
+          error: "Eveland authentication is required.",
+        },
+        acceptedAuthorization: "Bearer caller-token",
+        headers: {
+          "set-cookie": "agent_session=attacker; Path=/; HttpOnly",
+          "x-agent-private": "must-not-cross-proxy",
+        },
+      },
+    });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Secured Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Authenticate",
+      pendingUserMessage: "Hello",
+      ...chatIdentity,
+    });
+    const routes = await loadProxyRoutes();
+    const create = (authorization: string) =>
+      routes.createSession(
+        new Request(
+          `http://localhost/api/chats/${chat.id}/agent/eve/v1/session`,
+          {
+            method: "POST",
+            headers: {
+              authorization,
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({ message: "Hello" }),
+          },
+        ),
+        { params: Promise.resolve({ chatId: chat.id }) },
+      );
+
+    const challenged = await create("Bearer app-token");
+
+    expect(challenged.status).toBe(401);
+    expect(challenged.headers.get("www-authenticate")).toBe(challenge);
+    expect(challenged.headers.get("cache-control")).toBe("no-store");
+    expect(challenged.headers.get("set-cookie")).toBeNull();
+    expect(challenged.headers.get("x-agent-private")).toBeNull();
+    await expect(challenged.json()).resolves.toEqual({
+      code: "authentication_required",
+      error: "Eveland authentication is required.",
+    });
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      status: "active",
+      pendingUserMessage: "Hello",
+      sessionState: null,
+    });
+
+    const retried = await create("Bearer caller-token");
+
+    expect(retried.status).toBe(200);
+    expect(server.requests).toHaveLength(2);
+    expect(server.requests[0]?.headers.authorization).toBeUndefined();
+    expect(server.requests[1]?.headers.authorization).toBe(
+      "Bearer caller-token",
+    );
+  });
+
+  it("uses the App Token only for local ownership and preserves external Agent auth", async () => {
+    const server = await fakeServer();
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "External Eve",
+      baseUrl: server.baseUrl,
+      authType: "bearer",
+      authConfigEncrypted: encryptAuthConfig({ bearerToken: "external-secret" }),
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "External turn",
+      pendingUserMessage: "Hello",
+      ownerIdentityIssuer: "https://identity.example.com",
+      ownerIdentityPrincipalId: "ipr_user_1",
+      ownerIdentityRealmId: "irl_account_1",
+    });
+    const routes = await loadProxyRoutes();
+
+    const response = await routes.createSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session`, {
+        method: "POST",
+        headers: {
+          authorization: "Bearer app-token",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ message: "Hello" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(server.requests[0]?.headers.authorization).toBe(
+      "Bearer external-secret",
+    );
   });
 
   it("keeps Eve 0.24 v18 sessions resumable without exposing a continuation token", async () => {
@@ -472,6 +661,7 @@ describe("per-chat Eve protocol proxy", () => {
 });
 
 const chatIdentity = {
+  ownerIdentityIssuer: "https://identity.example.com",
   ownerIdentityPrincipalId: "ipr_user_1",
   ownerIdentityRealmId: "irl_account_1",
   evelandProjectId: "project_support",
@@ -500,9 +690,26 @@ const testVerifier: CallerTokenVerifier = {
       );
     }
     return {
+      issuer: "https://identity.example.com",
       principalId,
       realmId: "irl_account_1",
       projectId: "project_support",
+      agentUrl: null,
+      expiresAt: 1_900_000_000,
+    };
+  },
+  async verifyAppAuthorization(authorization, expectedTarget) {
+    if (authorization !== "Bearer app-token" || expectedTarget !== "eve-chats") {
+      throw new CallerTokenError(
+        "caller_token_invalid",
+        401,
+        "The Eveland App Token is invalid.",
+      );
+    }
+    return {
+      issuer: "https://identity.example.com",
+      principalId: "ipr_user_1",
+      realmId: "irl_account_1",
       expiresAt: 1_900_000_000,
     };
   },

@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
 
 import { GET, POST } from "@/app/api/chats/route";
 import { setDbClientForTests } from "@/db/provider";
 import { createRepository } from "@/db/repository";
+import { chats } from "@/db/schema";
 import {
   CallerTokenError,
   setCallerTokenVerifierForTests,
@@ -15,7 +17,7 @@ function postChats(body: unknown): Promise<Response> {
     new Request("http://localhost/api/chats", {
       method: "POST",
       headers: {
-        authorization: "Bearer user-1",
+        authorization: "Bearer app-user-1",
         "content-type": "application/json",
       },
       body: JSON.stringify(body),
@@ -49,11 +51,87 @@ describe("Chat API", () => {
     return repository.updateAgentHealth(agent.id, { status });
   }
 
+  async function createExternalAgent() {
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "External Agent",
+      baseUrl: "https://external.example.com",
+      authType: "none",
+    });
+    return repository.updateAgentHealth(agent.id, { status: "healthy" });
+  }
+
   it("validates new chat requests", async () => {
     const response = await postChats({ agentId: "", message: "" });
 
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toEqual({ error: "Invalid chat request" });
+  });
+
+  it("creates and lists a chat in an anonymous browser session without Eveland login", async () => {
+    const agent = await createAgent();
+    const createdResponse = await POST(
+      new Request("http://localhost/api/chats", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ agentId: agent.id, message: "Hello anonymously" }),
+      }),
+    );
+
+    expect(createdResponse.status).toBe(201);
+    const sessionCookie = createdResponse.headers.get("set-cookie");
+    expect(sessionCookie).toMatch(/^eve_chats_session=/);
+    const created = (await createdResponse.json()) as { chat: { id: string } };
+
+    const listedResponse = await GET(
+      new Request("http://localhost/api/chats", {
+        headers: { cookie: sessionCookie!.split(";")[0]! },
+      }),
+    );
+
+    expect(listedResponse.status).toBe(200);
+    await expect(listedResponse.json()).resolves.toMatchObject({
+      chats: [
+        {
+          id: created.chat.id,
+          title: "Hello anonymously",
+        },
+      ],
+    });
+  });
+
+  it("lists the newest chats first", async () => {
+    const agent = await createAgent();
+    const olderResponse = await postChats({
+      agentId: agent.id,
+      message: "Older conversation",
+    });
+    const newerResponse = await postChats({
+      agentId: agent.id,
+      message: "Newer conversation",
+    });
+    const older = (await olderResponse.json()) as { chat: { id: string } };
+    const newer = (await newerResponse.json()) as { chat: { id: string } };
+    await testDb.db
+      .update(chats)
+      .set({ createdAt: new Date("2026-07-27T00:00:00.000Z") })
+      .where(eq(chats.id, older.chat.id));
+    await testDb.db
+      .update(chats)
+      .set({ createdAt: new Date("2026-07-28T00:00:00.000Z") })
+      .where(eq(chats.id, newer.chat.id));
+
+    const response = await GET(
+      new Request("http://localhost/api/chats", {
+        headers: { authorization: "Bearer app-user-1" },
+      }),
+    );
+    const body = (await response.json()) as { chats: Array<{ id: string }> };
+
+    expect(body.chats.map((chat) => chat.id)).toEqual([
+      newer.chat.id,
+      older.chat.id,
+    ]);
   });
 
   it("rejects chat creation for an unreachable agent", async () => {
@@ -90,7 +168,7 @@ describe("Chat API", () => {
 
     const response = await GET(
       new Request("http://localhost/api/chats", {
-        headers: { authorization: "Bearer user-1" },
+        headers: { authorization: "Bearer app-user-1" },
       }),
     );
 
@@ -121,14 +199,14 @@ describe("Chat API", () => {
 
     const otherUser = await GET(
       new Request("http://localhost/api/chats", {
-        headers: { authorization: "Bearer user-2" },
+        headers: { authorization: "Bearer app-user-2" },
       }),
     );
     await expect(otherUser.json()).resolves.toEqual({ chats: [] });
 
     const otherRealm = await GET(
       new Request("http://localhost/api/chats", {
-        headers: { authorization: "Bearer user-1-other-realm" },
+        headers: { authorization: "Bearer app-user-1-other-realm" },
       }),
     );
     await expect(otherRealm.json()).resolves.toEqual({ chats: [] });
@@ -137,7 +215,57 @@ describe("Chat API", () => {
     ).resolves.toMatchObject({
       ownerIdentityPrincipalId: "ipr_user_1",
       ownerIdentityRealmId: "irl_account_1",
+      ownerIdentityIssuer: "https://identity.example.com",
       evelandProjectId: "project_support",
+    });
+  });
+
+  it("keeps managed chat history readable with an app token after the Agent leaves the Catalog", async () => {
+    const agent = await createAgent();
+    const createdResponse = await postChats({
+      agentId: agent.id,
+      message: "Remember this",
+    });
+    expect(createdResponse.status).toBe(201);
+
+    const response = await GET(
+      new Request("http://localhost/api/chats", {
+        headers: { authorization: "Bearer app-user-1" },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      chats: [
+        {
+          agentConnectionId: agent.id,
+          title: "Remember this",
+        },
+      ],
+    });
+  });
+
+  it("creates chats for manually connected external Agents with an app token", async () => {
+    const agent = await createExternalAgent();
+
+    const response = await POST(
+      new Request("http://localhost/api/chats", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer app-user-1",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ agentId: agent.id, message: "Hello outside" }),
+      }),
+    );
+
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as { chat: { id: string } };
+    await expect(createRepository(testDb.db).getChat(body.chat.id)).resolves.toMatchObject({
+      ownerIdentityIssuer: "https://identity.example.com",
+      ownerIdentityPrincipalId: "ipr_user_1",
+      ownerIdentityRealmId: "irl_account_1",
+      evelandProjectId: null,
     });
   });
 });
@@ -147,23 +275,29 @@ const testVerifier: CallerTokenVerifier = {
     const identity =
       authorization === "Bearer user-1"
         ? {
+            issuer: "https://identity.example.com",
             principalId: "ipr_user_1",
             realmId: "irl_account_1",
             projectId: "project_support",
+            agentUrl: "https://agent.example.com",
             expiresAt: 1_900_000_000,
           }
         : authorization === "Bearer user-2"
           ? {
+              issuer: "https://identity.example.com",
               principalId: "ipr_user_2",
               realmId: "irl_account_1",
               projectId: "project_support",
+              agentUrl: "https://agent.example.com",
               expiresAt: 1_900_000_000,
             }
           : authorization === "Bearer user-1-other-realm"
             ? {
+                issuer: "https://identity.example.com",
                 principalId: "ipr_user_1",
                 realmId: "irl_account_2",
                 projectId: "project_support",
+                agentUrl: "https://agent.example.com",
                 expiresAt: 1_900_000_000,
               }
             : null;
@@ -172,6 +306,39 @@ const testVerifier: CallerTokenVerifier = {
         "caller_token_invalid",
         401,
         "The Eveland Caller Token is invalid.",
+      );
+    }
+    return identity;
+  },
+  async verifyAppAuthorization(authorization, expectedTarget) {
+    const identity =
+      authorization === "Bearer app-user-1"
+        ? {
+            issuer: "https://identity.example.com",
+            principalId: "ipr_user_1",
+            realmId: "irl_account_1",
+            expiresAt: 1_900_000_000,
+          }
+        : authorization === "Bearer app-user-2"
+          ? {
+              issuer: "https://identity.example.com",
+              principalId: "ipr_user_2",
+              realmId: "irl_account_1",
+              expiresAt: 1_900_000_000,
+            }
+          : authorization === "Bearer app-user-1-other-realm"
+            ? {
+                issuer: "https://identity.example.com",
+                principalId: "ipr_user_1",
+                realmId: "irl_account_2",
+                expiresAt: 1_900_000_000,
+              }
+            : null;
+    if (!identity || expectedTarget !== "eve-chats") {
+      throw new CallerTokenError(
+        "caller_token_invalid",
+        401,
+        "The Eveland App Token is invalid.",
       );
     }
     return identity;

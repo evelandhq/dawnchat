@@ -1,0 +1,1 @@
+ALTER TABLE "chats" ADD COLUMN "owner_client_id" text;

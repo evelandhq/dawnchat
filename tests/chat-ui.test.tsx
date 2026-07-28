@@ -357,6 +357,7 @@ describe("ChatThread with Eve and AI Elements", () => {
     expect(await screen.findByText("Hello from Eve.")).toBeInTheDocument();
     expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/chats/chat_pending/agent/eve/v1/session");
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({ message: "Hello Eve" });
+    expect(refreshMock).toHaveBeenCalledTimes(1);
   });
 
   it("converts an attached file into Eve UserContent before sending", async () => {
@@ -482,6 +483,129 @@ describe("ChatThread with Eve and AI Elements", () => {
       },
       body: "{}",
     });
+  });
+
+  it("retries the original turn with a Caller Token after an Eveland route challenge", async () => {
+    const challenge =
+      'Bearer realm="eveland", authorization_uri="https://identity.example.com/identity/login", project_id="project_support", display_name="Eveland"';
+    const getAccessToken = vi.fn(async () => "app-token");
+    const getCallerToken = vi.fn(async () => "caller-token");
+    const respondToAuthenticationChallenge = vi.fn(
+      async (header: string | null) => {
+        expect(header).toBe(challenge);
+        return "caller-token";
+      },
+    );
+    const seenAuthorization: Array<string | null> = [];
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          const authorization = new Headers(init.headers).get("authorization");
+          seenAuthorization.push(authorization);
+          if (authorization === "Bearer app-token") {
+            return Response.json(
+              {
+                code: "authentication_required",
+                error: "Eveland authentication is required.",
+              },
+              {
+                status: 401,
+                headers: {
+                  "cache-control": "no-store",
+                  "www-authenticate": challenge,
+                },
+              },
+            );
+          }
+          return Response.json(
+            {
+              sessionId: "ses_authenticated",
+              continuationToken: EVE_PROXY_CONTINUATION_TOKEN,
+            },
+            { headers: { "x-eve-session-id": "ses_authenticated" } },
+          );
+        }
+        return ndjson([
+          {
+            type: "session.waiting",
+            data: { wait: "next-user-message" },
+          },
+        ]);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({ id: "chat_auth", sessionState: null })}
+        events={[]}
+        pendingUserMessage="Authenticate me"
+        getAccessToken={getAccessToken}
+        getCallerToken={getCallerToken}
+        respondToAuthenticationChallenge={respondToAuthenticationChallenge}
+      />,
+    );
+
+    await waitFor(() => expect(seenAuthorization).toHaveLength(2));
+    expect(seenAuthorization).toEqual([
+      "Bearer app-token",
+      "Bearer caller-token",
+    ]);
+    expect(respondToAuthenticationChallenge).toHaveBeenCalledTimes(1);
+    expect(getCallerToken).toHaveBeenCalled();
+  });
+
+  it("does not repeat the Eveland authentication flow when the Caller Token is rejected", async () => {
+    const challenge =
+      'Bearer realm="eveland", authorization_uri="https://identity.example.com/identity/login", project_id="project_support", display_name="Eveland"';
+    const respondToAuthenticationChallenge = vi
+      .fn<(header: string | null) => Promise<string | null>>()
+      .mockResolvedValueOnce("caller-token")
+      .mockResolvedValueOnce(null);
+    const seenAuthorization: Array<string | null> = [];
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          seenAuthorization.push(
+            new Headers(init.headers).get("authorization"),
+          );
+          return Response.json(
+            {
+              code: "authentication_required",
+              error: "Eveland authentication is required.",
+            },
+            {
+              status: 401,
+              headers: {
+                "cache-control": "no-store",
+                "www-authenticate": challenge,
+              },
+            },
+          );
+        }
+        return ndjson([]);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({ id: "chat_rejected_caller", sessionState: null })}
+        events={[]}
+        pendingUserMessage="Authenticate me once"
+        getAccessToken={async () => "app-token"}
+        getCallerToken={async () => "caller-token"}
+        respondToAuthenticationChallenge={respondToAuthenticationChallenge}
+      />,
+    );
+
+    await screen.findByRole("alert");
+    expect(seenAuthorization).toEqual([
+      "Bearer app-token",
+      "Bearer caller-token",
+    ]);
+    expect(respondToAuthenticationChallenge).toHaveBeenCalledTimes(1);
+    expect(refreshMock).not.toHaveBeenCalled();
   });
 
   it("renders connection authorization challenges without exposing credentials", () => {

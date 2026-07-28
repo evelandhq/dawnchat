@@ -5,9 +5,18 @@ import {
 } from "node:crypto";
 
 export type CallerIdentity = {
+  issuer: string;
   principalId: string;
   realmId: string;
   projectId: string;
+  agentUrl: string | null;
+  expiresAt: number;
+};
+
+export type AppIdentity = {
+  issuer: string;
+  principalId: string;
+  realmId: string;
   expiresAt: number;
 };
 
@@ -24,6 +33,10 @@ export type CallerTokenVerifier = {
     authorization: string | null,
     expectedProjectId?: string,
   ): Promise<CallerIdentity>;
+  verifyAppAuthorization(
+    authorization: string | null,
+    expectedTarget: string,
+  ): Promise<AppIdentity>;
 };
 
 type JwksKey = {
@@ -140,6 +153,44 @@ export function createCallerTokenVerifier(
     authorization: string | null,
     expectedProjectId?: string,
   ): Promise<CallerIdentity> {
+    const payload = await verifyToken(authorization);
+    const projectId = parseProjectAudience(payload.aud);
+    if (!projectId || (expectedProjectId !== undefined && projectId !== expectedProjectId)) {
+      throw invalidToken();
+    }
+    return {
+      issuer,
+      principalId: payload.sub,
+      realmId: payload.realmId,
+      projectId,
+      agentUrl: payload.agentUrl,
+      expiresAt: payload.exp,
+    };
+  }
+
+  async function verifyAppAuthorization(
+    authorization: string | null,
+    expectedTarget: string,
+  ): Promise<AppIdentity> {
+    const payload = await verifyToken(authorization);
+    if (payload.aud !== `eveland:app:${expectedTarget}`) {
+      throw invalidToken();
+    }
+    return {
+      issuer,
+      principalId: payload.sub,
+      realmId: payload.realmId,
+      expiresAt: payload.exp,
+    };
+  }
+
+  async function verifyToken(authorization: string | null): Promise<{
+    sub: string;
+    realmId: string;
+    aud: string;
+    agentUrl: string | null;
+    exp: number;
+  }> {
     const token = readBearerToken(authorization);
     const [headerText, payloadText, signatureText, extra] = token.split(".");
     if (!headerText || !payloadText || !signatureText || extra !== undefined) {
@@ -204,20 +255,16 @@ export function createCallerTokenVerifier(
     ) {
       throw invalidToken();
     }
-    const projectId = parseProjectAudience(payload.aud);
-    if (!projectId || (expectedProjectId !== undefined && projectId !== expectedProjectId)) {
-      throw invalidToken();
-    }
-
     return {
-      principalId: payload.sub,
+      sub: payload.sub,
       realmId: payload.realm_id,
-      projectId,
-      expiresAt: payload.exp,
+      aud: payload.aud,
+      agentUrl: parseAgentUrl(payload.agent_url),
+      exp: payload.exp,
     };
   }
 
-  return { verifyAuthorization };
+  return { verifyAuthorization, verifyAppAuthorization };
 }
 
 let defaultVerifier:
@@ -298,6 +345,28 @@ function parseProjectAudience(value: string): string | null {
   if (!value.startsWith(prefix)) return null;
   const projectId = value.slice(prefix.length);
   return projectId.length > 0 ? projectId : null;
+}
+
+function parseAgentUrl(value: unknown): string | null {
+  if (value === undefined) return null;
+  if (typeof value !== "string") throw invalidToken();
+  try {
+    const url = new URL(value);
+    if (
+      (url.protocol !== "http:" && url.protocol !== "https:") ||
+      url.username ||
+      url.password ||
+      url.pathname !== "/" ||
+      url.search ||
+      url.hash
+    ) {
+      throw invalidToken();
+    }
+    return url.toString().replace(/\/$/, "");
+  } catch (error) {
+    if (error instanceof CallerTokenError) throw error;
+    throw invalidToken();
+  }
 }
 
 function invalidToken(): CallerTokenError {

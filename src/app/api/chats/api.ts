@@ -1,5 +1,10 @@
 import { defaultMessageReducer, type HandleMessageStreamEvent } from "eve/client";
 
+import {
+  applyAppBrowserSession,
+  resolveAppBrowserSession,
+  type AppBrowserSession,
+} from "@/app-session";
 import { createRepository, type Chat, type Repository, type SessionState } from "@/db/repository";
 import { getDbClient } from "@/db/provider";
 import { createChatSchema } from "@/lib/validation";
@@ -7,7 +12,7 @@ import {
   CallerTokenError,
   callerTokenErrorResponse,
   getCallerTokenVerifier,
-  type CallerIdentity,
+  type AppIdentity,
 } from "@/identity/server";
 
 export type ChatResponse = {
@@ -22,6 +27,8 @@ export type ChatResponse = {
 };
 
 export type ChatSummaryResponse = Omit<ChatResponse, "sessionState"> & {
+  agentName: string;
+  evelandProjectId: string | null;
   lastMessage: string | null;
 };
 
@@ -31,11 +38,22 @@ export function jsonResponse(body: unknown, init?: ResponseInit): Response {
 
 export async function listChats(request: Request): Promise<Response> {
   try {
-    const identity = await authenticateCaller(request);
+    const access = await resolveChatAccess(request);
     const repository = createRepository(getDbClient());
-    const chats = await repository.listChatsForIdentity(identityScope(identity));
+    const clientChats = await repository.listChatsForClient(
+      access.session.clientId,
+    );
+    const identityChats = access.identity
+      ? await repository.listChatsForAppIdentity(
+          appIdentityScope(access.identity),
+        )
+      : [];
+    const chats = uniqueChats([...identityChats, ...clientChats]);
     const summaries = await Promise.all(chats.map((chat) => chatSummaryResponse(repository, chat)));
-    return jsonResponse({ chats: summaries });
+    return applyAppBrowserSession(
+      jsonResponse({ chats: summaries }),
+      access.session,
+    );
   } catch (error) {
     if (error instanceof CallerTokenError) return callerTokenErrorResponse(error);
     return jsonResponse({ error: "Internal server error" }, { status: 500 });
@@ -57,32 +75,24 @@ export async function createChatWithFirstMessage(
     if (!agent) {
       return jsonResponse({ error: "Agent connection not found" }, { status: 404 });
     }
-    if (!agent.evelandProjectId) {
-      return jsonResponse(
-        { error: "Agent is not connected to Eveland Identity" },
-        { status: 409 },
-      );
-    }
-    if (agent.authType !== "none" || agent.authConfigEncrypted) {
-      return jsonResponse(
-        { error: "Eveland project identity conflicts with legacy Agent auth" },
-        { status: 409 },
-      );
-    }
-    const identity = await authenticateCaller(request, agent.evelandProjectId);
+    const access = await resolveChatAccess(request);
     if (agent.status === "unreachable") {
       return jsonResponse({ error: "Agent connection is unreachable" }, { status: 409 });
     }
-
     const chat = await repository.createChat({
       agentConnectionId: agent.id,
       title: parsed.data.message.slice(0, 80),
       pendingUserMessage: parsed.data.message,
-      ownerIdentityPrincipalId: identity.principalId,
-      ownerIdentityRealmId: identity.realmId,
-      evelandProjectId: identity.projectId,
+      ownerClientId: access.session.clientId,
+      ownerIdentityIssuer: access.identity?.issuer,
+      ownerIdentityPrincipalId: access.identity?.principalId,
+      ownerIdentityRealmId: access.identity?.realmId,
+      evelandProjectId: agent.evelandProjectId,
     });
-    return jsonResponse({ chat: chatResponse(chat) }, { status: 201 });
+    return applyAppBrowserSession(
+      jsonResponse({ chat: chatResponse(chat) }, { status: 201 }),
+      access.session,
+    );
   } catch (error) {
     if (error instanceof CallerTokenError) return callerTokenErrorResponse(error);
     return jsonResponse({ error: "Internal server error" }, { status: 500 });
@@ -94,24 +104,38 @@ export async function getChatWithEvents(
   chatId: string,
 ): Promise<Response> {
   try {
-    const identity = await authenticateCaller(request);
+    const access = await resolveChatAccess(request);
     const repository = createRepository(getDbClient());
-    const chat = await repository.getChatForIdentity(chatId, identityScope(identity));
+    const clientChat = await repository.getChatForClient(
+      chatId,
+      access.session.clientId,
+    );
+    const chat =
+      clientChat ??
+      (access.identity
+        ? await repository.getChatForAppIdentity(
+            chatId,
+            appIdentityScope(access.identity),
+          )
+        : null);
     if (!chat) return jsonResponse({ error: "Chat not found" }, { status: 404 });
     const [agent, events] = await Promise.all([
       repository.getAgentConnection(chat.agentConnectionId),
       repository.listEvents(chat.id),
     ]);
-    if (!agent || agent.evelandProjectId !== identity.projectId) {
+    if (!agent) {
       return jsonResponse({ error: "Chat not found" }, { status: 404 });
     }
-    return jsonResponse({
-      chat: {
-        ...chatResponse(chat),
-        agentName: agent.name,
-      },
-      events: events.map((event) => event.payload),
-    });
+    return applyAppBrowserSession(
+      jsonResponse({
+        chat: {
+          ...chatResponse(chat),
+          agentName: agent.name,
+        },
+        events: events.map((event) => event.payload),
+      }),
+      access.session,
+    );
   } catch (error) {
     if (error instanceof CallerTokenError) return callerTokenErrorResponse(error);
     return jsonResponse({ error: "Internal server error" }, { status: 500 });
@@ -138,7 +162,13 @@ function chatResponse(chat: Chat): ChatResponse {
 
 async function chatSummaryResponse(repository: Repository, chat: Chat): Promise<ChatSummaryResponse> {
   const reducer = defaultMessageReducer();
-  const events = await repository.listEvents(chat.id);
+  const [agent, events] = await Promise.all([
+    repository.getAgentConnection(chat.agentConnectionId),
+    repository.listEvents(chat.id),
+  ]);
+  if (!agent) {
+    throw new Error(`Agent connection not found for chat ${chat.id}`);
+  }
   const projection = events.reduce(
     (data, event) => reducer.reduce(data, event.payload as HandleMessageStreamEvent),
     reducer.initial(),
@@ -153,23 +183,44 @@ async function chatSummaryResponse(repository: Repository, chat: Chat): Promise<
     )
     .find((text) => text.length > 0) ?? null;
   const { sessionState: _sessionState, ...summary } = chatResponse(chat);
-  return { ...summary, lastMessage };
-}
-
-async function authenticateCaller(
-  request: Request,
-  expectedProjectId?: string,
-): Promise<CallerIdentity> {
-  return getCallerTokenVerifier().verifyAuthorization(
-    request.headers.get("authorization"),
-    expectedProjectId,
-  );
-}
-
-function identityScope(identity: CallerIdentity) {
   return {
+    ...summary,
+    agentName: agent.name,
+    evelandProjectId: chat.evelandProjectId,
+    lastMessage,
+  };
+}
+
+async function resolveChatAccess(request: Request): Promise<{
+  identity: AppIdentity | null;
+  session: AppBrowserSession;
+}> {
+  const session = resolveAppBrowserSession(request);
+  const authorization = request.headers.get("authorization");
+  if (!authorization) {
+    return { identity: null, session };
+  }
+  const identity = await getCallerTokenVerifier().verifyAppAuthorization(
+    authorization,
+    process.env.NEXT_PUBLIC_EVELAND_IDENTITY_RETURN_TARGET ?? "eve-chats",
+  );
+  return { identity, session };
+}
+
+function appIdentityScope(identity: AppIdentity) {
+  return {
+    issuer: identity.issuer,
     principalId: identity.principalId,
     realmId: identity.realmId,
-    projectId: identity.projectId,
   };
+}
+
+function uniqueChats(chats: Chat[]): Chat[] {
+  return [
+    ...new Map(chats.map((chat) => [chat.id, chat])).values(),
+  ].sort(
+    (left, right) =>
+      right.createdAt.getTime() - left.createdAt.getTime() ||
+      right.id.localeCompare(left.id),
+  );
 }

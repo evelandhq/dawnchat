@@ -1,5 +1,6 @@
 import type { HandleMessageStreamEvent } from "eve/client";
 
+import { resolveAppBrowserSession } from "@/app-session";
 import {
   createRepository,
   type Chat,
@@ -191,7 +192,9 @@ async function proxyTurnRequest(
   }
 
   if (!remote.ok) {
-    await context.repository.updateChatStatus(context.chat.id, "failed");
+    if (remote.status !== 401) {
+      await context.repository.updateChatStatus(context.chat.id, "failed");
+    }
     return forwardErrorResponse(remote);
   }
 
@@ -233,25 +236,90 @@ async function resolveProxyContext(
 ): Promise<ProxyContext | Response> {
   const repository = createRepository(getDbClient());
   const candidate = await repository.getChat(chatId);
-  if (!candidate?.evelandProjectId) {
+  if (!candidate) {
     return errorResponse("Chat not found", 404);
   }
 
-  let identity;
+  let chat: Chat | null = null;
+  let callerToken: string | undefined;
   try {
-    identity = await getCallerTokenVerifier().verifyAuthorization(
-      request.headers.get("authorization"),
-      candidate.evelandProjectId,
+    const authorization = request.headers.get("authorization");
+    const browserSession = resolveAppBrowserSession(request);
+    const clientChat = await repository.getChatForClient(
+      chatId,
+      browserSession.clientId,
     );
+    chat = clientChat;
+
+    if (authorization) {
+      let appIdentity;
+      try {
+        appIdentity = await getCallerTokenVerifier().verifyAppAuthorization(
+          authorization,
+          process.env.NEXT_PUBLIC_EVELAND_IDENTITY_RETURN_TARGET ?? "eve-chats",
+        );
+      } catch (appError) {
+        if (!candidate.evelandProjectId) throw appError;
+        const identity = await getCallerTokenVerifier().verifyAuthorization(
+          authorization,
+          candidate.evelandProjectId,
+        );
+        if (
+          candidate.ownerIdentityIssuer &&
+          candidate.ownerIdentityIssuer !== identity.issuer
+        ) {
+          return errorResponse("Chat not found", 404);
+        }
+        const candidateAgent = await repository.getAgentConnection(
+          candidate.agentConnectionId,
+        );
+        if (candidateAgent?.source === "managed") {
+          if (!identity.agentUrl) {
+            return errorResponse(
+              "Caller Token is not bound to a Catalog endpoint",
+              409,
+            );
+          }
+          if (identity.agentUrl !== candidateAgent.baseUrl) {
+            await repository.upsertCatalogAgent({
+              identityIssuer: identity.issuer,
+              evelandProjectId: identity.projectId,
+              name: candidateAgent.name,
+              description: candidateAgent.description,
+              baseUrl: identity.agentUrl,
+            });
+          }
+        }
+        chat =
+          clientChat ??
+          (await repository.getChatForIdentity(chatId, {
+            principalId: identity.principalId,
+            realmId: identity.realmId,
+            projectId: identity.projectId,
+          }));
+        callerToken = authorization.startsWith("Bearer ")
+          ? authorization.slice("Bearer ".length)
+          : "";
+      }
+      if (appIdentity) {
+        chat =
+          clientChat ??
+          (await repository.getChatForAppIdentity(chatId, {
+            issuer: appIdentity.issuer,
+            principalId: appIdentity.principalId,
+            realmId: appIdentity.realmId,
+          }));
+      }
+    } else if (!clientChat) {
+      await getCallerTokenVerifier().verifyAppAuthorization(
+        null,
+        process.env.NEXT_PUBLIC_EVELAND_IDENTITY_RETURN_TARGET ?? "eve-chats",
+      );
+    }
   } catch (error) {
     if (error instanceof CallerTokenError) return callerTokenErrorResponse(error);
-    return errorResponse("Unable to verify Eveland Caller Token", 503);
+    return errorResponse("Unable to verify Eveland identity", 503);
   }
-  const chat = await repository.getChatForIdentity(chatId, {
-    principalId: identity.principalId,
-    realmId: identity.realmId,
-    projectId: identity.projectId,
-  });
   if (!chat) {
     return errorResponse("Chat not found", 404);
   }
@@ -260,24 +328,14 @@ async function resolveProxyContext(
   if (!agent) {
     return errorResponse("Agent connection not found", 404);
   }
-  if (agent.evelandProjectId !== identity.projectId) {
+  if (agent.evelandProjectId !== chat.evelandProjectId) {
     return errorResponse("Chat not found", 404);
-  }
-  if (agent.authType !== "none" || agent.authConfigEncrypted) {
-    return errorResponse(
-      "Eveland project identity conflicts with legacy Agent auth",
-      409,
-    );
   }
   if (agent.status === "unreachable") {
     return errorResponse("Agent connection is unreachable", 409);
   }
 
   try {
-    const authorization = request.headers.get("authorization");
-    const callerToken = authorization?.startsWith("Bearer ")
-      ? authorization.slice("Bearer ".length)
-      : "";
     return {
       chat,
       repository,
@@ -434,9 +492,14 @@ async function readResponseObject(response: Response): Promise<Record<string, un
 
 async function forwardErrorResponse(response: Response): Promise<Response> {
   const body = await response.text();
+  const headers = new Headers();
+  for (const name of ["cache-control", "content-type", "www-authenticate"]) {
+    const value = response.headers.get(name);
+    if (value) headers.set(name, value);
+  }
   return new Response(body || JSON.stringify({ error: "Eve request failed" }), {
     status: response.status,
-    headers: { "content-type": response.headers.get("content-type") ?? "application/json; charset=utf-8" },
+    headers,
   });
 }
 

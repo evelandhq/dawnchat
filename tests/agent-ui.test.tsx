@@ -4,7 +4,6 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { AgentConnectionForm } from "@/components/agent-connection-form";
 import { AgentDeleteDialog } from "@/components/agent-delete-dialog";
-import { AgentDiscovery } from "@/components/agent-discovery";
 import { AgentList, type AgentListItem } from "@/components/agent-list";
 import { getAgentForEditPage } from "@/app/agents/[agentId]/edit/page";
 import { getAgentsForPage } from "@/app/agents/page";
@@ -305,104 +304,6 @@ describe("AgentConnectionForm", () => {
 
     expect(await screen.findByText("An agent with this URL is already registered.")).toBeInTheDocument();
     expect(pushMock).not.toHaveBeenCalled();
-  });
-});
-
-describe("AgentDiscovery", () => {
-  afterEach(() => {
-    vi.restoreAllMocks();
-    pushMock.mockReset();
-    refreshMock.mockReset();
-  });
-
-  it("discovers agents from a gateway and connects one with no auth", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            agents: [
-              { name: "Connected Eve", url: "http://gateway.example/a/aaa", connected: true },
-              { name: "Fresh Eve", url: "http://gateway.example/a/bbb", connected: false },
-            ],
-          }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        ),
-      )
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ agent: { id: "agent_1", status: "healthy" } }), {
-          status: 201,
-          headers: { "content-type": "application/json" },
-        }),
-      );
-    vi.stubGlobal("fetch", fetchMock);
-
-    render(React.createElement(AgentDiscovery));
-
-    fireEvent.change(screen.getByLabelText("Gateway URL"), { target: { value: "http://localhost:4000" } });
-    fireEvent.click(screen.getByRole("button", { name: "Discover" }));
-
-    expect(await screen.findByText("Fresh Eve")).toBeInTheDocument();
-    expect(fetchMock).toHaveBeenNthCalledWith(
-      1,
-      "/api/agents/discover",
-      expect.objectContaining({
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ gatewayUrl: "http://localhost:4000" }),
-      }),
-    );
-    expect(screen.getByText("Connected")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Connect Connected Eve" })).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "Connect Fresh Eve" }));
-
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
-    expect(fetchMock).toHaveBeenNthCalledWith(
-      2,
-      "/api/agents",
-      expect.objectContaining({
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name: "Fresh Eve", baseUrl: "http://gateway.example/a/bbb", authType: "none" }),
-      }),
-    );
-    expect(await screen.findByText("healthy")).toBeInTheDocument();
-    expect(pushMock).toHaveBeenCalledWith("/agents/agent_1");
-    expect(refreshMock).toHaveBeenCalled();
-  });
-
-  it("shows an error when discovery fails and does not render a list", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ error: "Gateway unreachable" }), {
-        status: 502,
-        headers: { "content-type": "application/json" },
-      }),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-
-    render(React.createElement(AgentDiscovery));
-
-    fireEvent.change(screen.getByLabelText("Gateway URL"), { target: { value: "http://localhost:4000" } });
-    fireEvent.click(screen.getByRole("button", { name: "Discover" }));
-
-    expect(
-      await screen.findByText("Unable to discover agents. Please check the gateway URL and try again."),
-    ).toBeInTheDocument();
-    expect(screen.queryByRole("list")).not.toBeInTheDocument();
-  });
-
-  it("validates the gateway URL locally before fetching", async () => {
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
-
-    render(React.createElement(AgentDiscovery));
-
-    fireEvent.change(screen.getByLabelText("Gateway URL"), { target: { value: "not-a-url" } });
-    fireEvent.click(screen.getByRole("button", { name: "Discover" }));
-
-    expect(await screen.findByText("Gateway URL must be a valid http(s) URL.")).toBeInTheDocument();
-    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 

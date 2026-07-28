@@ -41,6 +41,7 @@ function createFixture() {
       aud: `eveland:project:${projectId}`,
       principal_type: "user",
       realm_id: "irl_account_1",
+      agent_url: "https://support.agents.example.com",
       iat: now,
       nbf: now,
       exp: now + 60,
@@ -76,9 +77,11 @@ describe("Eveland Caller Token verifier", () => {
         projectId,
       ),
     ).resolves.toEqual({
+      issuer,
       principalId: "ipr_user_1",
       realmId: "irl_account_1",
       projectId,
+      agentUrl: "https://support.agents.example.com",
       expiresAt: 1_785_000_060,
     });
     expect(fixture.fetch).toHaveBeenCalledTimes(1);
@@ -90,6 +93,7 @@ describe("Eveland Caller Token verifier", () => {
     ["wrong principal type", { principal_type: "service" }],
     ["missing subject", { sub: "" }],
     ["missing realm", { realm_id: "" }],
+    ["invalid Agent URL", { agent_url: "https://attacker.example.com/path" }],
     ["not active yet", { nbf: 1_785_000_020 }],
   ])("rejects %s", async (_name, claims) => {
     const fixture = createFixture();
@@ -134,5 +138,27 @@ describe("Eveland Caller Token verifier", () => {
       code: "caller_token_missing",
       status: 401,
     });
+  });
+
+  it("verifies an app-scoped identity token with its application audience", async () => {
+    const fixture = createFixture();
+
+    await expect(
+      fixture.verifier.verifyAppAuthorization(
+        `Bearer ${fixture.token({ aud: "eveland:app:eve-chats" })}`,
+        "eve-chats",
+      ),
+    ).resolves.toEqual({
+      issuer,
+      principalId: "ipr_user_1",
+      realmId: "irl_account_1",
+      expiresAt: 1_785_000_060,
+    });
+    await expect(
+      fixture.verifier.verifyAppAuthorization(
+        `Bearer ${fixture.token()}`,
+        "eve-chats",
+      ),
+    ).rejects.toBeInstanceOf(CallerTokenError);
   });
 });

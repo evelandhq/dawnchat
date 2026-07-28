@@ -12,13 +12,24 @@ type ChatThreadPageProps = {
 
 export async function getChatAccessHintForPage(
   chatId: string,
-): Promise<{ evelandProjectId: string } | null> {
+): Promise<{ evelandProjectId?: string } | null> {
   const repository = createRepository(getDbClient());
   const chat = await repository.getChat(chatId);
-  if (!chat?.evelandProjectId || !chat.ownerIdentityPrincipalId || !chat.ownerIdentityRealmId) {
+  if (
+    !chat ||
+    (
+      !chat.ownerClientId &&
+      (
+        !chat.ownerIdentityPrincipalId ||
+        !chat.ownerIdentityRealmId
+      )
+    )
+  ) {
     return null;
   }
-  return { evelandProjectId: chat.evelandProjectId };
+  return chat.evelandProjectId
+    ? { evelandProjectId: chat.evelandProjectId }
+    : {};
 }
 
 export async function generateMetadata(): Promise<Metadata> {

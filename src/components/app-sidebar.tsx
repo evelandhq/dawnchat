@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { Route } from "next";
 
+import { AuthenticatedSidebarNav } from "@/components/authenticated-sidebar-nav";
 import { createRepository } from "@/db/repository";
 import { getDbClient } from "@/db/provider";
 import {
@@ -12,7 +13,10 @@ import {
   SidebarMenuItem,
   SidebarTrigger,
 } from "@/components/ui/sidebar";
-import { SidebarNav, type SidebarAgentItem, type SidebarChatItem } from "@/components/sidebar-nav";
+import type {
+  SidebarAgentItem,
+  SidebarChatItem,
+} from "@/components/sidebar-nav";
 import { ThemeToggle } from "@/components/theme-toggle";
 
 export type AppNavigationData = {
@@ -34,7 +38,7 @@ export async function getAppNavigationData(): Promise<AppNavigationData> {
       name: agent.name,
       status: agent.status,
     })),
-    // Identity-scoped chat history is loaded in the browser with a Caller Token.
+    // Identity-scoped chat history is loaded in the browser with an App Token.
     chats: [],
   };
 }
@@ -58,7 +62,7 @@ export async function AppSidebar({ data }: AppSidebarProps = {}): Promise<React.
         <SidebarTrigger />
       </SidebarHeader>
       <SidebarContent>
-        <SidebarNav chats={navigationData.chats} />
+        <AuthenticatedSidebarNav initialChats={navigationData.chats} />
       </SidebarContent>
     </Sidebar>
   );

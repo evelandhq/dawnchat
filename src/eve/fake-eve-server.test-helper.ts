@@ -10,6 +10,12 @@ export interface CapturedEveRequest {
 }
 
 export interface FakeEveServerOptions {
+  readonly authenticationChallenge?: {
+    readonly header: string;
+    readonly body: unknown;
+    readonly acceptedAuthorization: string;
+    readonly headers?: Readonly<Record<string, string>>;
+  };
   readonly omitContinuationTokenOnContinue?: boolean;
   readonly redirectHealthTo?: string;
   readonly failCreateSession?: boolean;
@@ -92,6 +98,20 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
       }
 
       if (request.method === "POST" && url.pathname === "/eve/v1/session") {
+        if (
+          options.authenticationChallenge &&
+          request.headers.authorization !==
+            options.authenticationChallenge.acceptedAuthorization
+        ) {
+          response.writeHead(401, {
+            "cache-control": "no-store",
+            "content-type": "application/json; charset=utf-8",
+            "www-authenticate": options.authenticationChallenge.header,
+            ...options.authenticationChallenge.headers,
+          });
+          response.end(JSON.stringify(options.authenticationChallenge.body));
+          return;
+        }
         if (options.failCreateSession) {
           writeJson(response, 500, { error: "Failed to create fake session" });
           return;

@@ -23,13 +23,7 @@ export function createEveClientForConnection(
 
 export async function checkEveAgent(connection: EveAgentConnectionLike): Promise<EveHealthCheckResult> {
   try {
-    const client = connection.evelandProjectId
-      ? new Client({
-          host: connection.baseUrl,
-          preserveCompletedSessions: true,
-          redirect: "manual",
-        })
-      : createEveClientForConnection(connection);
+    const client = createEveClientForConnection(connection);
     const health = await client.health();
     const info = await fetchAgentInfo(client, health);
 

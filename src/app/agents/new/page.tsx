@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 
 import { AgentConnectionForm } from "@/components/agent-connection-form";
-import { AgentDiscovery } from "@/components/agent-discovery";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
 export const metadata: Metadata = {
@@ -20,18 +19,6 @@ export default function NewAgentPage(): React.ReactElement {
         </CardHeader>
         <CardContent>
           <AgentConnectionForm />
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>
-            <h2 className="text-xl font-semibold tracking-tight">Discover from a gateway</h2>
-          </CardTitle>
-          <CardDescription>List the agents running behind an Eve gateway and connect them in one click.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <AgentDiscovery />
         </CardContent>
       </Card>
     </section>

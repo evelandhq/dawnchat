@@ -1,118 +1,104 @@
 import React from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
-import { eq } from "drizzle-orm";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { render, screen, waitFor } from "@testing-library/react";
 
+import AgentsPage from "@/app/agents/page";
 import ChatsPage from "@/app/chats/page";
 import HomePage from "@/app/page";
-import { setDbClientForTests } from "@/db/provider";
-import { createRepository } from "@/db/repository";
-import { agentConnections, chats } from "@/db/schema";
-import { createTestDbHandle, type TestDbHandle } from "@/test/db";
 
-const { redirectMock, redirectSentinel } = vi.hoisted(() => {
+const {
+  getAppTokenMock,
+  getSessionMock,
+  redirectMock,
+  redirectSentinel,
+  replaceMock,
+} = vi.hoisted(() => {
   const sentinel = new Error("TEST_REDIRECT_SENTINEL");
 
   return {
+    getAppTokenMock: vi.fn(),
+    getSessionMock: vi.fn(),
     redirectSentinel: sentinel,
     redirectMock: vi.fn(() => {
       throw sentinel;
     }),
+    replaceMock: vi.fn(),
   };
 });
 
 vi.mock("next/navigation", () => ({
   redirect: redirectMock,
+  useRouter: () => ({ replace: replaceMock }),
+}));
+
+vi.mock("@/components/agent-catalog", () => ({
+  AgentCatalog: () => <div>Identity-aware Agent Catalog</div>,
+}));
+
+vi.mock("@/components/identity-provider", () => ({
+  useEvelandIdentity: () => ({
+    getAppToken: getAppTokenMock,
+    getSession: getSessionMock,
+  }),
+}));
+
+vi.mock("@/db/repository", () => ({
+  createRepository: () => ({
+    listAgentConnections: async () => [],
+  }),
+}));
+
+vi.mock("@/db/provider", () => ({
+  getDbClient: () => ({}),
 }));
 
 describe("app routing", () => {
-  let testDb: TestDbHandle;
-
-  beforeEach(async () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
     redirectMock.mockClear();
-    testDb = await createTestDbHandle();
-    setDbClientForTests(testDb.db);
+    replaceMock.mockReset();
+    getAppTokenMock.mockReset();
+    getSessionMock.mockReset();
   });
 
-  afterEach(async () => {
-    setDbClientForTests(null);
-    await testDb.close();
+  it("redirects / to the most recent accessible chat", async () => {
+    getSessionMock.mockResolvedValue({ authenticated: false });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({
+          chats: [
+            { id: "chat_recent", agentConnectionId: "agent_2" },
+            { id: "chat_first", agentConnectionId: "agent_1" },
+          ],
+        }),
+      ),
+    );
+
+    render(<HomePage />);
+
+    await waitFor(() =>
+      expect(replaceMock).toHaveBeenCalledWith("/chats/chat_recent"),
+    );
+    expect(getAppTokenMock).not.toHaveBeenCalled();
   });
 
-  it("redirects / to the first catalog agent without reading global chat history", async () => {
-    const repository = createRepository(testDb.db);
-    const olderAgent = await repository.createAgentConnection({
-      name: "Older chat agent",
-      baseUrl: "https://older-chat.example.com",
-      authType: "none",
-    });
-    const newerAgent = await repository.createAgentConnection({
-      name: "Newer chat agent",
-      baseUrl: "https://newer-chat.example.com",
-      authType: "none",
-    });
-    const olderChat = await repository.createChat({
-      agentConnectionId: olderAgent.id,
-      title: "Older chat",
-    });
-    const newerChat = await repository.createChat({
-      agentConnectionId: newerAgent.id,
-      title: "Newer chat",
-    });
+  it("redirects / to /agents when there is no accessible chat", async () => {
+    getSessionMock.mockResolvedValue({ authenticated: false });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ chats: [] })),
+    );
 
-    await testDb.db
-      .update(chats)
-      .set({ createdAt: new Date("2026-01-01T00:00:00.000Z") })
-      .where(eq(chats.id, olderChat.id));
-    await testDb.db
-      .update(chats)
-      .set({ createdAt: new Date("2026-01-02T00:00:00.000Z") })
-      .where(eq(chats.id, newerChat.id));
+    render(<HomePage />);
 
-    expect((await repository.listChats()).map((chat) => chat.id)).toEqual([olderChat.id, newerChat.id]);
-    await expect(HomePage()).rejects.toBe(redirectSentinel);
-    expect(redirectMock).toHaveBeenCalledOnce();
-    expect(redirectMock).toHaveBeenCalledWith(`/agents/${olderAgent.id}`);
+    await waitFor(() => expect(replaceMock).toHaveBeenCalledWith("/agents"));
   });
 
-  it("redirects / to the first-created agent when there are agents but no chats", async () => {
-    const repository = createRepository(testDb.db);
-    const firstAgent = await repository.createAgentConnection({
-      name: "First agent",
-      baseUrl: "https://first-agent.example.com",
-      authType: "none",
-    });
-    const secondAgent = await repository.createAgentConnection({
-      name: "Second agent",
-      baseUrl: "https://second-agent.example.com",
-      authType: "none",
-    });
+  it("renders the Identity-aware Catalog at /agents", async () => {
+    render(await AgentsPage());
 
-    await testDb.db
-      .update(agentConnections)
-      .set({ createdAt: new Date("2026-01-01T00:00:00.000Z") })
-      .where(eq(agentConnections.id, firstAgent.id));
-    await testDb.db
-      .update(agentConnections)
-      .set({ createdAt: new Date("2026-01-02T00:00:00.000Z") })
-      .where(eq(agentConnections.id, secondAgent.id));
-
-    expect((await repository.listAgentConnections()).map((agent) => agent.id)).toEqual([
-      firstAgent.id,
-      secondAgent.id,
-    ]);
-    await expect(HomePage()).rejects.toBe(redirectSentinel);
-    expect(redirectMock).toHaveBeenCalledOnce();
-    expect(redirectMock).toHaveBeenCalledWith(`/agents/${firstAgent.id}`);
-  });
-
-  it("renders onboarding at / when there are no agents", async () => {
-    render(await HomePage());
-
-    expect(redirectMock).not.toHaveBeenCalled();
-    expect(screen.getByRole("heading", { name: "Welcome to EveChats" })).toBeInTheDocument();
-    expect(screen.getByText("Connect your first Eve agent to start chatting.")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Connect an agent" })).toHaveAttribute("href", "/agents/new");
+    expect(screen.getByText("Identity-aware Agent Catalog")).toBeInTheDocument();
   });
 
   it("redirects /chats to / and terminates rendering", () => {
