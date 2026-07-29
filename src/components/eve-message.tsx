@@ -141,17 +141,24 @@ function FilePart({ part }: { part: EveFilePart }): React.ReactElement {
     url: part.url ?? "",
   };
   const content = (
-    <Attachments variant="inline">
-      <Attachment data={data}>
+    <Attachments className="min-w-0 max-w-full" variant="inline">
+      <Attachment className="h-auto max-w-full py-1.5" data={data}>
         <AttachmentPreview />
         <AttachmentInfo showMediaType />
-        {part.url ? <ExternalLinkIcon className="size-3 text-muted-foreground" /> : null}
+        {part.url ? (
+          <ExternalLinkIcon className="size-3 shrink-0 text-muted-foreground" />
+        ) : null}
       </Attachment>
     </Attachments>
   );
 
   return part.url ? (
-    <a href={part.url} rel="noreferrer" target="_blank">
+    <a
+      className="block min-w-0 max-w-full"
+      href={part.url}
+      rel="noreferrer"
+      target="_blank"
+    >
       {content}
     </a>
   ) : (

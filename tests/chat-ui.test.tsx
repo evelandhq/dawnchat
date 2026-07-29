@@ -52,10 +52,11 @@ describe("ChatThread with Eve and AI Elements", () => {
             { type: "text", text: "Read this report" },
             {
               type: "file",
-              filename: "report.pdf",
-              mediaType: "application/pdf",
+              filename: "1.docx",
+              mediaType:
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
               size: 42,
-              url: "https://files.example.com/report.pdf",
+              url: "https://files.example.com/1.docx",
             },
           ],
           sequence: 1,
@@ -123,7 +124,15 @@ describe("ChatThread with Eve and AI Elements", () => {
     render(<ChatThread chat={chat({ sessionState: { sessionId: "ses_1", streamIndex: 8 } })} events={events} />);
 
     expect(screen.getByText("Read this report")).toBeInTheDocument();
-    expect(screen.getByText("report.pdf")).toBeInTheDocument();
+    expect(screen.getByText("1.docx")).toBeInTheDocument();
+    const mediaType = screen.getByText(
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    );
+    expect(mediaType.parentElement?.parentElement).toHaveClass(
+      "h-auto",
+      "max-w-full",
+      "py-1.5",
+    );
     expect(screen.getByText("Revenue increased this quarter.")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /Thought for a few seconds/i }));
