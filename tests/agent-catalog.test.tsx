@@ -51,10 +51,21 @@ describe("AgentCatalog", () => {
     });
   });
 
-  it("shows the public Catalog without starting Eveland login", async () => {
+  it("shows public and external Agents without starting Eveland login", async () => {
     getSession.mockResolvedValue({ authenticated: false });
-    const fetchMock = vi.fn(async () =>
-      Response.json({ chats: [], agents: [] }),
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) =>
+      String(input) === "/api/agents"
+        ? Response.json({
+            agents: [
+              {
+                id: "agent_external",
+                name: "Private Eve",
+                baseUrl: "https://private.example.com",
+                status: "healthy",
+              },
+            ],
+          })
+        : Response.json({ chats: [] }),
     );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -63,9 +74,17 @@ describe("AgentCatalog", () => {
     expect(
       await screen.findByRole("button", { name: "Chat with Support" }),
     ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Chat with Private Eve" }),
+    ).toHaveAttribute("href", "/agents/agent_external");
     expect(getSession).toHaveBeenCalledOnce();
     expect(getAppToken).not.toHaveBeenCalled();
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledWith("/api/chats", {
+      cache: "no-store",
+    });
+    expect(fetchMock).toHaveBeenCalledWith("/api/agents", {
+      cache: "no-store",
+    });
   });
 
   it("opens a public Catalog Agent without starting Eveland login", async () => {

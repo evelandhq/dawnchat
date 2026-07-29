@@ -1,5 +1,5 @@
 import React from "react";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { IdentityAgentAccess } from "@/components/identity-agent-access";
@@ -74,5 +74,40 @@ describe("IdentityAgentAccess", () => {
 
     expect(await screen.findByLabelText("First message")).toBeEnabled();
     expect(getAppToken).toHaveBeenCalledTimes(2);
+  });
+
+  it("constrains long recent-message previews to the composer width", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({
+          chats: [
+            {
+              id: "chat_1",
+              agentConnectionId: "agent_1",
+              title: "A long conversation",
+              lastMessage: "Unbroken attachment content".repeat(500),
+            },
+          ],
+        }),
+      ),
+    );
+
+    render(
+      <IdentityAgentAccess
+        agentId="agent_1"
+        agentName="Support"
+        disabled={false}
+      />,
+    );
+
+    const recentChats = await screen.findByRole("region", {
+      name: "Recent conversations",
+    });
+    const chatLink = within(recentChats).getByRole("link");
+
+    expect(recentChats).toHaveClass("min-w-0");
+    expect(chatLink).toHaveClass("min-w-0");
+    expect(chatLink.parentElement).toHaveClass("min-w-0");
   });
 });

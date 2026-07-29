@@ -1,5 +1,10 @@
 import { z } from "zod";
 
+import {
+  CHAT_ATTACHMENT_MAX_DATA_URL_LENGTH,
+  CHAT_ATTACHMENT_MAX_FILES,
+} from "@/lib/chat-messages";
+
 export const authTypeSchema = z.enum(["none", "bearer", "header"]);
 export const agentAuthSchema = authTypeSchema;
 
@@ -109,7 +114,37 @@ export const updateAgentConnectionSchema = z
     }
   });
 
+const firstChatMessageSchema = z.union([
+  nonEmptyTrimmedString,
+  z
+    .array(
+      z.discriminatedUnion("type", [
+        z.object({
+          type: z.literal("text"),
+          text: nonEmptyTrimmedString,
+        }),
+        z.object({
+          type: z.literal("file"),
+          data: z
+            .string()
+            .max(CHAT_ATTACHMENT_MAX_DATA_URL_LENGTH)
+            .regex(/^data:[^,]*;base64,/),
+          filename: nonEmptyTrimmedString,
+          mediaType: nonEmptyTrimmedString,
+        }),
+      ]),
+    )
+    .min(1)
+    .max(CHAT_ATTACHMENT_MAX_FILES + 1)
+    .refine(
+      (parts) =>
+        parts.filter((part) => part.type === "file").length <=
+        CHAT_ATTACHMENT_MAX_FILES,
+      { message: "Too many attachments" },
+    ),
+]);
+
 export const createChatSchema = z.object({
   agentId: nonEmptyTrimmedString,
-  message: nonEmptyTrimmedString,
+  message: firstChatMessageSchema,
 });

@@ -52,10 +52,11 @@ describe("ChatThread with Eve and AI Elements", () => {
             { type: "text", text: "Read this report" },
             {
               type: "file",
-              filename: "report.pdf",
-              mediaType: "application/pdf",
+              filename: "1.docx",
+              mediaType:
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
               size: 42,
-              url: "https://files.example.com/report.pdf",
+              url: "https://files.example.com/1.docx",
             },
           ],
           sequence: 1,
@@ -123,7 +124,15 @@ describe("ChatThread with Eve and AI Elements", () => {
     render(<ChatThread chat={chat({ sessionState: { sessionId: "ses_1", streamIndex: 8 } })} events={events} />);
 
     expect(screen.getByText("Read this report")).toBeInTheDocument();
-    expect(screen.getByText("report.pdf")).toBeInTheDocument();
+    expect(screen.getByText("1.docx")).toBeInTheDocument();
+    const mediaType = screen.getByText(
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    );
+    expect(mediaType.parentElement?.parentElement).toHaveClass(
+      "h-auto",
+      "max-w-full",
+      "py-1.5",
+    );
     expect(screen.getByText("Revenue increased this quarter.")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /Thought for a few seconds/i }));
@@ -358,6 +367,110 @@ describe("ChatThread with Eve and AI Elements", () => {
     expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/chats/chat_pending/agent/eve/v1/session");
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({ message: "Hello Eve" });
     expect(refreshMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends persisted first-message attachments after the chat route mounts", async () => {
+    const pendingMessage = [
+      { type: "text" as const, text: "Review this" },
+      {
+        type: "file" as const,
+        data: "data:text/plain;base64,aGVsbG8=",
+        filename: "report.txt",
+        mediaType: "text/plain",
+      },
+    ];
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ sessionId: "ses_1", continuationToken: "eve:1" }), {
+          status: 200,
+          headers: { "content-type": "application/json", "x-eve-session-id": "ses_1" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        ndjson([{ type: "session.waiting", data: { wait: "next-user-message" } }]),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({ id: "chat_pending_file", sessionState: null })}
+        events={[]}
+        pendingUserMessage={pendingMessage}
+      />,
+    );
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "/api/chats/chat_pending_file/agent/eve/v1/session",
+    );
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      message: pendingMessage,
+    });
+  });
+
+  it("renders a pending first-message attachment before Eve confirms the turn", async () => {
+    const pendingMessage = [
+      { type: "text" as const, text: "Review this" },
+      {
+        type: "file" as const,
+        data: "data:image/png;base64,aGVsbG8=",
+        filename: "diagram.png",
+        mediaType: "image/png",
+      },
+    ];
+    let resolveSession!: (response: Response) => void;
+    const sessionResponse = new Promise<Response>((resolve) => {
+      resolveSession = resolve;
+    });
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(() => sessionResponse)
+      .mockResolvedValueOnce(
+        ndjson([
+          {
+            type: "message.received",
+            data: {
+              message: "Review this\n[file: diagram.png (image/png)]",
+              parts: [
+                { type: "text", text: "Review this" },
+                {
+                  type: "file",
+                  filename: "diagram.png",
+                  mediaType: "image/png",
+                  url: "data:image/png;base64,aGVsbG8=",
+                },
+              ],
+              sequence: 1,
+              turnId: "turn_1",
+            },
+          },
+          { type: "session.waiting", data: { wait: "next-user-message" } },
+        ]),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({ id: "chat_pending_preview", sessionState: null })}
+        events={[]}
+        pendingUserMessage={pendingMessage}
+      />,
+    );
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("img", { name: "diagram.png" })).toBeInTheDocument();
+
+    resolveSession(
+      new Response(JSON.stringify({ sessionId: "ses_1", continuationToken: "eve:1" }), {
+        status: 200,
+        headers: { "content-type": "application/json", "x-eve-session-id": "ses_1" },
+      }),
+    );
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(screen.getAllByRole("img", { name: "diagram.png" })).toHaveLength(1),
+    );
   });
 
   it("converts an attached file into Eve UserContent before sending", async () => {

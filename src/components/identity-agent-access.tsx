@@ -138,7 +138,7 @@ export function IdentityAgentAccess({
   }
 
   return (
-    <div className="grid w-full gap-8">
+    <div className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)] gap-8">
       {state.authenticated ? (
         <div className="flex flex-wrap items-center justify-between gap-3 border-b pb-4">
           <div className="flex min-w-0 items-center gap-2">
@@ -170,17 +170,26 @@ export function IdentityAgentAccess({
       />
 
       {state.chats.length > 0 ? (
-        <section className="grid gap-3" aria-labelledby="recent-chats-title">
+        <section
+          className="grid min-w-0 gap-3"
+          aria-labelledby="recent-chats-title"
+        >
           <h2 id="recent-chats-title" className="text-sm font-medium">
             Recent conversations
           </h2>
-          <ul className="grid list-none gap-1 p-0">
+          <ul className="grid min-w-0 list-none gap-1 p-0">
             {[...state.chats].reverse().slice(0, 6).map((chat) => (
-              <li key={chat.id}>
-                <Button asChild variant="ghost" className="h-auto w-full justify-start px-3 py-2">
-                  <Link href={`/chats/${chat.id}` as Route}>
+              <li key={chat.id} className="min-w-0">
+                <Button
+                  asChild
+                  variant="ghost"
+                  className="h-auto w-full min-w-0 justify-start px-3 py-2"
+                >
+                  <Link className="min-w-0" href={`/chats/${chat.id}` as Route}>
                     <span className="min-w-0 text-left">
-                      <span className="block truncate text-sm font-medium">{chat.title}</span>
+                      <span className="block truncate text-sm font-medium">
+                        {chat.title}
+                      </span>
                       {chat.lastMessage ? (
                         <span className="text-muted-foreground block truncate text-xs">
                           {chat.lastMessage}

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import type { UserContent } from "ai";
 import type { HandleMessageStreamEvent } from "eve/client";
 import { CircleAlert } from "lucide-react";
 
@@ -15,7 +16,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { EvelandIdentityError } from "@/identity/client";
 
 type ChatPayload = {
-  chat: ChatThreadSummary & { pendingUserMessage: string | null };
+  chat: ChatThreadSummary & { pendingUserMessage: UserContent | null };
   events: HandleMessageStreamEvent[];
 };
 

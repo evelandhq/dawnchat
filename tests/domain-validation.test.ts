@@ -147,6 +147,38 @@ describe("domain validation", () => {
     expect(() => createChatSchema.parse({ agentId: "agent_123", message: "   " })).toThrow();
   });
 
+  it("accepts an attachment without text and rejects non-data attachment URLs", () => {
+    expect(
+      createChatSchema.parse({
+        agentId: "agent_123",
+        message: [
+          {
+            type: "file",
+            data: "data:text/plain;base64,aGVsbG8=",
+            filename: "report.txt",
+            mediaType: "text/plain",
+          },
+        ],
+      }),
+    ).toMatchObject({
+      message: [{ type: "file", filename: "report.txt" }],
+    });
+
+    expect(() =>
+      createChatSchema.parse({
+        agentId: "agent_123",
+        message: [
+          {
+            type: "file",
+            data: "blob:report",
+            filename: "report.txt",
+            mediaType: "text/plain",
+          },
+        ],
+      }),
+    ).toThrow();
+  });
+
   it("creates prefixed ids", () => {
     expect(createId("agent")).toMatch(/^agent_[a-f0-9]{16}$/);
     expect(createId(" agent ")).toMatch(/^agent_[a-f0-9]{16}$/);

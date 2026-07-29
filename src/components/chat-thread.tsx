@@ -10,16 +10,13 @@ import {
   type SendTurnPayload,
   type SessionState,
 } from "eve/client";
-import { useEveAgent } from "eve/react";
-import { AlertCircleIcon, MessageCircleIcon, PaperclipIcon } from "lucide-react";
-
 import {
-  Attachment,
-  AttachmentInfo,
-  AttachmentPreview,
-  AttachmentRemove,
-  Attachments,
-} from "@/components/ai-elements/attachments";
+  type EveMessage,
+  type EveMessagePart,
+  useEveAgent,
+} from "eve/react";
+import { AlertCircleIcon, MessageCircleIcon } from "lucide-react";
+
 import {
   Conversation,
   ConversationContent,
@@ -28,18 +25,24 @@ import {
 } from "@/components/ai-elements/conversation";
 import {
   PromptInput,
-  PromptInputButton,
   PromptInputFooter,
-  PromptInputHeader,
   type PromptInputMessage,
   PromptInputSubmit,
   PromptInputTextarea,
   PromptInputTools,
-  usePromptInputAttachments,
 } from "@/components/ai-elements/prompt-input";
+import {
+  ChatAttachmentButton,
+  ChatComposerAttachments,
+} from "@/components/chat-composer-attachments";
 import { EveMessageView } from "@/components/eve-message";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { EVE_PROXY_CONTINUATION_TOKEN } from "@/eve/proxy-contract";
+import {
+  CHAT_ATTACHMENT_MAX_FILES,
+  CHAT_ATTACHMENT_MAX_FILE_SIZE,
+  promptMessageToUserContent,
+} from "@/lib/chat-messages";
 
 export type ChatThreadSummary = {
   id: string;
@@ -55,7 +58,7 @@ export type ChatThreadSummary = {
 type ChatThreadProps = {
   chat: ChatThreadSummary;
   events: HandleMessageStreamEvent[];
-  pendingUserMessage?: string | null;
+  pendingUserMessage?: UserContent | null;
   getAccessToken?: () => Promise<string>;
   getCallerToken?: () => Promise<string>;
   respondToAuthenticationChallenge?: (
@@ -169,6 +172,10 @@ function ChatThreadSession({
   const latestInputRef = useRef<SendTurnPayload | null>(null);
   const retrySentRef = useRef(false);
   const [localError, setLocalError] = useState<string | null>(null);
+  const [showPendingUserMessage, setShowPendingUserMessage] = useState(
+    Boolean(pendingUserMessage) &&
+      !events.some((event) => event.type === "message.received"),
+  );
   const agent = useEveAgent({
     host: `/api/chats/${chat.id}/agent`,
     auth: getAccessToken ? { bearer: getAccessToken } : undefined,
@@ -198,6 +205,11 @@ function ChatThreadSession({
         });
       }
     },
+    onEvent(event) {
+      if (event.type === "message.received") {
+        setShowPendingUserMessage(false);
+      }
+    },
     onFinish(snapshot) {
       if (snapshot.status === "ready") {
         router.refresh();
@@ -215,6 +227,15 @@ function ChatThreadSession({
   );
   const composerDisabled =
     readOnly || chat.status === "completed" || hasPendingInteraction;
+  const visibleMessages =
+    showPendingUserMessage && pendingUserMessage
+      ? [
+          pendingUserContentMessage(chat.id, pendingUserMessage),
+          ...agent.data.messages.filter(
+            (message) => !message.metadata?.optimistic,
+          ),
+        ]
+      : agent.data.messages;
 
   useEffect(() => {
     if (!retryInput || retrySentRef.current || agent.status !== "ready") {
@@ -252,22 +273,9 @@ function ChatThreadSession({
       return;
     }
 
-    const content: UserContent = [];
-    if (text) {
-      content.push({ type: "text", text });
-    }
-    for (const file of message.files) {
-      content.push({
-        type: "file",
-        data: file.url,
-        filename: file.filename,
-        mediaType: file.mediaType,
-      });
-    }
-
     setLocalError(null);
     try {
-      await agent.send({ message: message.files.length === 0 ? text : content });
+      await agent.send({ message: promptMessageToUserContent(message) });
     } catch (error) {
       setLocalError(errorMessage(error));
       throw error;
@@ -316,18 +324,19 @@ function ChatThreadSession({
       <section className="flex h-full min-h-0 flex-col bg-background">
         <Conversation className="min-h-0 flex-1">
           <ConversationContent className="mx-auto w-full max-w-3xl gap-6 px-4 py-8 sm:px-6">
-            {agent.data.messages.length === 0 ? (
+            {visibleMessages.length === 0 ? (
               <ConversationEmptyState
                 description={`Send a message to ${chat.agentName}.`}
                 icon={<MessageCircleIcon className="size-6" />}
                 title="Start this conversation"
               />
             ) : (
-              agent.data.messages.map((message, index) => (
+              visibleMessages.map((message, index) => (
                 <EveMessageView
                   canRespond={!readOnly && !isBusy && chat.status !== "completed"}
                   isStreaming={
-                    agent.status === "streaming" && index === agent.data.messages.length - 1
+                    agent.status === "streaming" &&
+                    index === visibleMessages.length - 1
                   }
                   key={message.id}
                   message={message}
@@ -347,13 +356,13 @@ function ChatThreadSession({
             </div>
           ) : null}
           <PromptInput
-            maxFileSize={20 * 1024 * 1024}
-            maxFiles={8}
+            maxFileSize={CHAT_ATTACHMENT_MAX_FILE_SIZE}
+            maxFiles={CHAT_ATTACHMENT_MAX_FILES}
             multiple
             onError={(error) => setLocalError(error.message)}
             onSubmit={handleSubmit}
           >
-            <ComposerAttachments />
+            <ChatComposerAttachments />
             <PromptInputTextarea
               aria-label="Message"
               disabled={composerDisabled}
@@ -365,7 +374,7 @@ function ChatThreadSession({
             />
             <PromptInputFooter>
               <PromptInputTools>
-                <AddAttachmentButton disabled={composerDisabled || isBusy} />
+                <ChatAttachmentButton disabled={composerDisabled || isBusy} />
               </PromptInputTools>
               <PromptInputSubmit
                 aria-label={isBusy ? "Stop generating" : "Send message"}
@@ -381,39 +390,36 @@ function ChatThreadSession({
   );
 }
 
-function ComposerAttachments(): React.ReactElement | null {
-  const attachments = usePromptInputAttachments();
-  if (attachments.files.length === 0) {
-    return null;
-  }
+function pendingUserContentMessage(
+  chatId: string,
+  content: UserContent,
+): EveMessage {
+  const parts: EveMessagePart[] =
+    typeof content === "string"
+      ? [{ state: "done", text: content, type: "text" }]
+      : content.flatMap((part): EveMessagePart[] => {
+          if (part.type === "text") {
+            return [{ state: "done", text: part.text, type: "text" }];
+          }
+          if (part.type === "file") {
+            return [
+              {
+                filename: part.filename,
+                mediaType: part.mediaType,
+                type: "file",
+                url: typeof part.data === "string" ? part.data : undefined,
+              },
+            ];
+          }
+          return [];
+        });
 
-  return (
-    <PromptInputHeader>
-      <Attachments variant="inline">
-        {attachments.files.map((file) => (
-          <Attachment data={file} key={file.id} onRemove={() => attachments.remove(file.id)}>
-            <AttachmentPreview />
-            <AttachmentInfo />
-            <AttachmentRemove />
-          </Attachment>
-        ))}
-      </Attachments>
-    </PromptInputHeader>
-  );
-}
-
-function AddAttachmentButton({ disabled }: { disabled: boolean }): React.ReactElement {
-  const attachments = usePromptInputAttachments();
-  return (
-    <PromptInputButton
-      aria-label="Attach files"
-      disabled={disabled}
-      onClick={attachments.openFileDialog}
-      tooltip="Attach files"
-    >
-      <PaperclipIcon className="size-4" />
-    </PromptInputButton>
-  );
+  return {
+    id: `pending:${chatId}:user`,
+    metadata: { optimistic: true, status: "submitted" },
+    parts,
+    role: "user",
+  };
 }
 
 function composerPlaceholder(

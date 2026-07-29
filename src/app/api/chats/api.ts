@@ -1,4 +1,5 @@
 import { defaultMessageReducer, type HandleMessageStreamEvent } from "eve/client";
+import type { UserContent } from "ai";
 
 import {
   applyAppBrowserSession,
@@ -7,6 +8,11 @@ import {
 } from "@/app-session";
 import { createRepository, type Chat, type Repository, type SessionState } from "@/db/repository";
 import { getDbClient } from "@/db/provider";
+import {
+  deserializePendingUserContent,
+  serializePendingUserContent,
+  userContentText,
+} from "@/lib/chat-messages";
 import { createChatSchema } from "@/lib/validation";
 import {
   CallerTokenError,
@@ -21,15 +27,19 @@ export type ChatResponse = {
   title: string;
   status: Chat["status"];
   sessionState: Omit<SessionState, "continuationToken"> | null;
-  pendingUserMessage: string | null;
+  pendingUserMessage: UserContent | null;
   createdAt: string;
   updatedAt: string;
 };
 
-export type ChatSummaryResponse = Omit<ChatResponse, "sessionState"> & {
+export type ChatSummaryResponse = Omit<
+  ChatResponse,
+  "pendingUserMessage" | "sessionState"
+> & {
   agentName: string;
   evelandProjectId: string | null;
   lastMessage: string | null;
+  pendingUserMessage: string | null;
 };
 
 export function jsonResponse(body: unknown, init?: ResponseInit): Response {
@@ -79,10 +89,14 @@ export async function createChatWithFirstMessage(
     if (agent.status === "unreachable") {
       return jsonResponse({ error: "Agent connection is unreachable" }, { status: 409 });
     }
+    const messageText = userContentText(parsed.data.message);
+    const firstFile = Array.isArray(parsed.data.message)
+      ? parsed.data.message.find((part) => part.type === "file")
+      : undefined;
     const chat = await repository.createChat({
       agentConnectionId: agent.id,
-      title: parsed.data.message.slice(0, 80),
-      pendingUserMessage: parsed.data.message,
+      title: (messageText || firstFile?.filename || "New chat").slice(0, 80),
+      pendingUserMessage: serializePendingUserContent(parsed.data.message),
       ownerClientId: access.session.clientId,
       ownerIdentityIssuer: access.identity?.issuer,
       ownerIdentityPrincipalId: access.identity?.principalId,
@@ -154,7 +168,7 @@ function chatResponse(chat: Chat): ChatResponse {
           streamIndex: chat.sessionState.streamIndex ?? 0,
         }
       : null,
-    pendingUserMessage: chat.pendingUserMessage,
+    pendingUserMessage: deserializePendingUserContent(chat.pendingUserMessage),
     createdAt: chat.createdAt.toISOString(),
     updatedAt: chat.updatedAt.toISOString(),
   };
@@ -188,6 +202,9 @@ async function chatSummaryResponse(repository: Repository, chat: Chat): Promise<
     agentName: agent.name,
     evelandProjectId: chat.evelandProjectId,
     lastMessage,
+    pendingUserMessage: summary.pendingUserMessage
+      ? userContentText(summary.pendingUserMessage).trim() || null
+      : null,
   };
 }
 
