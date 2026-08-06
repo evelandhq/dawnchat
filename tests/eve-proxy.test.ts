@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
 
 import { resolveAppBrowserSession } from "@/app-session";
+import { chats } from "@/db/schema";
 import { setDbClientForTests } from "@/db/provider";
 import { createRepository } from "@/db/repository";
 import { startFakeEveServer, type FakeEveServer } from "@/eve/fake-eve-server.test-helper";
@@ -119,6 +121,78 @@ describe("per-chat Eve protocol proxy", () => {
     const server = await startFakeEveServer(options);
     servers.push(server);
     return server;
+  }
+
+  async function turnFixture(
+    name: string,
+    options?: Parameters<typeof startFakeEveServer>[0],
+  ) {
+    const server = await fakeServer(options);
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name,
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: name,
+      ...chatIdentity,
+    });
+    const routes = await loadProxyRoutes();
+    const turnRequest = (path: string, message: string): Request =>
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session${path}`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ message }),
+      });
+
+    return {
+      chat,
+      repository,
+      server,
+      chatState: () => repository.getChat(chat.id),
+      upstreamTurns: () =>
+        server.requests.filter(
+          (captured) => captured.method === "POST" && !captured.path.endsWith("/cancel"),
+        ),
+      expireTurnLease: async () => {
+        await testDb.db
+          .update(chats)
+          .set({ updatedAt: new Date(Date.now() - 10 * 60_000) })
+          .where(eq(chats.id, chat.id));
+      },
+      create: (message: string) =>
+        routes.createSession(turnRequest("", message), {
+          params: Promise.resolve({ chatId: chat.id }),
+        }),
+      continue: (message: string, sessionId = "ses_1") =>
+        routes.continueSession(turnRequest(`/${sessionId}`, message), {
+          params: Promise.resolve({ chatId: chat.id, sessionId }),
+        }),
+      stream: (sessionId = "ses_1") =>
+        routes.streamSession(
+          new Request(
+            `http://localhost/api/chats/${chat.id}/agent/eve/v1/session/${sessionId}/stream`,
+            { headers: callerHeaders() },
+          ),
+          { params: Promise.resolve({ chatId: chat.id, sessionId }) },
+        ),
+      cancel: (sessionId = "ses_1") =>
+        routes.cancelSession(
+          new Request(
+            `http://localhost/api/chats/${chat.id}/agent/eve/v1/session/${sessionId}/cancel`,
+            {
+              method: "POST",
+              headers: callerHeaders({ "content-type": "application/json" }),
+              body: "{}",
+            },
+          ),
+          { params: Promise.resolve({ chatId: chat.id, sessionId }) },
+        ),
+    };
   }
 
   it("proxies an anonymous browser-session chat without an Eveland token", async () => {
@@ -543,6 +617,8 @@ describe("per-chat Eve protocol proxy", () => {
       sessionId: "ses_1",
       continuationToken: "eve:1",
       streamIndex: 7,
+      turnGeneration: 1,
+      turnState: "waiting",
     });
     const routes = await loadProxyRoutes();
 
@@ -617,13 +693,19 @@ describe("per-chat Eve protocol proxy", () => {
       sessionId: "ses_1",
       status: "accepted",
     });
-    expect(server.requests).toHaveLength(1);
-    expect(server.requests[0]).toMatchObject({
+    const posted = server.requests.filter((captured) => captured.method === "POST");
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatchObject({
       method: "POST",
       path: "/eve/v1/session/ses_1/cancel",
       body: { turnId: "turn_1" },
     });
-    expect(server.requests[0].headers.authorization).toBe("Bearer caller-token");
+    expect(posted[0].headers.authorization).toBe("Bearer caller-token");
+    // Cancelling also drains eve's confirmation, which is where the continuation
+    // token the next turn needs arrives. That read carries the caller's token too.
+    const streamed = server.requests.filter((captured) => captured.method === "GET");
+    expect(streamed).toMatchObject([{ path: "/eve/v1/session/ses_1/stream" }]);
+    expect(streamed[0].headers.authorization).toBe("Bearer caller-token");
   });
 
   it("returns 404 instead of revealing another principal's chat", async () => {
@@ -657,6 +739,579 @@ describe("per-chat Eve protocol proxy", () => {
 
     expect(response.status).toBe(404);
     expect(server.requests).toEqual([]);
+  });
+
+  it("routes a duplicate create onto the stored session and rejects it only while a turn is live", async () => {
+    const turn = await turnFixture("Resumable Eve");
+
+    const first = await turn.create("Hello");
+
+    expect(first.status).toBe(200);
+    await expect(turn.chatState()).resolves.toMatchObject({
+      status: "active",
+      sessionState: { sessionId: "ses_1", continuationToken: "eve:1", turnState: "running" },
+    });
+
+    const duplicate = await turn.create("Hello");
+
+    expect(duplicate.status).toBe(409);
+    await expect(duplicate.json()).resolves.toEqual({
+      error: "Eve is still working on the previous message",
+    });
+    expect(turn.upstreamTurns()).toHaveLength(1);
+    await expect(turn.chatState()).resolves.toMatchObject({
+      sessionState: { turnGeneration: 1, turnState: "running" },
+    });
+
+    await (await turn.stream()).text();
+
+    await expect(turn.chatState()).resolves.toMatchObject({
+      status: "active",
+      sessionState: { turnGeneration: 1, turnState: "waiting" },
+    });
+
+    const parked = await turn.create("Are you there?");
+
+    expect(parked.status).toBe(200);
+    expect(turn.upstreamTurns()).toHaveLength(2);
+    expect(turn.server.requests.at(-1)).toMatchObject({
+      method: "POST",
+      path: "/eve/v1/session/ses_1",
+      body: { message: "Are you there?", continuationToken: "eve:1" },
+    });
+    await expect(turn.chatState()).resolves.toMatchObject({
+      status: "active",
+      sessionState: { turnGeneration: 2, turnState: "running" },
+    });
+  });
+
+  it("accepts the next message once a stale running turn stops being observed", async () => {
+    const turn = await turnFixture("Abandoned Eve");
+    await turn.create("Hello");
+
+    const tooSoon = await turn.continue("Still there?");
+
+    expect(tooSoon.status).toBe(409);
+    expect(turn.upstreamTurns()).toHaveLength(1);
+
+    await turn.expireTurnLease();
+    const afterLease = await turn.continue("Still there?");
+
+    expect(afterLease.status).toBe(200);
+    expect(turn.server.requests.at(-1)).toMatchObject({
+      method: "POST",
+      path: "/eve/v1/session/ses_1",
+      body: { message: "Still there?", continuationToken: "eve:1" },
+    });
+    await expect(turn.chatState()).resolves.toMatchObject({
+      status: "active",
+      sessionState: { turnGeneration: 2, turnState: "running" },
+    });
+  });
+
+  it("releases the turn when the browser disconnects from the stream", async () => {
+    const turn = await turnFixture("Detaching Eve", { holdStreamOpen: true });
+    await turn.create("Hello");
+
+    const streamResponse = await turn.stream();
+    const reader = streamResponse.body!.getReader();
+    await reader.read();
+    await reader.cancel();
+
+    await expect(turn.chatState()).resolves.toMatchObject({
+      status: "active",
+      sessionState: { turnState: "detached" },
+    });
+
+    const next = await turn.continue("Never mind, do this instead");
+
+    expect(next.status).toBe(200);
+    expect(turn.server.requests.at(-1)).toMatchObject({
+      method: "POST",
+      path: "/eve/v1/session/ses_1",
+      body: { message: "Never mind, do this instead", continuationToken: "eve:1" },
+    });
+  });
+
+  it("parks the session after a cancelled turn so the next message is accepted", async () => {
+    const turn = await turnFixture("Cancelling Eve", { holdStreamOpen: true });
+    await turn.create("Hello");
+
+    const cancelled = await turn.cancel();
+
+    expect(cancelled.status).toBe(200);
+    await expect(turn.chatState()).resolves.toMatchObject({
+      status: "active",
+      sessionState: { sessionId: "ses_1", continuationToken: "eve:1", turnState: "waiting" },
+    });
+
+    const next = await turn.continue("Do this instead");
+
+    expect(next.status).toBe(200);
+    expect(turn.server.requests.at(-1)).toMatchObject({
+      method: "POST",
+      path: "/eve/v1/session/ses_1",
+      body: { message: "Do this instead", continuationToken: "eve:1" },
+    });
+  });
+
+  it("starts a fresh Eve session when a failed chat receives another message", async () => {
+    const turn = await turnFixture("Recovering Eve", { emptyStream: true });
+    await turn.create("Hello");
+    await (await turn.stream()).text();
+
+    await expect(turn.chatState()).resolves.toMatchObject({
+      status: "failed",
+      sessionState: { sessionId: "ses_1", turnState: "failed" },
+    });
+
+    const recovered = await turn.create("Let us try again");
+
+    expect(recovered.status).toBe(200);
+    await expect(recovered.json()).resolves.toMatchObject({ sessionId: "ses_2" });
+    expect(turn.server.requests.at(-1)).toMatchObject({
+      method: "POST",
+      path: "/eve/v1/session",
+      body: { message: "Let us try again" },
+    });
+    expect(turn.server.requests.at(-1)?.body).not.toHaveProperty("continuationToken");
+    await expect(turn.chatState()).resolves.toMatchObject({
+      status: "active",
+      sessionState: {
+        sessionId: "ses_2",
+        continuationToken: "eve:2",
+        streamIndex: 0,
+        turnGeneration: 1,
+        turnState: "running",
+      },
+    });
+  });
+
+  it("reads the turn boundary from persisted events for sessions stored before turn tracking", async () => {
+    const turn = await turnFixture("Legacy Eve");
+    await turn.create("Hello");
+    await (await turn.stream()).text();
+    // A session state written before turnGeneration/turnState existed.
+    await turn.repository.updateChatSessionState(
+      turn.chat.id,
+      { sessionId: "ses_1", continuationToken: "eve:1", streamIndex: 3 },
+      "active",
+    );
+
+    const next = await turn.continue("Anything else?");
+
+    expect(next.status).toBe(200);
+    expect(turn.server.requests.at(-1)).toMatchObject({
+      method: "POST",
+      path: "/eve/v1/session/ses_1",
+      body: { message: "Anything else?", continuationToken: "eve:1" },
+    });
+    await expect(turn.chatState()).resolves.toMatchObject({
+      status: "active",
+      sessionState: { streamIndex: 3, turnGeneration: 1, turnState: "running" },
+    });
+  });
+
+  it("marks the chat failed when the agent's stream dies mid-turn without a boundary event", async () => {
+    const server = await fakeServer({ emptyStream: true });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Flaky Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Dies mid-turn",
+      ...chatIdentity,
+    });
+    const routes = await loadProxyRoutes();
+
+    await routes.createSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ message: "Hello" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id }) },
+    );
+
+    const streamResponse = await routes.streamSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1/stream`, {
+        headers: callerHeaders(),
+      }),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+
+    expect(streamResponse.status).toBe(200);
+    await streamResponse.text();
+
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      status: "failed",
+      sessionState: { turnState: "failed" },
+    });
+  });
+
+  it("marks the chat failed when the stream throws before its first event", async () => {
+    const server = await fakeServer({ malformedStream: true });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Malformed Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Fails before streaming",
+      ...chatIdentity,
+    });
+    const routes = await loadProxyRoutes();
+
+    await routes.createSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ message: "Hello" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id }) },
+    );
+
+    const response = await routes.streamSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1/stream`, {
+        headers: callerHeaders(),
+      }),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+
+    expect(response.status).toBe(502);
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      status: "failed",
+      sessionState: { turnState: "failed" },
+    });
+  });
+
+  it("streams past an earlier turn's boundary when a reset client replays from the start", async () => {
+    // A full session replay: turn 1 ended at index 2, turn 2 is still running.
+    const server = await fakeServer({
+      streamEvents: [
+        {
+          type: "message.appended",
+          data: { messageDelta: "One", messageSoFar: "One", sequence: 1, stepIndex: 0, turnId: "turn_1" },
+        },
+        {
+          type: "message.completed",
+          data: { message: "One", finishReason: "stop", sequence: 2, stepIndex: 0, turnId: "turn_1" },
+        },
+        { type: "session.waiting", data: { wait: "next-user-message", continuationToken: "eve:stale" } },
+        {
+          type: "message.appended",
+          data: { messageDelta: "Two", messageSoFar: "Two", sequence: 1, stepIndex: 0, turnId: "turn_2" },
+        },
+        { type: "session.waiting", data: { wait: "next-user-message", continuationToken: "eve:live" } },
+      ],
+    });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Replaying Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Full replay",
+      ...chatIdentity,
+    });
+    await repository.updateChatSessionState(
+      chat.id,
+      {
+        sessionId: "ses_1",
+        continuationToken: "eve:current",
+        streamIndex: 3,
+        turnGeneration: 2,
+        turnState: "running",
+      },
+      "active",
+    );
+    const routes = await loadProxyRoutes();
+
+    const response = await routes.streamSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1/stream`, {
+        headers: callerHeaders(),
+      }),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+    const forwarded = (await response.text()).trim().split("\n").map((line) => JSON.parse(line));
+
+    // The replayed boundary at index 2 must not end the stream before turn 2.
+    expect(forwarded).toHaveLength(5);
+    expect(forwarded.at(-1)).toMatchObject({ type: "session.waiting" });
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      status: "active",
+      sessionState: {
+        continuationToken: "eve:live",
+        streamIndex: 5,
+        turnGeneration: 2,
+        turnState: "waiting",
+      },
+    });
+  });
+
+  it("keeps a parked chat active when replay starts after its persisted boundary", async () => {
+    const server = await fakeServer({ respectStreamStartIndex: true });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Replayable Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Replay boundary",
+      ...chatIdentity,
+    });
+    const routes = await loadProxyRoutes();
+
+    await routes.createSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ message: "Hello" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id }) },
+    );
+    const first = await routes.streamSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1/stream`, {
+        headers: callerHeaders(),
+      }),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+    await first.text();
+
+    const replay = await routes.streamSession(
+      new Request(
+        `http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1/stream?startIndex=3`,
+        { headers: callerHeaders() },
+      ),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+
+    expect(replay.status).toBe(200);
+    await expect(replay.text()).resolves.toBe("");
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      status: "active",
+      sessionState: {
+        sessionId: "ses_1",
+        streamIndex: 3,
+        turnGeneration: 1,
+        turnState: "waiting",
+      },
+    });
+  });
+
+  it("keeps a chat active when the agent parks a turn awaiting authorization", async () => {
+    // eve parks a turn on an OAuth callback and resumes it after the user signs
+    // in. That park emits no `session.*` boundary, so the stream ending here is
+    // not a crash and must not cost the user the turn they can still complete.
+    const turn = await turnFixture("Authorizing Eve", {
+      streamEvents: [
+        {
+          type: "message.appended",
+          data: { messageDelta: "Signing", messageSoFar: "Signing", sequence: 1, stepIndex: 0, turnId: "turn_1" },
+        },
+        {
+          type: "authorization.required",
+          data: {
+            name: "linear",
+            description: "Authorization required for linear",
+            sequence: 2,
+            stepIndex: 0,
+            turnId: "turn_1",
+          },
+        },
+      ],
+    });
+    await turn.create("Read my Linear issues");
+
+    await (await turn.stream()).text();
+
+    await expect(turn.chatState()).resolves.toMatchObject({
+      status: "active",
+      sessionState: { sessionId: "ses_1", continuationToken: "eve:1", turnState: "parked" },
+    });
+
+    const next = await turn.continue("I signed in");
+
+    expect(next.status).toBe(200);
+    expect(turn.server.requests.at(-1)).toMatchObject({
+      method: "POST",
+      path: "/eve/v1/session/ses_1",
+      body: { message: "I signed in", continuationToken: "eve:1" },
+    });
+  });
+
+  it("stores the continuation token eve confirms when a turn is cancelled", async () => {
+    const turn = await turnFixture("Confirming Eve", {
+      holdStreamOpen: true,
+      streamEvents: [
+        {
+          type: "message.appended",
+          data: { messageDelta: "Working", messageSoFar: "Working", sequence: 1, stepIndex: 0, turnId: "turn_1" },
+        },
+      ],
+      cancelledStreamEvents: [
+        {
+          type: "message.appended",
+          data: { messageDelta: "Working", messageSoFar: "Working", sequence: 1, stepIndex: 0, turnId: "turn_1" },
+        },
+        { type: "turn.cancelled", data: { sequence: 2, turnId: "turn_1" } },
+        {
+          type: "session.waiting",
+          data: { wait: "next-user-message", continuationToken: "eve:after-cancel" },
+        },
+      ],
+    });
+    await turn.create("Hello");
+    const streamResponse = await turn.stream();
+    const reader = streamResponse.body!.getReader();
+    await reader.read();
+    await reader.cancel();
+
+    const cancelled = await turn.cancel();
+
+    expect(cancelled.status).toBe(200);
+    await expect(turn.chatState()).resolves.toMatchObject({
+      status: "active",
+      sessionState: {
+        sessionId: "ses_1",
+        continuationToken: "eve:after-cancel",
+        streamIndex: 3,
+        turnState: "waiting",
+      },
+    });
+
+    const next = await turn.continue("Do this instead");
+
+    expect(next.status).toBe(200);
+    expect(turn.server.requests.at(-1)).toMatchObject({
+      method: "POST",
+      path: "/eve/v1/session/ses_1",
+      body: { message: "Do this instead", continuationToken: "eve:after-cancel" },
+    });
+  });
+
+  it("parks a cancelled turn anyway when eve never confirms on the stream", async () => {
+    const turn = await turnFixture("Silent Eve", {
+      holdStreamOpen: true,
+      cancelledStreamEvents: [],
+    });
+    await turn.create("Hello");
+
+    const cancelled = await turn.cancel();
+
+    expect(cancelled.status).toBe(200);
+    await expect(turn.chatState()).resolves.toMatchObject({
+      status: "active",
+      sessionState: { sessionId: "ses_1", continuationToken: "eve:1", turnState: "waiting" },
+    });
+
+    const next = await turn.continue("Do this instead");
+
+    expect(next.status).toBe(200);
+  });
+
+  it("starts a fresh Eve session when a failed chat is continued rather than recreated", async () => {
+    const turn = await turnFixture("Retrying Eve", { emptyStream: true });
+    await turn.create("Hello");
+    await (await turn.stream()).text();
+    await expect(turn.chatState()).resolves.toMatchObject({ status: "failed" });
+
+    const recovered = await turn.continue("Let us try again");
+
+    expect(recovered.status).toBe(200);
+    await expect(recovered.json()).resolves.toMatchObject({ sessionId: "ses_2" });
+    expect(turn.server.requests.at(-1)).toMatchObject({
+      method: "POST",
+      path: "/eve/v1/session",
+      body: { message: "Let us try again" },
+    });
+    expect(turn.server.requests.at(-1)?.body).not.toHaveProperty("continuationToken");
+    await expect(turn.chatState()).resolves.toMatchObject({
+      status: "active",
+      sessionState: { sessionId: "ses_2", turnGeneration: 1, turnState: "running" },
+    });
+  });
+
+  it("forwards a replay in full but yields the live turn to a newer one", async () => {
+    const turn = await turnFixture("Contended Eve", {
+      streamEvents: [
+        {
+          type: "message.appended",
+          data: { messageDelta: "One", messageSoFar: "One", sequence: 1, stepIndex: 0, turnId: "turn_1" },
+        },
+        {
+          type: "message.completed",
+          data: { message: "One", finishReason: "stop", sequence: 2, stepIndex: 0, turnId: "turn_1" },
+        },
+        { type: "session.waiting", data: { wait: "next-user-message", continuationToken: "eve:stale" } },
+        {
+          type: "message.appended",
+          data: { messageDelta: "Two", messageSoFar: "Two", sequence: 1, stepIndex: 0, turnId: "turn_2" },
+        },
+        { type: "session.waiting", data: { wait: "next-user-message", continuationToken: "eve:live" } },
+      ],
+    });
+    await turn.repository.updateChatSessionState(
+      turn.chat.id,
+      {
+        sessionId: "ses_1",
+        continuationToken: "eve:current",
+        streamIndex: 3,
+        turnGeneration: 2,
+        turnState: "running",
+      },
+      "active",
+    );
+
+    // The route reads the session before the body is pulled, so bumping the
+    // generation here is a turn taking over mid-replay.
+    const response = await turn.stream();
+    await turn.repository.updateChatSessionState(
+      turn.chat.id,
+      {
+        sessionId: "ses_1",
+        continuationToken: "eve:current",
+        streamIndex: 3,
+        turnGeneration: 3,
+        turnState: "running",
+      },
+      "active",
+    );
+    const forwarded = (await response.text())
+      .trim()
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line));
+
+    // Events 0-2 are below the persisted cursor, so they never contend for the
+    // session and the replaying client still receives all of them.
+    expect(forwarded).toHaveLength(3);
+    expect(forwarded.map((event) => event.type)).toEqual([
+      "message.appended",
+      "message.completed",
+      "session.waiting",
+    ]);
+    await expect(turn.chatState()).resolves.toMatchObject({
+      status: "active",
+      sessionState: { turnGeneration: 3, turnState: "running", continuationToken: "eve:current" },
+    });
   });
 });
 

@@ -1,4 +1,4 @@
-import { and, asc, eq, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { DatabaseError } from "pg";
 import { z } from "zod";
@@ -18,10 +18,30 @@ export type RepositoryDb = NodePgDatabase<typeof schema>;
 
 export type SessionState = z.infer<typeof sessionStateSchema>;
 
+/**
+ * `running` is the only state that blocks a new turn, and it is only trusted
+ * while the chat's `updatedAt` lease is fresh. `detached` records that eve-chats
+ * lost the event stream of a turn it can no longer observe: the agent may still
+ * be working, so nothing is asserted about the outcome, but the next turn is
+ * allowed through. `parked` records that the agent suspended the turn itself and
+ * is waiting on the user — an OAuth callback or a pending input batch — which
+ * eve does not always announce with a `session.*` boundary.
+ */
+const turnStateSchema = z.enum([
+  "running",
+  "waiting",
+  "parked",
+  "completed",
+  "failed",
+  "detached",
+]);
+
 const sessionStateSchema = z.object({
   sessionId: z.string().min(1),
   continuationToken: z.string().optional(),
   streamIndex: z.number().int().nonnegative().optional(),
+  turnGeneration: z.number().int().nonnegative().optional(),
+  turnState: turnStateSchema.optional(),
 });
 
 export type AgentConnection = typeof agentConnections.$inferSelect;
@@ -120,8 +140,20 @@ export type Repository = {
   getChatForAppIdentity(id: string, scope: AppIdentityScope): Promise<Chat | null>;
   appendEvent(input: AppendEventInput): Promise<EveEvent>;
   listEvents(chatId: string): Promise<EveEvent[]>;
+  getLatestSessionEvent(chatId: string, sessionId: string): Promise<EveEvent | null>;
   clearPendingUserMessage(chatId: string): Promise<Chat>;
   updateChatSessionState(chatId: string, state: SessionState, status?: ChatStatus): Promise<Chat>;
+  /**
+   * Compare-and-set on the session state. Returns null without writing when the
+   * stored state no longer matches `expected`, or when the chat is no longer
+   * `active` — a completed or failed chat can never be transitioned this way.
+   */
+  transitionChatSessionState(
+    chatId: string,
+    expected: SessionState,
+    state: SessionState,
+    status?: ChatStatus,
+  ): Promise<Chat | null>;
   updateChatStatus(chatId: string, status: ChatStatus): Promise<Chat>;
 };
 
@@ -537,6 +569,16 @@ export function createRepository(db: RepositoryDb): Repository {
       return rows.map(mapEvent);
     },
 
+    async getLatestSessionEvent(chatId, sessionId) {
+      const [row] = await db
+        .select()
+        .from(events)
+        .where(and(eq(events.chatId, chatId), eq(events.sessionId, sessionId)))
+        .orderBy(desc(events.eventIndex), desc(events.id))
+        .limit(1);
+      return row ? mapEvent(row) : null;
+    },
+
     async clearPendingUserMessage(chatId) {
       const [updated] = await db
         .update(chats)
@@ -567,6 +609,32 @@ export function createRepository(db: RepositoryDb): Repository {
       }
 
       return mapChat(updated);
+    },
+
+    async transitionChatSessionState(chatId, expected, state, status) {
+      const expectedTurnState = expected.turnState;
+      const [updated] = await db
+        .update(chats)
+        .set({
+          sessionStateJson: JSON.stringify(state),
+          ...(status ? { status } : {}),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(chats.id, chatId),
+            eq(chats.status, "active"),
+            sql`${chats.sessionStateJson}::jsonb ->> 'sessionId' = ${expected.sessionId}`,
+            sql`coalesce((${chats.sessionStateJson}::jsonb ->> 'streamIndex')::integer, 0) = ${expected.streamIndex ?? 0}`,
+            sql`coalesce((${chats.sessionStateJson}::jsonb ->> 'turnGeneration')::integer, 0) = ${expected.turnGeneration ?? 0}`,
+            expectedTurnState
+              ? sql`${chats.sessionStateJson}::jsonb ->> 'turnState' = ${expectedTurnState}`
+              : sql`${chats.sessionStateJson}::jsonb ->> 'turnState' is null`,
+          ),
+        )
+        .returning();
+
+      return updated ? mapChat(updated) : null;
     },
 
     async updateChatStatus(chatId, status) {

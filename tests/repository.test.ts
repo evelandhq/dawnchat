@@ -255,6 +255,110 @@ describe("repository", () => {
     await expect(repository.listEvents(chat.id)).resolves.toEqual([firstEvent, secondEvent]);
   });
 
+  it("does not let a stale turn transition overwrite a newer turn", async () => {
+    const repository = createRepository(db);
+    const agent = await repository.createAgentConnection({
+      name: "Concurrent Agent",
+      baseUrl: "https://concurrent.example.com",
+      authType: "none",
+    });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Concurrent turns",
+    });
+    const currentState = {
+      sessionId: "session-123",
+      continuationToken: "continue-456",
+      streamIndex: 4,
+      turnGeneration: 2,
+      turnState: "running" as const,
+    };
+    await repository.updateChatSessionState(chat.id, currentState, "active");
+
+    const staleUpdate = await repository.transitionChatSessionState(
+      chat.id,
+      { ...currentState, turnGeneration: 1 },
+      { ...currentState, turnGeneration: 1, turnState: "failed" },
+      "failed",
+    );
+
+    expect(staleUpdate).toBeNull();
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      status: "active",
+      sessionState: currentState,
+    });
+  });
+
+  it("refreshes the turn lease on a no-op transition and refuses it once superseded", async () => {
+    // How an attached stream holds a silent turn's lease: it re-writes the state
+    // it already owns purely to move `updatedAt`, and loses the moment a newer
+    // turn takes the session.
+    const repository = createRepository(db);
+    const agent = await repository.createAgentConnection({
+      name: "Leasing Agent",
+      baseUrl: "https://leasing.example.com",
+      authType: "none",
+    });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Leased turn",
+    });
+    const state = {
+      sessionId: "session-123",
+      continuationToken: "continue-456",
+      streamIndex: 4,
+      turnGeneration: 2,
+      turnState: "running" as const,
+    };
+    const stored = await repository.updateChatSessionState(chat.id, state, "active");
+
+    const renewed = await repository.transitionChatSessionState(chat.id, state, state);
+
+    expect(renewed).not.toBeNull();
+    expect(renewed?.sessionState).toEqual(state);
+    expect(renewed?.status).toBe("active");
+    expect(renewed?.updatedAt.getTime()).toBeGreaterThanOrEqual(stored.updatedAt.getTime());
+
+    await repository.updateChatSessionState(chat.id, { ...state, turnGeneration: 3 }, "active");
+
+    await expect(
+      repository.transitionChatSessionState(chat.id, state, state),
+    ).resolves.toBeNull();
+  });
+
+  it("does not transition the session state of a chat that is no longer active", async () => {
+    const repository = createRepository(db);
+    const agent = await repository.createAgentConnection({
+      name: "Settled Agent",
+      baseUrl: "https://settled.example.com",
+      authType: "none",
+    });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Settled turns",
+    });
+    const currentState = {
+      sessionId: "session-123",
+      streamIndex: 2,
+      turnGeneration: 1,
+      turnState: "failed" as const,
+    };
+    await repository.updateChatSessionState(chat.id, currentState, "failed");
+
+    const revived = await repository.transitionChatSessionState(
+      chat.id,
+      currentState,
+      { ...currentState, turnState: "waiting" },
+      "active",
+    );
+
+    expect(revived).toBeNull();
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      status: "failed",
+      sessionState: currentState,
+    });
+  });
+
   it("isolates chats by principal, realm, and Eveland project", async () => {
     const repository = createRepository(db);
     const agent = await repository.createAgentConnection({
