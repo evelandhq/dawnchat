@@ -1,4 +1,8 @@
-import { defaultMessageReducer, type HandleMessageStreamEvent } from "eve/client";
+import {
+  defaultMessageReducer,
+  type ClientSessionState,
+  type MessageStreamEvent,
+} from "eve/client";
 import type { UserContent } from "ai";
 
 import {
@@ -6,7 +10,7 @@ import {
   resolveAppBrowserSession,
   type AppBrowserSession,
 } from "@/app-session";
-import { createRepository, type Chat, type Repository, type SessionState } from "@/db/repository";
+import { createRepository, type Chat, type Repository } from "@/db/repository";
 import { getDbClient } from "@/db/provider";
 import {
   deserializePendingUserContent,
@@ -26,7 +30,8 @@ export type ChatResponse = {
   agentConnectionId: string;
   title: string;
   status: Chat["status"];
-  sessionState: Omit<SessionState, "continuationToken"> | null;
+  /** The ID-addressed cursor only; a 0.29/0.30 token never leaves the server. */
+  sessionState: ClientSessionState | null;
   pendingUserMessage: UserContent | null;
   createdAt: string;
   updatedAt: string;
@@ -184,7 +189,7 @@ async function chatSummaryResponse(repository: Repository, chat: Chat): Promise<
     throw new Error(`Agent connection not found for chat ${chat.id}`);
   }
   const projection = events.reduce(
-    (data, event) => reducer.reduce(data, event.payload as HandleMessageStreamEvent),
+    (data, event) => reducer.reduce(data, event.payload as MessageStreamEvent),
     reducer.initial(),
   );
   const lastMessage = [...projection.messages]

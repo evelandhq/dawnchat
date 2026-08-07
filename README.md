@@ -30,7 +30,10 @@ metadata cannot redirect a credential to another host.
 - Stream and render text, reasoning, tool calls/results, HITL requests, authorization challenges, and files through AI Elements.
 - Persist Eve events as the canonical chat history, with continuation tokens redacted and idempotent `(chat, session, stream index)` replay handling.
 - Continue existing chats through `useEveAgent` while keeping remote auth and the real `continuationToken` server-side.
-- Connect to Eve agents running either 0.24.x or 0.25.x.
+- Connect to Eve agents running 0.29.x, 0.30.x, or 0.31.x — the same support
+  window Eveland hosts. A 0.29/0.30 Agent addresses a session by continuation
+  token and a 0.31 Agent by session ID; the proxy speaks both and keeps the
+  token server-side either way.
 - PostgreSQL 16 persistence for agents, chats, protocol events, and Eve session state.
 - Provider-neutral Eveland login, identity-scope switching, and pre-expiry App/Caller Token refresh.
 - Preserve historical chats after a managed Agent leaves the Catalog, while marking that Agent unavailable for new turns.

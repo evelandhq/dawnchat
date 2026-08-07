@@ -1,6 +1,12 @@
 /**
- * The Eve browser client requires a continuation token before it will resume
- * a session. The per-chat proxy replaces this sentinel with the real token
- * stored server-side, so the remote capability never reaches the browser.
+ * Eve 0.29/0.30 agents address a session by continuation token; Eve 0.31
+ * addresses it by session ID alone. EveChats keeps the real token server-side
+ * for both generations, so it is dropped from every browser-facing payload
+ * before it leaves the per-chat proxy.
  */
-export const EVE_PROXY_CONTINUATION_TOKEN = "eve-chats:server-managed";
+export function withoutContinuationToken<T extends Record<string, unknown>>(
+  payload: T,
+): Omit<T, "continuationToken"> {
+  const { continuationToken: _redacted, ...rest } = payload;
+  return rest;
+}
