@@ -23,6 +23,18 @@ export interface FakeEveServerOptions {
   readonly streamVersion?: 18 | 19;
   /** Emit stream events without ending the response, like eve 0.18.x agents. */
   readonly holdStreamOpen?: boolean;
+  /** End the stream normally without emitting an event. */
+  readonly emptyStream?: boolean;
+  /** Emit invalid NDJSON so the client iterator throws before yielding its first event. */
+  readonly malformedStream?: boolean;
+  /** Slice configured stream events by the requested absolute start index. */
+  readonly respectStreamStartIndex?: boolean;
+  /**
+   * Events served on stream reads once a cancel has been accepted, always sliced
+   * by the requested absolute start index. Models eve confirming a cancellation
+   * with `turn.cancelled` followed by a fresh `session.waiting`.
+   */
+  readonly cancelledStreamEvents?: readonly unknown[];
 }
 
 export interface FakeEveServer {
@@ -69,6 +81,7 @@ function writeNdjson(
 export async function startFakeEveServer(options: FakeEveServerOptions = {}): Promise<FakeEveServer> {
   const requests: CapturedEveRequest[] = [];
   let nextSessionId = 1;
+  let cancelled = false;
 
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
@@ -134,9 +147,40 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
 
       const streamMatch = url.pathname.match(/^\/eve\/v1\/session\/(ses_\d+)\/stream$/);
       if (request.method === "GET" && streamMatch) {
+        if (cancelled && options.cancelledStreamEvents !== undefined) {
+          writeNdjson(
+            response,
+            options.cancelledStreamEvents.slice(Number(url.searchParams.get("startIndex") ?? 0)),
+            false,
+            options.streamVersion,
+          );
+          return;
+        }
+
+        if (options.emptyStream) {
+          response.writeHead(200, {
+            "content-type": "application/x-ndjson; charset=utf-8",
+            "x-eve-stream-format": "ndjson",
+          });
+          response.end();
+          return;
+        }
+
+        if (options.malformedStream) {
+          response.writeHead(200, {
+            "content-type": "application/x-ndjson; charset=utf-8",
+            "x-eve-stream-format": "ndjson",
+          });
+          response.end("not-json\n");
+          return;
+        }
+
+        const startIndex = options.respectStreamStartIndex
+          ? Number(url.searchParams.get("startIndex") ?? 0)
+          : 0;
         writeNdjson(
           response,
-          options.streamEvents ?? [
+          (options.streamEvents ?? [
             {
               type: "message.appended",
               data: { messageDelta: "Hello", messageSoFar: "Hello", sequence: 1, stepIndex: 0, turnId: "turn_1" },
@@ -146,7 +190,7 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
               data: { message: "Hello", finishReason: "stop", sequence: 2, stepIndex: 0, turnId: "turn_1" },
             },
             { type: "session.waiting", data: { wait: "next-user-message" } },
-          ],
+          ]).slice(startIndex),
           options.holdStreamOpen,
           options.streamVersion,
         );
@@ -155,6 +199,7 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
 
       const cancelMatch = url.pathname.match(/^\/eve\/v1\/session\/(ses_\d+)\/cancel$/);
       if (request.method === "POST" && cancelMatch) {
+        cancelled = true;
         writeJson(response, 200, {
           ok: true,
           sessionId: cancelMatch[1],
