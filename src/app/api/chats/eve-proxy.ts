@@ -1,4 +1,4 @@
-import type { HandleMessageStreamEvent } from "eve/client";
+import type { MessageStreamEvent } from "eve/client";
 
 import { resolveAppBrowserSession } from "@/app-session";
 import {
@@ -9,7 +9,7 @@ import {
 } from "@/db/repository";
 import { getDbClient } from "@/db/provider";
 import { createEveClientForConnection } from "@/eve/client";
-import { EVE_PROXY_CONTINUATION_TOKEN } from "@/eve/proxy-contract";
+import { withoutContinuationToken } from "@/eve/proxy-contract";
 import {
   CallerTokenError,
   callerTokenErrorResponse,
@@ -82,12 +82,8 @@ export async function proxyCancelEveTurn(
   const turnId = stringValue(input.turnId);
 
   try {
-    const result = await resolved.client
-      .session({
-        sessionId,
-        continuationToken: session.continuationToken,
-        streamIndex: session.streamIndex ?? 0,
-      })
+    const result = await resolved.client.sessions
+      .attach(sessionId, { streamIndex: session.streamIndex ?? 0 })
       .cancel(turnId ? { turnId } : undefined);
     return Response.json(result, {
       status: 200,
@@ -125,15 +121,11 @@ export async function proxyEveSessionStream(
   } else {
     request.signal.addEventListener("abort", () => abort.abort(), { once: true });
   }
-  const iterator = resolved.client
-    .session({
-      sessionId,
-      continuationToken: session.continuationToken,
-      streamIndex: parsedStartIndex,
-    })
+  const iterator = resolved.client.sessions
+    .attach(sessionId, { streamIndex: parsedStartIndex })
     .stream({ startIndex: parsedStartIndex, signal: abort.signal })
     [Symbol.asyncIterator]();
-  let first: IteratorResult<HandleMessageStreamEvent>;
+  let first: IteratorResult<MessageStreamEvent>;
   try {
     first = await iterator.next();
   } catch {
@@ -168,24 +160,24 @@ async function proxyTurnRequest(
     return input;
   }
 
-  const body: Record<string, unknown> = { ...input };
-  delete body.continuationToken;
+  const body = withoutContinuationToken({ ...input });
   const currentSession = context.chat.sessionState;
-  if (sessionId && currentSession?.continuationToken) {
-    body.continuationToken = currentSession.continuationToken;
-  }
+  // Eve 0.29/0.30 address a follow-up turn by continuation token; Eve 0.31
+  // addresses it by session ID and rejects the field outright. A stored token
+  // is therefore both the token to send and the signal that this session was
+  // opened by an older Agent.
+  let continuationToken = sessionId ? currentSession?.continuationToken : undefined;
 
-  const path = sessionId
-    ? `/eve/v1/session/${encodeURIComponent(sessionId)}`
-    : "/eve/v1/session";
   let remote: Response;
   try {
-    remote = await context.client.fetch(path, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-      signal: request.signal,
-    });
+    remote = await postTurn(context, sessionId, body, continuationToken, request.signal);
+    if (continuationToken && remote.status === 400 && (await rejectsContinuationToken(remote))) {
+      // The Agent upgraded to Eve 0.31 while this session was open. Eve keeps
+      // such a session resumable, so retry once addressing it by ID alone and
+      // stop sending the stale token.
+      continuationToken = undefined;
+      remote = await postTurn(context, sessionId, body, undefined, request.signal);
+    }
   } catch {
     await context.repository.updateChatStatus(context.chat.id, "failed");
     return errorResponse("Unable to reach Eve agent", 502);
@@ -214,9 +206,10 @@ async function proxyTurnRequest(
   const isContinuing = currentSession?.sessionId === resolvedSessionId;
   const nextSession: SessionState = {
     sessionId: resolvedSessionId,
+    // An Eve 0.31 Agent answers without a token; keeping the field unset marks
+    // the session as ID-addressed for every later turn.
     continuationToken:
-      stringValue(payload.continuationToken) ??
-      (isContinuing ? currentSession?.continuationToken : undefined),
+      stringValue(payload.continuationToken) ?? (isContinuing ? continuationToken : undefined),
     streamIndex: isContinuing ? (currentSession?.streamIndex ?? 0) : 0,
   };
   await context.repository.updateChatSessionState(context.chat.id, nextSession, "active");
@@ -224,10 +217,37 @@ async function proxyTurnRequest(
 
   const headers = new Headers({ "content-type": "application/json; charset=utf-8" });
   headers.set("x-eve-session-id", resolvedSessionId);
-  return new Response(
-    JSON.stringify({ ...payload, continuationToken: EVE_PROXY_CONTINUATION_TOKEN }),
-    { status: remote.status, headers },
-  );
+  return new Response(JSON.stringify(withoutContinuationToken(payload)), {
+    status: remote.status,
+    headers,
+  });
+}
+
+async function postTurn(
+  context: ProxyContext,
+  sessionId: string | undefined,
+  body: Record<string, unknown>,
+  continuationToken: string | undefined,
+  signal: AbortSignal,
+): Promise<Response> {
+  const path = sessionId
+    ? `/eve/v1/session/${encodeURIComponent(sessionId)}`
+    : "/eve/v1/session";
+  return context.client.fetch(path, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(continuationToken ? { ...body, continuationToken } : body),
+    signal,
+  });
+}
+
+/** True when an Agent refused the turn because it no longer accepts a token. */
+async function rejectsContinuationToken(response: Response): Promise<boolean> {
+  try {
+    return (await response.clone().text()).includes("continuationToken");
+  } catch {
+    return false;
+  }
 }
 
 async function resolveProxyContext(
@@ -349,24 +369,30 @@ async function resolveProxyContext(
 function createPersistedEventStream(input: {
   abort: AbortController;
   chat: Chat;
-  first: IteratorResult<HandleMessageStreamEvent>;
-  iterator: AsyncIterator<HandleMessageStreamEvent>;
+  first: IteratorResult<MessageStreamEvent>;
+  iterator: AsyncIterator<MessageStreamEvent>;
   repository: Repository;
   session: SessionState;
   sessionId: string;
   startIndex: number;
 }): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
-  let buffered: IteratorResult<HandleMessageStreamEvent> | null = input.first;
+  let buffered: IteratorResult<MessageStreamEvent> | null = input.first;
   let nextStreamIndex = input.startIndex;
   let latestCursor = input.session.streamIndex ?? 0;
   let currentSession = input.session;
 
   const persistEvent = async (
-    event: HandleMessageStreamEvent,
-  ): Promise<{ event: HandleMessageStreamEvent; terminal: boolean }> => {
-    const continuationToken = waitingContinuationToken(event);
-    const browserEvent = replaceWaitingContinuationToken(event);
+    event: MessageStreamEvent,
+  ): Promise<{ event: MessageStreamEvent; terminal: boolean }> => {
+    // Eve 0.29/0.30 rotate the session's continuation token on every park; Eve
+    // 0.31 parks an ID-addressed session and reports its session ID in the same
+    // field. Only a session that already carries a token is token-addressed, so
+    // only that session adopts the parked value.
+    const continuationToken = currentSession.continuationToken
+      ? waitingContinuationToken(event)
+      : undefined;
+    const browserEvent = redactWaitingContinuationToken(event, input.sessionId);
     await input.repository.appendEvent({
       chatId: input.chat.id,
       sessionId: input.sessionId,
@@ -418,26 +444,36 @@ function createPersistedEventStream(input: {
   });
 }
 
-function waitingContinuationToken(event: HandleMessageStreamEvent): string | undefined {
+function waitingContinuationToken(event: MessageStreamEvent): string | undefined {
   if (event.type !== "session.waiting") return undefined;
   const data = event.data as unknown;
   if (!data || typeof data !== "object" || Array.isArray(data)) return undefined;
   return stringValue((data as Record<string, unknown>).continuationToken);
 }
 
-function replaceWaitingContinuationToken(
-  event: HandleMessageStreamEvent,
-): HandleMessageStreamEvent {
+/**
+ * Eve 0.29/0.30 park a session by handing the caller a fresh continuation
+ * token, which is the capability to continue that conversation. It stays
+ * server-side: the browser and the durable history see the session ID here
+ * instead — exactly what an ID-addressed Eve 0.31 session already reports.
+ */
+function redactWaitingContinuationToken(
+  event: MessageStreamEvent,
+  sessionId: string,
+): MessageStreamEvent {
   if (event.type !== "session.waiting") return event;
   const data = event.data as unknown;
-  const safeData = data && typeof data === "object" && !Array.isArray(data) ? data : {};
+  const safeData =
+    data && typeof data === "object" && !Array.isArray(data)
+      ? (data as Record<string, unknown>)
+      : {};
   return {
     ...event,
-    data: { ...safeData, continuationToken: EVE_PROXY_CONTINUATION_TOKEN },
-  } as HandleMessageStreamEvent;
+    data: { ...withoutContinuationToken(safeData), continuationToken: sessionId },
+  } as MessageStreamEvent;
 }
 
-function chatStatusFromEvent(event: HandleMessageStreamEvent): Chat["status"] | undefined {
+function chatStatusFromEvent(event: MessageStreamEvent): Chat["status"] | undefined {
   if (event.type === "session.waiting") return "active";
   if (event.type === "session.completed") return "completed";
   if (event.type === "session.failed") return "failed";

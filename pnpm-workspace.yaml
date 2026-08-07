@@ -7,5 +7,6 @@ allowBuilds:
   # Native image dependency used by Next.js image optimization when present.
   sharp: true
 minimumReleaseAgeExclude:
-  # Eve is pinned to the version verified against 0.24.x and 0.25.x agents.
-  - eve@0.25.1
+  # The client library is pinned to the newest verified release of the support
+  # window Eveland hosts: Eve 0.29.x, 0.30.x, and 0.31.x agents.
+  - eve@0.31.1

@@ -5,10 +5,10 @@ import { useRouter } from "next/navigation";
 import type { UserContent } from "ai";
 import {
   ClientError,
-  type HandleMessageStreamEvent,
+  type ClientSessionState,
   type InputResponse,
-  type SendTurnPayload,
-  type SessionState,
+  type MessageStreamEvent,
+  type PrepareSend,
 } from "eve/client";
 import {
   type EveMessage,
@@ -37,12 +37,14 @@ import {
 } from "@/components/chat-composer-attachments";
 import { EveMessageView } from "@/components/eve-message";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { EVE_PROXY_CONTINUATION_TOKEN } from "@/eve/proxy-contract";
 import {
   CHAT_ATTACHMENT_MAX_FILES,
   CHAT_ATTACHMENT_MAX_FILE_SIZE,
   promptMessageToUserContent,
 } from "@/lib/chat-messages";
+
+/** One outbound turn: a user message, or a reply to pending HITL requests. */
+type TurnPayload = Parameters<PrepareSend>[0];
 
 export type ChatThreadSummary = {
   id: string;
@@ -50,14 +52,14 @@ export type ChatThreadSummary = {
   agentName: string;
   title: string;
   status: "active" | "completed" | "failed";
-  sessionState: Omit<SessionState, "continuationToken"> | null;
+  sessionState: ClientSessionState | null;
   createdAt: string;
   updatedAt: string;
 };
 
 type ChatThreadProps = {
   chat: ChatThreadSummary;
-  events: HandleMessageStreamEvent[];
+  events: MessageStreamEvent[];
   pendingUserMessage?: UserContent | null;
   getAccessToken?: () => Promise<string>;
   getCallerToken?: () => Promise<string>;
@@ -82,9 +84,9 @@ export function ChatThread({
   const [authentication, setAuthentication] = useState<{
     revision: number;
     mode: "app" | "caller";
-    events: HandleMessageStreamEvent[];
-    session?: SessionState;
-    retryInput?: SendTurnPayload;
+    events: MessageStreamEvent[];
+    session?: ClientSessionState;
+    retryInput?: TurnPayload;
   }>({
     revision: 0,
     mode: "app",
@@ -93,9 +95,9 @@ export function ChatThread({
 
   const handleAuthenticationError = async (
     error: ClientError,
-    retryInput: SendTurnPayload,
-    currentEvents: HandleMessageStreamEvent[],
-    currentSession: SessionState,
+    retryInput: TurnPayload,
+    currentEvents: MessageStreamEvent[],
+    currentSession: ClientSessionState | undefined,
   ): Promise<void> => {
     if (
       error.status !== 401 ||
@@ -157,19 +159,19 @@ function ChatThreadSession({
   readOnly,
   retryInput,
 }: ChatThreadProps & {
-  initialSession?: SessionState;
+  initialSession?: ClientSessionState;
   pendingSentRef: React.MutableRefObject<boolean>;
   onAuthenticationError(
     error: ClientError,
-    retryInput: SendTurnPayload,
-    events: HandleMessageStreamEvent[],
-    session: SessionState,
+    retryInput: TurnPayload,
+    events: MessageStreamEvent[],
+    session: ClientSessionState | undefined,
   ): Promise<void>;
-  retryInput?: SendTurnPayload;
+  retryInput?: TurnPayload;
 }): React.ReactElement {
   const router = useRouter();
   const agentRef = useRef<ReturnType<typeof useEveAgent> | null>(null);
-  const latestInputRef = useRef<SendTurnPayload | null>(null);
+  const latestInputRef = useRef<TurnPayload | null>(null);
   const retrySentRef = useRef(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const [showPendingUserMessage, setShowPendingUserMessage] = useState(
@@ -180,9 +182,7 @@ function ChatThreadSession({
     host: `/api/chats/${chat.id}/agent`,
     auth: getAccessToken ? { bearer: getAccessToken } : undefined,
     initialEvents: events,
-    initialSession: initialSession ?? (chat.sessionState
-      ? { ...chat.sessionState, continuationToken: EVE_PROXY_CONTINUATION_TOKEN }
-      : undefined),
+    initialSession: initialSession ?? chat.sessionState ?? undefined,
     prepareSend(input) {
       latestInputRef.current = input;
       return input;
@@ -243,7 +243,7 @@ function ChatThreadSession({
     }
     retrySentRef.current = true;
     setLocalError(null);
-    void agent.send(retryInput).catch((error: unknown) => {
+    void sendTurn(agent, retryInput).catch((error: unknown) => {
       retrySentRef.current = false;
       setLocalError(errorMessage(error));
     });
@@ -261,7 +261,7 @@ function ChatThreadSession({
     }
     pendingSentRef.current = true;
     setLocalError(null);
-    void agent.send({ message: pendingUserMessage }).catch((error: unknown) => {
+    void agent.send(pendingUserMessage).catch((error: unknown) => {
       pendingSentRef.current = false;
       setLocalError(errorMessage(error));
     });
@@ -275,7 +275,7 @@ function ChatThreadSession({
 
     setLocalError(null);
     try {
-      await agent.send({ message: promptMessageToUserContent(message) });
+      await agent.send(promptMessageToUserContent(message));
     } catch (error) {
       setLocalError(errorMessage(error));
       throw error;
@@ -285,7 +285,7 @@ function ChatThreadSession({
   const handleInputResponses = async (responses: readonly InputResponse[]): Promise<void> => {
     setLocalError(null);
     try {
-      await agent.send({ inputResponses: responses });
+      await agent.respond(responses);
     } catch (error) {
       setLocalError(errorMessage(error));
     }
@@ -293,7 +293,7 @@ function ChatThreadSession({
 
   const handleStop = (): void => {
     agent.stop();
-    const sessionId = agent.session.sessionId;
+    const sessionId = agent.session?.sessionId;
     const getCancelToken = getAccessToken ?? getCallerToken;
     if (!sessionId || !getCancelToken) {
       return;
@@ -388,6 +388,22 @@ function ChatThreadSession({
       </section>
     </TooltipProvider>
   );
+}
+
+/**
+ * Replays one captured turn. Eve 0.31 split the single continuation-token send
+ * into `send(message)` and `respond(inputResponses)`, so the payload the hook
+ * handed to `prepareSend` decides which command re-issues it.
+ */
+async function sendTurn(
+  agent: ReturnType<typeof useEveAgent>,
+  input: TurnPayload,
+): Promise<void> {
+  const { inputResponses, message, ...options } = input;
+  if (inputResponses !== undefined) {
+    return agent.respond(inputResponses, options);
+  }
+  return agent.send(message, options);
 }
 
 function pendingUserContentMessage(

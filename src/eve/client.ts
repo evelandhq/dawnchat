@@ -16,7 +16,6 @@ export function createEveClientForConnection(
 ): Client {
   return new Client({
     host: connection.baseUrl,
-    preserveCompletedSessions: true,
     ...buildEveClientAuthOptions(connection, callerToken),
   });
 }

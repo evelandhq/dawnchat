@@ -29,7 +29,7 @@
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
     "drizzle-orm": "latest",
-    "eve": "0.25.1",
+    "eve": "0.31.1",
     "lucide-react": "latest",
     "motion": "^12.42.2",
     "nanoid": "^6.0.0",

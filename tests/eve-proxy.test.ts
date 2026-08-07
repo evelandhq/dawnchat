@@ -4,7 +4,6 @@ import { resolveAppBrowserSession } from "@/app-session";
 import { setDbClientForTests } from "@/db/provider";
 import { createRepository } from "@/db/repository";
 import { startFakeEveServer, type FakeEveServer } from "@/eve/fake-eve-server.test-helper";
-import { EVE_PROXY_CONTINUATION_TOKEN } from "@/eve/proxy-contract";
 import {
   CallerTokenError,
   setCallerTokenVerifierForTests,
@@ -155,7 +154,7 @@ describe("per-chat Eve protocol proxy", () => {
       { params: Promise.resolve({ chatId: chat.id }) },
     );
 
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(202);
     expect(server.requests[0]?.headers.authorization).toBeUndefined();
   });
 
@@ -198,10 +197,10 @@ describe("per-chat Eve protocol proxy", () => {
       { params: Promise.resolve({ chatId: chat.id }) },
     );
 
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(202);
     const responseBody = (await response.json()) as Record<string, unknown>;
     expect(responseBody).toMatchObject({ sessionId: "ses_1" });
-    expect(responseBody.continuationToken).toBe(EVE_PROXY_CONTINUATION_TOKEN);
+    expect(responseBody).not.toHaveProperty("continuationToken");
     expect(server.requests).toHaveLength(1);
     expect(server.requests[0]).toMatchObject({
       method: "POST",
@@ -209,11 +208,11 @@ describe("per-chat Eve protocol proxy", () => {
       body: { message, clientContext: { surface: "eve-chats" } },
     });
     expect(server.requests[0].headers.authorization).toBeUndefined();
-    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
-      status: "active",
-      pendingUserMessage: null,
-      sessionState: { sessionId: "ses_1", continuationToken: "eve:1", streamIndex: 0 },
-    });
+    const stored = await repository.getChat(chat.id);
+    expect(stored).toMatchObject({ status: "active", pendingUserMessage: null });
+    // Eve 0.31 answers without a token; the absent field marks the session
+    // ID-addressed for every later turn.
+    expect(stored?.sessionState).toEqual({ sessionId: "ses_1", streamIndex: 0 });
   });
 
   it("forwards an Eveland authentication challenge, then sends a Caller Token only on retry", async () => {
@@ -283,7 +282,7 @@ describe("per-chat Eve protocol proxy", () => {
 
     const retried = await create("Bearer caller-token");
 
-    expect(retried.status).toBe(200);
+    expect(retried.status).toBe(202);
     expect(server.requests).toHaveLength(2);
     expect(server.requests[0]?.headers.authorization).toBeUndefined();
     expect(server.requests[1]?.headers.authorization).toBe(
@@ -323,13 +322,13 @@ describe("per-chat Eve protocol proxy", () => {
       { params: Promise.resolve({ chatId: chat.id }) },
     );
 
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(202);
     expect(server.requests[0]?.headers.authorization).toBe(
       "Bearer external-secret",
     );
   });
 
-  it("keeps Eve 0.24 v18 sessions resumable without exposing a continuation token", async () => {
+  it("keeps Eve 0.29 v20 sessions resumable without exposing a continuation token", async () => {
     const streamEvents = [
       {
         type: "message.received",
@@ -384,7 +383,7 @@ describe("per-chat Eve protocol proxy", () => {
       },
       { type: "session.waiting", data: { wait: "next-user-message" } },
     ] as const;
-    const server = await fakeServer({ streamEvents });
+    const server = await fakeServer({ generation: "0.29", streamEvents });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
       name: "Structured Eve",
@@ -424,12 +423,11 @@ describe("per-chat Eve protocol proxy", () => {
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as unknown);
+    // The parked session is reported to the browser by ID, never by the token
+    // that would let it continue the conversation directly.
     const browserEvents = streamEvents.map((event) =>
       event.type === "session.waiting"
-        ? {
-            ...event,
-            data: { ...event.data, continuationToken: EVE_PROXY_CONTINUATION_TOKEN },
-          }
+        ? { ...event, data: { ...event.data, continuationToken: "ses_1" } }
         : event,
     );
     expect(forwardedEvents).toEqual(browserEvents);
@@ -455,7 +453,7 @@ describe("per-chat Eve protocol proxy", () => {
     await expect(repository.listEvents(chat.id)).resolves.toHaveLength(streamEvents.length);
   });
 
-  it("stores Eve 0.25 v19 continuation tokens server-side and replaces them in the browser stream", async () => {
+  it("stores Eve 0.30 continuation tokens server-side and strips them from the browser stream", async () => {
     const streamEvents = [
       {
         type: "message.completed",
@@ -472,10 +470,10 @@ describe("per-chat Eve protocol proxy", () => {
         data: { wait: "next-user-message", continuationToken: "eve:rotated" },
       },
     ] as const;
-    const server = await fakeServer({ streamEvents, streamVersion: 19 });
+    const server = await fakeServer({ generation: "0.30", streamEvents });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
-      name: "Eve 0.25",
+      name: "Eve 0.30",
       baseUrl: server.baseUrl,
       authType: "none",
       evelandProjectId: "project_support",
@@ -509,10 +507,7 @@ describe("per-chat Eve protocol proxy", () => {
       streamEvents[0],
       {
         type: "session.waiting",
-        data: {
-          wait: "next-user-message",
-          continuationToken: EVE_PROXY_CONTINUATION_TOKEN,
-        },
+        data: { wait: "next-user-message", continuationToken: "ses_1" },
       },
     ]);
     await expect(repository.getChat(chat.id)).resolves.toMatchObject({
@@ -522,10 +517,107 @@ describe("per-chat Eve protocol proxy", () => {
         streamIndex: 2,
       },
     });
+
+    const continued = await routes.continueSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ message: "And again" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+
+    expect(continued.status).toBe(200);
+    expect(server.requests.at(-1)).toMatchObject({
+      path: "/eve/v1/session/ses_1",
+      body: { message: "And again", continuationToken: "eve:rotated" },
+    });
+  });
+
+  it("addresses an Eve 0.31 follow-up by session id alone", async () => {
+    const server = await fakeServer({ generation: "0.31" });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Eve 0.31",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Fixed session",
+      ...chatIdentity,
+    });
+    await repository.updateChatSessionState(chat.id, {
+      sessionId: "ses_1",
+      streamIndex: 4,
+    });
+    const routes = await loadProxyRoutes();
+
+    const response = await routes.continueSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({
+          continuationToken: "untrusted-browser-token",
+          message: "Keep going",
+        }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+
+    expect(response.status).toBe(202);
+    expect(server.requests).toHaveLength(1);
+    expect(server.requests[0].body).toEqual({ message: "Keep going" });
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      sessionState: { sessionId: "ses_1", streamIndex: 4 },
+    });
+  });
+
+  it("drops a stale continuation token when the Agent upgrades to Eve 0.31", async () => {
+    const server = await fakeServer({ generation: "0.31" });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Upgraded Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Upgraded mid-session",
+      ...chatIdentity,
+    });
+    // Opened while the Agent still ran Eve 0.30.
+    await repository.updateChatSessionState(chat.id, {
+      sessionId: "ses_1",
+      continuationToken: "eve:1",
+      streamIndex: 2,
+    });
+    const routes = await loadProxyRoutes();
+
+    const response = await routes.continueSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ message: "Still there?" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+
+    expect(response.status).toBe(202);
+    expect(server.requests.map((entry) => entry.body)).toEqual([
+      { message: "Still there?", continuationToken: "eve:1" },
+      { message: "Still there?" },
+    ]);
+    const stored = await repository.getChat(chat.id);
+    expect(stored?.sessionState).toEqual({ sessionId: "ses_1", streamIndex: 2 });
   });
 
   it("injects the stored continuation token for HITL responses and rejects another session id", async () => {
-    const server = await fakeServer();
+    const server = await fakeServer({ generation: "0.30" });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
       name: "Approval Eve",

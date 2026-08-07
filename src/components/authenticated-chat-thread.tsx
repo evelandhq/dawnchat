@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { UserContent } from "ai";
-import type { HandleMessageStreamEvent } from "eve/client";
+import type { MessageStreamEvent } from "eve/client";
 import { CircleAlert } from "lucide-react";
 
 import {
@@ -17,7 +17,7 @@ import { EvelandIdentityError } from "@/identity/client";
 
 type ChatPayload = {
   chat: ChatThreadSummary & { pendingUserMessage: UserContent | null };
-  events: HandleMessageStreamEvent[];
+  events: MessageStreamEvent[];
 };
 
 export function AuthenticatedChatThread({

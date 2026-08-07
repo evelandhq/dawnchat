@@ -1,10 +1,9 @@
 import React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import type { HandleMessageStreamEvent, SessionState } from "eve/client";
+import type { ClientSessionState, MessageStreamEvent } from "eve/client";
 
 import { ChatThread, type ChatThreadSummary } from "@/components/chat-thread";
-import { EVE_PROXY_CONTINUATION_TOKEN } from "@/eve/proxy-contract";
 
 const refreshMock = vi.fn();
 
@@ -12,7 +11,27 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ refresh: refreshMock }),
 }));
 
-function chat(overrides: Partial<ChatThreadSummary & { sessionState: SessionState | null }> = {}) {
+/** One stream event as an Agent emits it, before Eve stamps `meta` onto it. */
+type UnstampedEvent<TEvent = MessageStreamEvent> = TEvent extends unknown
+  ? Omit<TEvent, "meta">
+  : never;
+
+/**
+ * Eve stamps every stream event with an emission time and a sortable id from
+ * stream version 20 (Eve 0.29) on. Fixtures spell the payload; this adds the
+ * envelope the reducer deduplicates on.
+ */
+function stampEvents(events: readonly UnstampedEvent[]): MessageStreamEvent[] {
+  return events.map(
+    (event, index) =>
+      ({
+        ...event,
+        meta: { at: new Date(index * 1000).toISOString(), id: `evt_${index + 1}` },
+      }) as MessageStreamEvent,
+  );
+}
+
+function chat(overrides: Partial<ChatThreadSummary & { sessionState: ClientSessionState | null }> = {}) {
   return {
     id: "chat_rich",
     agentConnectionId: "agent_rich",
@@ -43,7 +62,7 @@ describe("ChatThread with Eve and AI Elements", () => {
   });
 
   it("renders Eve text, files, reasoning, and completed tool calls from raw events", async () => {
-    const events: HandleMessageStreamEvent[] = [
+    const events = stampEvents([
       {
         type: "message.received",
         data: {
@@ -117,9 +136,9 @@ describe("ChatThread with Eve and AI Elements", () => {
       { type: "turn.completed", data: { sequence: 7, turnId: "turn_1" } },
       {
         type: "session.waiting",
-        data: { wait: "next-user-message", continuationToken: EVE_PROXY_CONTINUATION_TOKEN },
+        data: { wait: "next-user-message", continuationToken: "ses_1" },
       },
-    ];
+    ]);
 
     render(<ChatThread chat={chat({ sessionState: { sessionId: "ses_1", streamIndex: 8 } })} events={events} />);
 
@@ -143,7 +162,7 @@ describe("ChatThread with Eve and AI Elements", () => {
   });
 
   it("submits a structured HITL option through the Eve continuation route", async () => {
-    const events: HandleMessageStreamEvent[] = [
+    const events = stampEvents([
       { type: "step.started", data: { sequence: 1, stepIndex: 0, turnId: "turn_1" } },
       {
         type: "actions.requested",
@@ -162,6 +181,7 @@ describe("ChatThread with Eve and AI Elements", () => {
           requests: [
             {
               requestId: "req_1",
+              kind: "tool-approval",
               prompt: "Delete record 7?",
               display: "confirmation",
               options: [
@@ -178,9 +198,9 @@ describe("ChatThread with Eve and AI Elements", () => {
       },
       {
         type: "session.waiting",
-        data: { wait: "next-user-message", continuationToken: EVE_PROXY_CONTINUATION_TOKEN },
+        data: { wait: "next-user-message", continuationToken: "ses_1" },
       },
-    ];
+    ]);
     const resumedEvents = [
       {
         type: "action.result",
@@ -194,13 +214,13 @@ describe("ChatThread with Eve and AI Elements", () => {
       },
       {
         type: "session.waiting",
-        data: { wait: "next-user-message", continuationToken: EVE_PROXY_CONTINUATION_TOKEN },
+        data: { wait: "next-user-message", continuationToken: "ses_1" },
       },
     ];
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
-        new Response(JSON.stringify({ sessionId: "ses_1", continuationToken: "eve:2" }), {
+        new Response(JSON.stringify({ sessionId: "ses_1" }), {
           status: 200,
           headers: { "content-type": "application/json", "x-eve-session-id": "ses_1" },
         }),
@@ -221,7 +241,6 @@ describe("ChatThread with Eve and AI Elements", () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/chats/chat_rich/agent/eve/v1/session/ses_1");
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
-      continuationToken: EVE_PROXY_CONTINUATION_TOKEN,
       inputResponses: [{ requestId: "req_1", optionId: "approve" }],
     });
     expect(fetchMock.mock.calls[1]?.[0]).toBe(
@@ -230,7 +249,7 @@ describe("ChatThread with Eve and AI Elements", () => {
   });
 
   it("submits freeform HITL text through the same continuation contract", async () => {
-    const events: HandleMessageStreamEvent[] = [
+    const events = stampEvents([
       { type: "step.started", data: { sequence: 1, stepIndex: 0, turnId: "turn_1" } },
       {
         type: "actions.requested",
@@ -249,6 +268,7 @@ describe("ChatThread with Eve and AI Elements", () => {
           requests: [
             {
               requestId: "req_text",
+              kind: "question",
               prompt: "What should I tell the operator?",
               display: "text",
               allowFreeform: true,
@@ -262,16 +282,15 @@ describe("ChatThread with Eve and AI Elements", () => {
       },
       {
         type: "session.waiting",
-        data: { wait: "next-user-message", continuationToken: EVE_PROXY_CONTINUATION_TOKEN },
+        data: { wait: "next-user-message", continuationToken: "ses_1" },
       },
-    ];
+    ]);
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
         new Response(
           JSON.stringify({
             sessionId: "ses_1",
-            continuationToken: EVE_PROXY_CONTINUATION_TOKEN,
           }),
           { status: 200, headers: { "content-type": "application/json" } },
         ),
@@ -286,13 +305,12 @@ describe("ChatThread with Eve and AI Elements", () => {
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
-      continuationToken: EVE_PROXY_CONTINUATION_TOKEN,
       inputResponses: [{ requestId: "req_text", text: "Proceed carefully" }],
     });
   });
 
   it("renders falsy tool outputs instead of dropping valid results", async () => {
-    const events: HandleMessageStreamEvent[] = [
+    const events = stampEvents([
       { type: "step.started", data: { sequence: 1, stepIndex: 0, turnId: "turn_1" } },
       {
         type: "actions.requested",
@@ -315,9 +333,9 @@ describe("ChatThread with Eve and AI Elements", () => {
       },
       {
         type: "session.waiting",
-        data: { wait: "next-user-message", continuationToken: EVE_PROXY_CONTINUATION_TOKEN },
+        data: { wait: "next-user-message", continuationToken: "ses_1" },
       },
-    ];
+    ]);
 
     render(<ChatThread chat={chat()} events={events} />);
     fireEvent.click(screen.getByRole("button", { name: /count_rows/i }));
@@ -534,7 +552,7 @@ describe("ChatThread with Eve and AI Elements", () => {
         }
         if (init?.method === "POST") {
           return Response.json(
-            { sessionId: "ses_1", continuationToken: EVE_PROXY_CONTINUATION_TOKEN },
+            { sessionId: "ses_1" },
             { headers: { "x-eve-session-id": "ses_1" } },
           );
         }
@@ -631,10 +649,7 @@ describe("ChatThread with Eve and AI Elements", () => {
             );
           }
           return Response.json(
-            {
-              sessionId: "ses_authenticated",
-              continuationToken: EVE_PROXY_CONTINUATION_TOKEN,
-            },
+            { sessionId: "ses_authenticated" },
             { headers: { "x-eve-session-id": "ses_authenticated" } },
           );
         }
@@ -722,7 +737,7 @@ describe("ChatThread with Eve and AI Elements", () => {
   });
 
   it("renders connection authorization challenges without exposing credentials", () => {
-    const events: HandleMessageStreamEvent[] = [
+    const events = stampEvents([
       { type: "step.started", data: { sequence: 1, stepIndex: 0, turnId: "turn_1" } },
       {
         type: "authorization.required",
@@ -739,7 +754,7 @@ describe("ChatThread with Eve and AI Elements", () => {
           turnId: "turn_1",
         },
       },
-    ];
+    ]);
 
     render(<ChatThread chat={chat()} events={events} />);
 
