@@ -363,6 +363,11 @@ describe("ChatThread with Eve and AI Elements", () => {
       />,
     );
 
+    // Option rows wrap instead of overflowing the card when labels are wide.
+    expect(
+      screen.getByRole("button", { name: "Same period last month" }).parentElement,
+    ).toHaveClass("flex-wrap");
+
     fireEvent.click(screen.getByRole("button", { name: "Same period last month" }));
     expect(await screen.findByText(/Selected: Same period last month/)).toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalled();

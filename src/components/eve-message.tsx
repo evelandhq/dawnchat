@@ -359,12 +359,12 @@ function InputRequestControls({
   return (
     <div className="flex flex-col gap-3 pt-2">
       {inputRequest.options?.length ? (
-        <ConfirmationActions className="self-start">
+        <ConfirmationActions className="flex-wrap justify-start self-start">
           {inputRequest.options.map((option) => (
             <ConfirmationAction
               aria-pressed={draft?.optionId === option.id}
               className={cn(
-                "h-8 px-3 text-sm",
+                "h-auto min-h-8 whitespace-normal px-3 py-1.5 text-left text-sm",
                 draft?.optionId === option.id && "ring-2 ring-ring",
               )}
               disabled={!canRespond}
