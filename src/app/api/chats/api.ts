@@ -10,8 +10,14 @@ import {
   resolveAppBrowserSession,
   type AppBrowserSession,
 } from "@/app-session";
-import { createRepository, type Chat, type Repository } from "@/db/repository";
+import { resolveProxyChat } from "@/app/api/chats/eve-proxy";
+import { createRepository, type Chat, type EveEvent, type Repository } from "@/db/repository";
 import { getDbClient } from "@/db/provider";
+import {
+  derivePendingInput,
+  EMPTY_PENDING_INPUT,
+  type PendingInputState,
+} from "@/eve/proxy-contract";
 import {
   deserializePendingUserContent,
   serializePendingUserContent,
@@ -32,6 +38,8 @@ export type ChatResponse = {
   status: Chat["status"];
   /** The ID-addressed cursor only; a 0.29/0.30 token never leaves the server. */
   sessionState: ClientSessionState | null;
+  /** The proxy's pending-input ledger: batches Eve is still parked on. */
+  pendingInput: PendingInputState;
   pendingUserMessage: UserContent | null;
   createdAt: string;
   updatedAt: string;
@@ -39,7 +47,7 @@ export type ChatResponse = {
 
 export type ChatSummaryResponse = Omit<
   ChatResponse,
-  "pendingUserMessage" | "sessionState"
+  "pendingUserMessage" | "sessionState" | "pendingInput"
 > & {
   agentName: string;
   evelandProjectId: string | null;
@@ -145,10 +153,12 @@ export async function getChatWithEvents(
     if (!agent) {
       return jsonResponse({ error: "Chat not found" }, { status: 404 });
     }
+    const pendingInput = await ensurePendingInput(repository, chat, events);
     return applyAppBrowserSession(
       jsonResponse({
         chat: {
           ...chatResponse(chat),
+          pendingInput,
           agentName: agent.name,
         },
         events: events.map((event) => event.payload),
@@ -159,6 +169,53 @@ export async function getChatWithEvents(
     if (error instanceof CallerTokenError) return callerTokenErrorResponse(error);
     return jsonResponse({ error: "Internal server error" }, { status: 500 });
   }
+}
+
+/**
+ * Serves the current ledger alone; the client refetches it to reconcile.
+ * Shares the proxy's chat resolution so a Caller Token — what the thread
+ * holds after an Eveland challenge — can read it too.
+ */
+export async function getChatPendingInput(
+  request: Request,
+  chatId: string,
+): Promise<Response> {
+  try {
+    const resolved = await resolveProxyChat(request, chatId);
+    if (resolved instanceof Response) {
+      return resolved;
+    }
+    const pendingInput = await ensurePendingInput(resolved.repository, resolved.chat);
+    return jsonResponse({ pendingInput });
+  } catch (error) {
+    if (error instanceof CallerTokenError) return callerTokenErrorResponse(error);
+    return jsonResponse({ error: "Internal server error" }, { status: 500 });
+  }
+}
+
+/**
+ * A chat from before the ledger derives its state from stored events once,
+ * and the result is written back so every later read is authoritative. The
+ * conditional write leaves a concurrently persisted state untouched.
+ */
+async function ensurePendingInput(
+  repository: Repository,
+  chat: Chat,
+  events?: EveEvent[],
+): Promise<PendingInputState> {
+  if (chat.pendingInput) {
+    return chat.pendingInput;
+  }
+  const stored = events ?? (await repository.listEvents(chat.id));
+  const derived = derivePendingInput({
+    events: stored,
+    sessionId: chat.sessionState?.sessionId,
+    active: chat.status === "active",
+  });
+  const persisted = await repository.updatePendingInput(chat.id, (current) =>
+    current === null ? derived : null,
+  );
+  return persisted ?? derived;
 }
 
 function chatResponse(chat: Chat): ChatResponse {
@@ -173,6 +230,7 @@ function chatResponse(chat: Chat): ChatResponse {
           streamIndex: chat.sessionState.streamIndex ?? 0,
         }
       : null,
+    pendingInput: chat.pendingInput ?? EMPTY_PENDING_INPUT,
     pendingUserMessage: deserializePendingUserContent(chat.pendingUserMessage),
     createdAt: chat.createdAt.toISOString(),
     updatedAt: chat.updatedAt.toISOString(),
@@ -201,7 +259,11 @@ async function chatSummaryResponse(repository: Repository, chat: Chat): Promise<
         .join(""),
     )
     .find((text) => text.length > 0) ?? null;
-  const { sessionState: _sessionState, ...summary } = chatResponse(chat);
+  const {
+    sessionState: _sessionState,
+    pendingInput: _pendingInput,
+    ...summary
+  } = chatResponse(chat);
   return {
     ...summary,
     agentName: agent.name,

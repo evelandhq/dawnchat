@@ -9,7 +9,15 @@ import {
 } from "@/db/repository";
 import { getDbClient } from "@/db/provider";
 import { createEveClientForConnection } from "@/eve/client";
-import { withoutContinuationToken } from "@/eve/proxy-contract";
+import {
+  EMPTY_PENDING_INPUT,
+  inputRespondedEvent,
+  pendingRequestsFromEvent,
+  readInputResponses,
+  settlePendingInput,
+  withoutContinuationToken,
+  type PendingInputRequest,
+} from "@/eve/proxy-contract";
 import {
   CallerTokenError,
   callerTokenErrorResponse,
@@ -85,6 +93,17 @@ export async function proxyCancelEveTurn(
     const result = await resolved.client.sessions
       .attach(sessionId, { streamIndex: session.streamIndex ?? 0 })
       .cancel(turnId ? { turnId } : undefined);
+    // Only `accepted` proves Eve tore anything down. A `no_active_turn` cancel
+    // (the session was parked between turns) leaves Eve's batch alive, and
+    // clearing the ledger for it would hide the controls while every later
+    // message is silently deferred.
+    if (cancelWasAccepted(result)) {
+      await resolved.repository
+        .updatePendingInput(resolved.chat.id, () => EMPTY_PENDING_INPUT)
+        .catch((error: unknown) => {
+          console.error(`Failed to clear pending input for ${resolved.chat.id}:`, error);
+        });
+    }
     return Response.json(result, {
       status: 200,
       headers: { "cache-control": "no-store" },
@@ -92,6 +111,14 @@ export async function proxyCancelEveTurn(
   } catch {
     return errorResponse("Unable to cancel the Eve turn", 502);
   }
+}
+
+function cancelWasAccepted(result: unknown): boolean {
+  return (
+    typeof result === "object" &&
+    result !== null &&
+    (result as { status?: unknown }).status === "accepted"
+  );
 }
 
 export async function proxyEveSessionStream(
@@ -212,8 +239,17 @@ async function proxyTurnRequest(
       stringValue(payload.continuationToken) ?? (isContinuing ? continuationToken : undefined),
     streamIndex: isContinuing ? (currentSession?.streamIndex ?? 0) : 0,
   };
+  if (!isContinuing) {
+    // Batches belong to a session; none survive its replacement.
+    await context.repository
+      .updatePendingInput(context.chat.id, () => EMPTY_PENDING_INPUT)
+      .catch((error: unknown) => {
+        console.error(`Failed to clear pending input for ${context.chat.id}:`, error);
+      });
+  }
   await context.repository.updateChatSessionState(context.chat.id, nextSession, "active");
   await context.repository.clearPendingUserMessage(context.chat.id);
+  await recordInputResponses(context, body);
 
   const headers = new Headers({ "content-type": "application/json; charset=utf-8" });
   headers.set("x-eve-session-id", resolvedSessionId);
@@ -221,6 +257,46 @@ async function proxyTurnRequest(
     status: remote.status,
     headers,
   });
+}
+
+/**
+ * Records the answers a turn carried: a `client.input.responded` event so a
+ * replay can show them, and a ledger settle so the answered batch stops
+ * reading as open. This is the only point that observes Eve accepting a turn
+ * — the acceptance signal the browser never gets.
+ *
+ * The Agent accepted the turn by the time this runs, so failing the request
+ * over the record would cost more than losing it: the batch re-offers and a
+ * re-answer degrades to Eve's stale-response handling.
+ */
+async function recordInputResponses(
+  context: ProxyContext,
+  body: Record<string, unknown>,
+): Promise<void> {
+  const responses = readInputResponses(body);
+  if (responses.length === 0) {
+    return;
+  }
+
+  const event = inputRespondedEvent(responses, Date.now());
+  try {
+    await context.repository.appendEvent({
+      chatId: context.chat.id,
+      type: event.type,
+      payload: event,
+    });
+  } catch (error) {
+    console.error(`Failed to record input responses for ${context.chat.id}:`, error);
+  }
+  try {
+    await context.repository.updatePendingInput(context.chat.id, (current) =>
+      // A legacy chat keeps its NULL marker; the recorded event above feeds
+      // the later derivation instead.
+      current === null ? null : settlePendingInput(current, responses),
+    );
+  } catch (error) {
+    console.error(`Failed to settle pending input for ${context.chat.id}:`, error);
+  }
 }
 
 async function postTurn(
@@ -254,6 +330,45 @@ async function resolveProxyContext(
   request: Request,
   chatId: string,
 ): Promise<ProxyContext | Response> {
+  const resolved = await resolveProxyChat(request, chatId);
+  if (resolved instanceof Response) {
+    return resolved;
+  }
+  const { chat, repository, callerToken } = resolved;
+
+  const agent = await repository.getAgentConnection(chat.agentConnectionId);
+  if (!agent) {
+    return errorResponse("Agent connection not found", 404);
+  }
+  if (agent.evelandProjectId !== chat.evelandProjectId) {
+    return errorResponse("Chat not found", 404);
+  }
+  if (agent.status === "unreachable") {
+    return errorResponse("Agent connection is unreachable", 409);
+  }
+
+  try {
+    return {
+      chat,
+      repository,
+      client: createEveClientForConnection(agent, callerToken),
+    };
+  } catch {
+    return errorResponse("Agent authentication configuration is invalid", 500);
+  }
+}
+
+/**
+ * Resolves the chat a request may act on, honouring every credential the chat
+ * routes accept: the anonymous browser session, an App Token, and a Caller
+ * Token issued after an Eveland challenge. Routes that only read chat data
+ * (the pending-input ledger) share this so a Caller Token client is not
+ * locked out of reconciliation.
+ */
+export async function resolveProxyChat(
+  request: Request,
+  chatId: string,
+): Promise<{ chat: Chat; repository: Repository; callerToken?: string } | Response> {
   const repository = createRepository(getDbClient());
   const candidate = await repository.getChat(chatId);
   if (!candidate) {
@@ -344,26 +459,7 @@ async function resolveProxyContext(
     return errorResponse("Chat not found", 404);
   }
 
-  const agent = await repository.getAgentConnection(chat.agentConnectionId);
-  if (!agent) {
-    return errorResponse("Agent connection not found", 404);
-  }
-  if (agent.evelandProjectId !== chat.evelandProjectId) {
-    return errorResponse("Chat not found", 404);
-  }
-  if (agent.status === "unreachable") {
-    return errorResponse("Agent connection is unreachable", 409);
-  }
-
-  try {
-    return {
-      chat,
-      repository,
-      client: createEveClientForConnection(agent, callerToken),
-    };
-  } catch {
-    return errorResponse("Agent authentication configuration is invalid", 500);
-  }
+  return { chat, repository, callerToken };
 }
 
 function createPersistedEventStream(input: {
@@ -399,6 +495,7 @@ function createPersistedEventStream(input: {
       streamIndex: nextStreamIndex,
       type: browserEvent.type,
       payload: browserEvent,
+      pendingInput: pendingInputTransition(browserEvent),
     });
     nextStreamIndex += 1;
     latestCursor = Math.max(latestCursor, nextStreamIndex);
@@ -442,6 +539,29 @@ function createPersistedEventStream(input: {
       void input.iterator.return?.();
     },
   });
+}
+
+/**
+ * The ledger transition an event carries. An `input.requested` opens its
+ * batch; a cancelled turn or a terminal session closes every park. Turn
+ * boundaries deliberately map to nothing — Eve emits them without resolving
+ * anything (a re-parked required batch), so only real teardown events clear.
+ */
+function pendingInputTransition(
+  event: MessageStreamEvent,
+): { open: PendingInputRequest[] } | { clear: true } | undefined {
+  if (event.type === "input.requested") {
+    const requests = pendingRequestsFromEvent(event);
+    return requests ? { open: requests } : undefined;
+  }
+  if (
+    event.type === "turn.cancelled" ||
+    event.type === "session.completed" ||
+    event.type === "session.failed"
+  ) {
+    return { clear: true };
+  }
+  return undefined;
 }
 
 function waitingContinuationToken(event: MessageStreamEvent): string | undefined {

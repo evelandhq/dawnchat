@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { UserContent } from "ai";
 import {
@@ -35,8 +35,15 @@ import {
   ChatAttachmentButton,
   ChatComposerAttachments,
 } from "@/components/chat-composer-attachments";
-import { EveMessageView } from "@/components/eve-message";
+import { EveMessageView, type InputRequestBatch } from "@/components/eve-message";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import {
+  isRequiredKind,
+  pendingRequestsFromEvent,
+  type ChatEvent,
+  type PendingInputRequest,
+  type PendingInputState,
+} from "@/eve/proxy-contract";
 import {
   CHAT_ATTACHMENT_MAX_FILES,
   CHAT_ATTACHMENT_MAX_FILE_SIZE,
@@ -57,9 +64,33 @@ export type ChatThreadSummary = {
   updatedAt: string;
 };
 
+/**
+ * One input batch as this client tracks it. The proxy's ledger is the
+ * authority on which batches Eve is parked on; the client seeds from it,
+ * appends batches from live `input.requested` events, closes optimistically
+ * on `respond()`, and refetches the ledger whenever a send may have failed or
+ * another actor may have settled one.
+ */
+type ClientPendingBatch = {
+  key: string;
+  requests: PendingInputRequest[];
+  answered: ReadonlySet<string>;
+};
+
+function batchesFromState(state: PendingInputState): ClientPendingBatch[] {
+  return state.batches
+    .filter((batch) => batch.requests.length > 0)
+    .map((batch) => ({
+      key: batch.requests[0]!.requestId,
+      requests: batch.requests,
+      answered: new Set(batch.answered),
+    }));
+}
+
 type ChatThreadProps = {
   chat: ChatThreadSummary;
-  events: MessageStreamEvent[];
+  events: ChatEvent[];
+  pendingInput: PendingInputState;
   pendingUserMessage?: UserContent | null;
   getAccessToken?: () => Promise<string>;
   getCallerToken?: () => Promise<string>;
@@ -72,6 +103,7 @@ type ChatThreadProps = {
 export function ChatThread({
   chat,
   events,
+  pendingInput,
   pendingUserMessage = null,
   getAccessToken,
   getCallerToken,
@@ -84,20 +116,23 @@ export function ChatThread({
   const [authentication, setAuthentication] = useState<{
     revision: number;
     mode: "app" | "caller";
-    events: MessageStreamEvent[];
+    events: ChatEvent[];
+    pendingBatches: ClientPendingBatch[];
     session?: ClientSessionState;
     retryInput?: TurnPayload;
   }>({
     revision: 0,
     mode: "app",
     events,
+    pendingBatches: batchesFromState(pendingInput),
   });
 
   const handleAuthenticationError = async (
     error: ClientError,
     retryInput: TurnPayload,
-    currentEvents: MessageStreamEvent[],
+    currentEvents: ChatEvent[],
     currentSession: ClientSessionState | undefined,
+    currentPendingBatches: ClientPendingBatch[],
   ): Promise<void> => {
     if (
       error.status !== 401 ||
@@ -120,6 +155,7 @@ export function ChatThread({
         revision: current.revision + 1,
         mode: "caller",
         events: currentEvents,
+        pendingBatches: currentPendingBatches,
         session: currentSession,
         retryInput,
       }));
@@ -133,6 +169,8 @@ export function ChatThread({
       key={authentication.revision}
       chat={chat}
       events={authentication.events}
+      pendingInput={pendingInput}
+      initialPendingBatches={authentication.pendingBatches}
       initialSession={authentication.session}
       pendingUserMessage={pendingUserMessage}
       pendingSentRef={pendingSentRef}
@@ -150,6 +188,7 @@ export function ChatThread({
 function ChatThreadSession({
   chat,
   events,
+  initialPendingBatches,
   initialSession,
   pendingUserMessage,
   pendingSentRef,
@@ -159,13 +198,15 @@ function ChatThreadSession({
   readOnly,
   retryInput,
 }: ChatThreadProps & {
+  initialPendingBatches: ClientPendingBatch[];
   initialSession?: ClientSessionState;
   pendingSentRef: React.MutableRefObject<boolean>;
   onAuthenticationError(
     error: ClientError,
     retryInput: TurnPayload,
-    events: MessageStreamEvent[],
+    events: ChatEvent[],
     session: ClientSessionState | undefined,
+    pendingBatches: ClientPendingBatch[],
   ): Promise<void>;
   retryInput?: TurnPayload;
 }): React.ReactElement {
@@ -173,21 +214,98 @@ function ChatThreadSession({
   const agentRef = useRef<ReturnType<typeof useEveAgent> | null>(null);
   const latestInputRef = useRef<TurnPayload | null>(null);
   const retrySentRef = useRef(false);
+  const retryRefetchedRef = useRef(false);
   const [localError, setLocalError] = useState<string | null>(null);
+  // Refs mirror the states below so callbacks and same-batch dispatches read
+  // the latest value instead of a stale render's.
+  const draftResponsesRef = useRef<ReadonlyMap<string, InputResponse>>(new Map());
+  const [draftResponses, setDraftResponses] = useState<ReadonlyMap<string, InputResponse>>(
+    draftResponsesRef.current,
+  );
+  const pendingBatchesRef = useRef<ClientPendingBatch[]>(initialPendingBatches);
+  // Every local change advances the generation; a refetch started before the
+  // latest change is stale and must not overwrite it (a slow GET returning an
+  // intermediate state would otherwise erase a batch a live event just opened).
+  const pendingGenerationRef = useRef(0);
+  const [pendingBatches, setPendingBatchesState] =
+    useState<ClientPendingBatch[]>(initialPendingBatches);
   const [showPendingUserMessage, setShowPendingUserMessage] = useState(
     Boolean(pendingUserMessage) &&
       !events.some((event) => event.type === "message.received"),
   );
+
+  const setDrafts = (drafts: ReadonlyMap<string, InputResponse>): void => {
+    draftResponsesRef.current = drafts;
+    setDraftResponses(drafts);
+  };
+
+  const setPendingBatches = (batches: ClientPendingBatch[]): void => {
+    pendingGenerationRef.current += 1;
+    pendingBatchesRef.current = batches;
+    setPendingBatchesState(batches);
+  };
+
+  /**
+   * Replaces the local view with the proxy's ledger — the record of what Eve
+   * actually accepted. Drafts survive as long as their request is still open
+   * there, so a send that never reached Eve keeps every collected answer.
+   */
+  const reconcilePendingInput = (state: PendingInputState): void => {
+    const batches = batchesFromState(state);
+    setPendingBatches(batches);
+    const open = new Set<string>();
+    for (const batch of batches) {
+      for (const request of batch.requests) {
+        if (!batch.answered.has(request.requestId)) {
+          open.add(request.requestId);
+        }
+      }
+    }
+    setDrafts(
+      new Map(
+        [...draftResponsesRef.current].filter(([requestId]) => open.has(requestId)),
+      ),
+    );
+  };
+
+  const refetchPendingInput = async (): Promise<void> => {
+    const generation = pendingGenerationRef.current;
+    try {
+      const headers: Record<string, string> = {};
+      if (getAccessToken) {
+        headers.authorization = `Bearer ${await getAccessToken()}`;
+      }
+      const response = await fetch(
+        `/api/chats/${encodeURIComponent(chat.id)}/pending-input`,
+        { headers, cache: "no-store" },
+      );
+      if (!response.ok) return;
+      const body = (await response.json()) as { pendingInput?: PendingInputState };
+      if (body.pendingInput && pendingGenerationRef.current === generation) {
+        reconcilePendingInput(body.pendingInput);
+      }
+    } catch {
+      // The local view stands; the next reconcile trigger retries.
+    }
+  };
+
   const agent = useEveAgent({
     host: `/api/chats/${chat.id}/agent`,
     auth: getAccessToken ? { bearer: getAccessToken } : undefined,
-    initialEvents: events,
+    // Eve types `initialEvents` as its own stream but folds every seeded event
+    // through the reducer, which is how a stored `client.input.responded`
+    // reaches the message parts it answers.
+    initialEvents: events as MessageStreamEvent[],
     initialSession: initialSession ?? chat.sessionState ?? undefined,
     prepareSend(input) {
       latestInputRef.current = input;
       return input;
     },
     onError(error) {
+      // Covers every failed send, including a turn Eve accepted whose stream
+      // broke: the ledger recorded the acceptance (or didn't) at the 2xx.
+      void refetchPendingInput();
+
       const current = agentRef.current;
       const retry = latestInputRef.current;
       if (
@@ -200,6 +318,7 @@ function ChatThreadSession({
           retry,
           [...current.events],
           current.session,
+          pendingBatchesRef.current,
         ).catch((authenticationError: unknown) => {
           setLocalError(errorMessage(authenticationError));
         });
@@ -209,8 +328,29 @@ function ChatThreadSession({
       if (event.type === "message.received") {
         setShowPendingUserMessage(false);
       }
+      if (event.type === "input.requested") {
+        const requests = pendingRequestsFromEvent(event);
+        if (requests) {
+          const key = requests[0]!.requestId;
+          setPendingBatches([
+            ...pendingBatchesRef.current.filter((batch) => batch.key !== key),
+            { key, requests, answered: new Set() },
+          ]);
+        }
+      }
+      // A turn boundary while batches look open is the signature of another
+      // actor (a second tab, an external cancel) having settled one.
+      if (
+        (event.type === "turn.started" || event.type === "turn.cancelled") &&
+        pendingBatchesRef.current.length > 0
+      ) {
+        void refetchPendingInput();
+      }
     },
     onFinish(snapshot) {
+      // `stop()` aborts without an error surfacing anywhere else (the store
+      // skips `onError` for aborts), so every finish reconciles.
+      void refetchPendingInput();
       if (snapshot.status === "ready") {
         router.refresh();
       }
@@ -218,13 +358,31 @@ function ChatThreadSession({
   });
   agentRef.current = agent;
   const isBusy = agent.status === "submitted" || agent.status === "streaming";
-  const hasPendingInteraction = agent.data.messages.some((message) =>
-    message.parts.some(
-      (part) =>
-        (part.type === "authorization" && part.state === "required") ||
-        (part.type === "dynamic-tool" && part.state === "approval-requested"),
-    ),
-  );
+  const pendingRequestIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const batch of pendingBatches) {
+      for (const request of batch.requests) {
+        if (!batch.answered.has(request.requestId)) {
+          ids.add(request.requestId);
+        }
+      }
+    }
+    return ids;
+  }, [pendingBatches]);
+  // Only a required request locks the composer. A dismissable-only park keeps
+  // it open: a plain message is Eve's own dismiss gesture for such a batch.
+  const hasPendingInteraction =
+    pendingBatches.some((batch) =>
+      batch.requests.some(
+        (request) =>
+          isRequiredKind(request.kind) && !batch.answered.has(request.requestId),
+      ),
+    ) ||
+    agent.data.messages.some((message) =>
+      message.parts.some(
+        (part) => part.type === "authorization" && part.state === "required",
+      ),
+    );
   const composerDisabled =
     readOnly || chat.status === "completed" || hasPendingInteraction;
   const visibleMessages =
@@ -236,6 +394,15 @@ function ChatThreadSession({
           ),
         ]
       : agent.data.messages;
+
+  useEffect(() => {
+    if (!retryInput || retryRefetchedRef.current) {
+      return;
+    }
+    retryRefetchedRef.current = true;
+    void refetchPendingInput();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [retryInput]);
 
   useEffect(() => {
     if (!retryInput || retrySentRef.current || agent.status !== "ready") {
@@ -265,7 +432,7 @@ function ChatThreadSession({
       pendingSentRef.current = false;
       setLocalError(errorMessage(error));
     });
-  }, [agent, pendingUserMessage, readOnly]);
+  }, [agent, pendingUserMessage, readOnly, retryInput, pendingSentRef]);
 
   const handleSubmit = async (message: PromptInputMessage): Promise<void> => {
     const text = message.text.trim();
@@ -282,13 +449,59 @@ function ChatThreadSession({
     }
   };
 
-  const handleInputResponses = async (responses: readonly InputResponse[]): Promise<void> => {
-    setLocalError(null);
-    try {
-      await agent.respond(responses);
-    } catch (error) {
-      setLocalError(errorMessage(error));
+  /**
+   * Eve resolves an input batch as a whole: the first response settles a
+   * dismissable batch and every unanswered request reaches the model as
+   * `{ status: "ignored" }`. Answers are therefore held per batch until every
+   * still-open request in that batch has one, and the payload is exactly that
+   * batch's answers — never a union across batches, which can be parked
+   * independently (subagent-proxied requests).
+   */
+  const handleInputResponse = async (response: InputResponse): Promise<void> => {
+    const batch = pendingBatchesRef.current.find((candidate) =>
+      candidate.requests.some(
+        (request) =>
+          request.requestId === response.requestId &&
+          !candidate.answered.has(request.requestId),
+      ),
+    );
+    if (!batch) {
+      return;
     }
+
+    const drafts = new Map(draftResponsesRef.current).set(response.requestId, response);
+    const unanswered = batch.requests.filter(
+      (request) => !batch.answered.has(request.requestId),
+    );
+    const answers = unanswered.map((request) => drafts.get(request.requestId));
+    if (answers.some((answer) => answer === undefined)) {
+      setDrafts(drafts);
+      return;
+    }
+
+    // Drafts stay until a reconcile confirms the batch closed, so a send that
+    // never reached Eve reopens with every answer intact. The close below is
+    // optimistic; onError/onFinish refetch the ledger either way.
+    setDrafts(drafts);
+    setLocalError(null);
+    setPendingBatches(
+      pendingBatchesRef.current.filter((candidate) => candidate.key !== batch.key),
+    );
+    try {
+      await agent.respond(answers.filter((answer) => answer !== undefined));
+    } catch (error) {
+      // Only a turn refused before it started rejects here; a transport
+      // failure settles through `onError` instead.
+      setLocalError(errorMessage(error));
+      void refetchPendingInput();
+    }
+  };
+
+  const inputRequests: InputRequestBatch = {
+    canRespond: !readOnly && !isBusy && chat.status !== "completed",
+    drafts: draftResponses,
+    pending: pendingRequestIds,
+    respond: handleInputResponse,
   };
 
   const handleStop = (): void => {
@@ -314,8 +527,11 @@ function ChatThreadSession({
         ),
       )
       .catch(() => {
-        // The local stream is already stopped. A later stream replay will
-        // reconcile the authoritative turn state if cooperative cancel fails.
+        // The local stream is already stopped; the reconcile below reads
+        // whatever the proxy recorded about the cancel.
+      })
+      .finally(() => {
+        void refetchPendingInput();
       });
   };
 
@@ -333,14 +549,13 @@ function ChatThreadSession({
             ) : (
               visibleMessages.map((message, index) => (
                 <EveMessageView
-                  canRespond={!readOnly && !isBusy && chat.status !== "completed"}
+                  inputRequests={inputRequests}
                   isStreaming={
                     agent.status === "streaming" &&
                     index === visibleMessages.length - 1
                   }
                   key={message.id}
                   message={message}
-                  onInputResponses={handleInputResponses}
                 />
               ))
             )}

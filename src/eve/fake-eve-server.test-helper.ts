@@ -30,6 +30,8 @@ export interface FakeEveServerOptions {
   readonly streamEvents?: readonly unknown[];
   /** Emit stream events without ending the response, like eve 0.18.x agents. */
   readonly holdStreamOpen?: boolean;
+  /** Eve answers `no_active_turn` when a cancel arrives between turns. */
+  readonly cancelStatus?: "accepted" | "no_active_turn";
 }
 
 /** Eve stamped stream events with `meta` from stream version 20 (Eve 0.29) on. */
@@ -197,11 +199,15 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
 
       const cancelMatch = url.pathname.match(/^\/eve\/v1\/session\/(ses_\d+)\/cancel$/);
       if (request.method === "POST" && cancelMatch) {
-        writeJson(response, 202, {
-          ok: true,
-          sessionId: cancelMatch[1],
-          status: "accepted",
-        });
+        // Eve's CancelTurnResponseSchema is strict: only the accepted variant
+        // names the session.
+        writeJson(
+          response,
+          202,
+          options.cancelStatus === "no_active_turn"
+            ? { ok: true, status: "no_active_turn" }
+            : { ok: true, sessionId: cancelMatch[1], status: "accepted" },
+        );
         return;
       }
 

@@ -1,9 +1,9 @@
 "use client";
 
+import type { ToolStatus } from "@/components/ai-elements/tool";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import type { ToolUIPart } from "ai";
 import type { ComponentProps, ReactNode } from "react";
 import { createContext, useContext, useMemo } from "react";
 
@@ -37,7 +37,7 @@ type ToolUIPartApproval =
 
 interface ConfirmationContextValue {
   approval: ToolUIPartApproval;
-  state: ToolUIPart["state"];
+  state: ToolStatus;
 }
 
 const ConfirmationContext = createContext<ConfirmationContextValue | null>(
@@ -56,7 +56,7 @@ const useConfirmation = () => {
 
 export type ConfirmationProps = ComponentProps<typeof Alert> & {
   approval?: ToolUIPartApproval;
-  state: ToolUIPart["state"];
+  state: ToolStatus;
 };
 
 export const Confirmation = ({

@@ -2,6 +2,7 @@ import React from "react";
 import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import type { EveMessage, EveMessagePart } from "eve/react";
+import type { InputResponse } from "eve/client";
 
 import { EveMessageView } from "@/components/eve-message";
 
@@ -27,10 +28,14 @@ function loadSkillPart(overrides: Record<string, unknown> = {}): EveMessagePart 
 function renderPart(part: EveMessagePart): void {
   render(
     React.createElement(EveMessageView, {
-      canRespond: false,
+      inputRequests: {
+        canRespond: false,
+        drafts: new Map<string, InputResponse>(),
+        pending: new Set<string>(),
+        respond: vi.fn(),
+      },
       isStreaming: false,
       message: message(part),
-      onInputResponses: vi.fn(),
     }),
   );
 }

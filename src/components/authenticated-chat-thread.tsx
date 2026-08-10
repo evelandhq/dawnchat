@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from "react";
 import type { UserContent } from "ai";
-import type { MessageStreamEvent } from "eve/client";
 import { CircleAlert } from "lucide-react";
 
 import {
@@ -13,11 +12,19 @@ import { useEvelandIdentity } from "@/components/identity-provider";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
+import {
+  EMPTY_PENDING_INPUT,
+  type ChatEvent,
+  type PendingInputState,
+} from "@/eve/proxy-contract";
 import { EvelandIdentityError } from "@/identity/client";
 
 type ChatPayload = {
-  chat: ChatThreadSummary & { pendingUserMessage: UserContent | null };
-  events: MessageStreamEvent[];
+  chat: ChatThreadSummary & {
+    pendingUserMessage: UserContent | null;
+    pendingInput?: PendingInputState;
+  };
+  events: ChatEvent[];
 };
 
 export function AuthenticatedChatThread({
@@ -194,6 +201,7 @@ export function AuthenticatedChatThread({
         <ChatThread
           chat={state.data.chat}
           events={state.data.events}
+          pendingInput={state.data.chat.pendingInput ?? EMPTY_PENDING_INPUT}
           pendingUserMessage={state.data.chat.pendingUserMessage}
           readOnly={!state.available}
           getAccessToken={

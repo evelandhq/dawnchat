@@ -4,6 +4,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ClientSessionState, MessageStreamEvent } from "eve/client";
 
 import { ChatThread, type ChatThreadSummary } from "@/components/chat-thread";
+import type { ChatEvent, PendingInputState } from "@/eve/proxy-contract";
 
 const refreshMock = vi.fn();
 
@@ -54,6 +55,31 @@ function ndjson(events: readonly unknown[]): Response {
     headers: { "content-type": "application/x-ndjson; charset=utf-8" },
   });
 }
+
+const EMPTY_PENDING: PendingInputState = { batches: [] };
+
+/** Ledger fixture: what the proxy says Eve is still parked on. */
+function pendingBatches(
+  ...batches: Array<{
+    requests: Array<{ requestId: string; kind: string }>;
+    answered?: string[];
+  }>
+): PendingInputState {
+  return {
+    batches: batches.map((batch, index) => ({
+      eventIndex: index + 1,
+      requests: batch.requests,
+      answered: batch.answered ?? [],
+    })),
+  };
+}
+
+function pendingInputResponse(state: PendingInputState = EMPTY_PENDING): Response {
+  return Response.json({ pendingInput: state });
+}
+
+const isPendingInputCall = (call: readonly unknown[]): boolean =>
+  String(call[0]).includes("/pending-input");
 
 describe("ChatThread with Eve and AI Elements", () => {
   afterEach(() => {
@@ -140,7 +166,13 @@ describe("ChatThread with Eve and AI Elements", () => {
       },
     ]);
 
-    render(<ChatThread chat={chat({ sessionState: { sessionId: "ses_1", streamIndex: 8 } })} events={events} />);
+    render(
+      <ChatThread
+        chat={chat({ sessionState: { sessionId: "ses_1", streamIndex: 8 } })}
+        events={events}
+        pendingInput={EMPTY_PENDING}
+      />,
+    );
 
     expect(screen.getByText("Read this report")).toBeInTheDocument();
     expect(screen.getByText("1.docx")).toBeInTheDocument();
@@ -232,20 +264,443 @@ describe("ChatThread with Eve and AI Elements", () => {
       <ChatThread
         chat={chat({ sessionState: { sessionId: "ses_1", streamIndex: 4 } })}
         events={events}
+        pendingInput={pendingBatches({
+          requests: [{ requestId: "req_1", kind: "tool-approval" }],
+        })}
       />,
     );
 
     expect(screen.getByText("Delete record 7?")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Allow" }));
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/chats/chat_rich/agent/eve/v1/session/ses_1");
-    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+    const turnCalls = () =>
+      fetchMock.mock.calls.filter((call) => !isPendingInputCall(call));
+    await waitFor(() => expect(turnCalls()).toHaveLength(2));
+    expect(turnCalls()[0]?.[0]).toBe("/api/chats/chat_rich/agent/eve/v1/session/ses_1");
+    expect(JSON.parse(String(turnCalls()[0]?.[1]?.body))).toEqual({
       inputResponses: [{ requestId: "req_1", optionId: "approve" }],
     });
-    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+    expect(turnCalls()[1]?.[0]).toBe(
       "/api/chats/chat_rich/agent/eve/v1/session/ses_1/stream?startIndex=4",
     );
+  });
+
+  it("holds a multi-question batch until every question is answered", async () => {
+    const events = stampEvents([
+      { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
+      { type: "step.started", data: { sequence: 1, stepIndex: 0, turnId: "turn_1" } },
+      {
+        type: "input.requested",
+        data: {
+          requests: [
+            {
+              requestId: "call_metric",
+              kind: "question",
+              prompt: "Which paid-user metric?",
+              display: "select",
+              options: [
+                { id: "subscription", label: "Subscribers" },
+                { id: "gmv_payors", label: "Payors" },
+              ],
+              action: {
+                kind: "tool-call",
+                callId: "call_metric",
+                toolName: "ask_question",
+                input: {},
+              },
+            },
+            {
+              requestId: "call_baseline",
+              kind: "question",
+              prompt: "Which comparison baseline?",
+              display: "select",
+              options: [
+                { id: "full_last_month", label: "Whole last month" },
+                { id: "same_period", label: "Same period last month" },
+              ],
+              action: {
+                kind: "tool-call",
+                callId: "call_baseline",
+                toolName: "ask_question",
+                input: {},
+              },
+            },
+          ],
+          sequence: 2,
+          stepIndex: 0,
+          turnId: "turn_1",
+        },
+      },
+      { type: "turn.completed", data: { sequence: 3, turnId: "turn_1" } },
+      {
+        type: "session.waiting",
+        data: { wait: "next-user-message", continuationToken: "ses_1" },
+      },
+    ]);
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ sessionId: "ses_1" }), {
+          status: 200,
+          headers: { "content-type": "application/json", "x-eve-session-id": "ses_1" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        ndjson([{ type: "session.waiting", data: { wait: "next-user-message" } }]),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({ sessionState: { sessionId: "ses_1", streamIndex: 5 } })}
+        events={events}
+        pendingInput={pendingBatches({
+          requests: [
+            { requestId: "call_metric", kind: "question" },
+            { requestId: "call_baseline", kind: "question" },
+          ],
+        })}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Same period last month" }));
+    expect(await screen.findByText(/Selected: Same period last month/)).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
+    // A draft is revisable until the batch goes out.
+    expect(screen.getByRole("button", { name: "Same period last month" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByRole("button", { name: "Whole last month" })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Payors" }));
+
+    const turnCalls = () =>
+      fetchMock.mock.calls.filter((call) => !isPendingInputCall(call));
+    await waitFor(() => expect(turnCalls()).toHaveLength(2));
+    expect(JSON.parse(String(turnCalls()[0]?.[1]?.body))).toEqual({
+      inputResponses: [
+        { requestId: "call_metric", optionId: "gmv_payors" },
+        { requestId: "call_baseline", optionId: "same_period" },
+      ],
+    });
+  });
+
+  it("keeps a rejected batch answerable instead of stranding it", async () => {
+    const events = stampEvents([
+      { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
+      { type: "step.started", data: { sequence: 1, stepIndex: 0, turnId: "turn_1" } },
+      {
+        type: "input.requested",
+        data: {
+          requests: [
+            {
+              requestId: "call_metric",
+              kind: "question",
+              prompt: "Which paid-user metric?",
+              display: "select",
+              options: [
+                { id: "subscription", label: "Subscribers" },
+                { id: "gmv_payors", label: "Payors" },
+              ],
+              action: {
+                kind: "tool-call",
+                callId: "call_metric",
+                toolName: "ask_question",
+                input: {},
+              },
+            },
+          ],
+          sequence: 2,
+          stepIndex: 0,
+          turnId: "turn_1",
+        },
+      },
+      {
+        type: "session.waiting",
+        data: { wait: "next-user-message", continuationToken: "ses_1" },
+      },
+    ]);
+    // The store projects the answer before it posts and never rolls that back.
+    // The refetched ledger — where the batch is still open — is what puts the
+    // controls back on screen with the drafts intact.
+    const openBatch = pendingBatches({
+      requests: [{ requestId: "call_metric", kind: "question" }],
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (isPendingInputCall([input])) {
+        return pendingInputResponse(openBatch);
+      }
+      return new Response(JSON.stringify({ error: "Unable to reach Eve agent" }), {
+        status: 502,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({ sessionState: { sessionId: "ses_1", streamIndex: 4 } })}
+        events={events}
+        pendingInput={openBatch}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Payors" }));
+
+    await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+    expect(await screen.findByRole("button", { name: "Subscribers" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Payors" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(fetchMock.mock.calls.some((call) => isPendingInputCall(call))).toBe(true);
+  });
+
+  it("unlocks a chat whose stored stream never recorded the resuming turn", () => {
+    const streamed = stampEvents([
+      { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
+      { type: "step.started", data: { sequence: 1, stepIndex: 0, turnId: "turn_1" } },
+      {
+        type: "input.requested",
+        data: {
+          requests: [
+            {
+              requestId: "call_metric",
+              kind: "question",
+              prompt: "Which paid-user metric?",
+              display: "select",
+              options: [{ id: "gmv_payors", label: "Payors" }],
+              action: {
+                kind: "tool-call",
+                callId: "call_metric",
+                toolName: "ask_question",
+                input: {},
+              },
+            },
+          ],
+          sequence: 2,
+          stepIndex: 0,
+          turnId: "turn_1",
+        },
+      },
+      {
+        type: "session.waiting",
+        data: { wait: "next-user-message", continuationToken: "ses_1" },
+      },
+    ]);
+    // The proxy stores the answer when it forwards the turn, but the stream is
+    // persisted as the browser reads it — a tab closed on the click records the
+    // answer and never the `turn.started` that resumed the session.
+    const events: ChatEvent[] = [
+      ...streamed,
+      {
+        type: "client.input.responded",
+        data: {
+          createdAt: 1_760_000_000_000,
+          responses: [{ requestId: "call_metric", optionId: "gmv_payors" }],
+        },
+      },
+    ];
+
+    render(
+      <ChatThread
+        chat={chat({ sessionState: { sessionId: "ses_1", streamIndex: 4 } })}
+        events={events}
+        pendingInput={EMPTY_PENDING}
+      />,
+    );
+
+    expect(screen.getByLabelText("Message")).toBeEnabled();
+  });
+
+  it("keeps a partly answered approval batch answerable across the deferred turn", () => {
+    const events = stampEvents([
+      { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
+      { type: "step.started", data: { sequence: 1, stepIndex: 0, turnId: "turn_1" } },
+      {
+        type: "input.requested",
+        data: {
+          requests: [
+            {
+              requestId: "call_delete",
+              kind: "tool-approval",
+              prompt: "Delete record 7?",
+              display: "confirmation",
+              options: [
+                { id: "approve", label: "Allow", style: "primary" },
+                { id: "deny", label: "Deny", style: "danger" },
+              ],
+              action: {
+                kind: "tool-call",
+                callId: "call_delete",
+                toolName: "delete_record",
+                input: { id: 7 },
+              },
+            },
+          ],
+          sequence: 2,
+          stepIndex: 0,
+          turnId: "turn_1",
+        },
+      },
+      {
+        type: "session.waiting",
+        data: { wait: "next-user-message", continuationToken: "ses_1" },
+      },
+      // Eve re-parks a required batch behind a fresh turn preamble, so
+      // `turn.started` alone cannot mean the approval was resolved.
+      { type: "turn.started", data: { sequence: 3, turnId: "turn_2" } },
+      { type: "turn.completed", data: { sequence: 3, turnId: "turn_2" } },
+      {
+        type: "session.waiting",
+        data: { wait: "next-user-message", continuationToken: "ses_1" },
+      },
+    ]);
+
+    render(
+      <ChatThread
+        chat={chat({ sessionState: { sessionId: "ses_1", streamIndex: 6 } })}
+        events={events}
+        pendingInput={pendingBatches({
+          requests: [{ requestId: "call_delete", kind: "tool-approval" }],
+        })}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Allow" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Deny" })).toBeEnabled();
+    expect(screen.getByLabelText("Message")).toBeDisabled();
+  });
+
+  it("reopens the composer for a replayed batch Eve is no longer parked on", () => {
+    const events = stampEvents([
+      { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
+      { type: "step.started", data: { sequence: 1, stepIndex: 0, turnId: "turn_1" } },
+      {
+        type: "input.requested",
+        data: {
+          requests: [
+            {
+              requestId: "call_metric",
+              kind: "question",
+              prompt: "Which paid-user metric?",
+              display: "select",
+              options: [{ id: "subscription", label: "Subscribers" }],
+              action: {
+                kind: "tool-call",
+                callId: "call_metric",
+                toolName: "ask_question",
+                input: {},
+              },
+            },
+          ],
+          sequence: 2,
+          stepIndex: 0,
+          turnId: "turn_1",
+        },
+      },
+      { type: "turn.completed", data: { sequence: 3, turnId: "turn_1" } },
+      {
+        type: "session.waiting",
+        data: { wait: "next-user-message", continuationToken: "ses_1" },
+      },
+      // Answering the batch starts a new turn; Eve never marks the question
+      // itself resolved, so the stored part stays `approval-requested`.
+      { type: "turn.started", data: { sequence: 4, turnId: "turn_2" } },
+      {
+        type: "message.completed",
+        data: {
+          message: "Subscribers grew 12%.",
+          finishReason: "stop",
+          sequence: 5,
+          stepIndex: 0,
+          turnId: "turn_2",
+        },
+      },
+      { type: "turn.completed", data: { sequence: 6, turnId: "turn_2" } },
+      {
+        type: "session.waiting",
+        data: { wait: "next-user-message", continuationToken: "ses_1" },
+      },
+    ]);
+
+    render(
+      <ChatThread
+        chat={chat({ sessionState: { sessionId: "ses_1", streamIndex: 10 } })}
+        events={events}
+        pendingInput={EMPTY_PENDING}
+      />,
+    );
+
+    expect(screen.getByLabelText("Message")).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Subscribers" })).not.toBeInTheDocument();
+    // Nothing recorded the answer, so the card must not claim one.
+    expect(screen.getByText("Dismissed")).toBeInTheDocument();
+    expect(screen.queryByText("Responded")).not.toBeInTheDocument();
+  });
+
+  it("replays the option a stored response picked", async () => {
+    const streamed = stampEvents([
+      { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
+      { type: "step.started", data: { sequence: 1, stepIndex: 0, turnId: "turn_1" } },
+      {
+        type: "input.requested",
+        data: {
+          requests: [
+            {
+              requestId: "call_metric",
+              kind: "question",
+              prompt: "Which paid-user metric?",
+              display: "select",
+              options: [
+                { id: "subscription", label: "Subscribers" },
+                { id: "gmv_payors", label: "Payors" },
+              ],
+              action: {
+                kind: "tool-call",
+                callId: "call_metric",
+                toolName: "ask_question",
+                input: {},
+              },
+            },
+          ],
+          sequence: 2,
+          stepIndex: 0,
+          turnId: "turn_1",
+        },
+      },
+      {
+        type: "session.waiting",
+        data: { wait: "next-user-message", continuationToken: "ses_1" },
+      },
+      { type: "turn.started", data: { sequence: 3, turnId: "turn_2" } },
+    ]);
+    // The proxy records the answer between the parked turn and the one it starts.
+    const events: ChatEvent[] = [
+      ...streamed.slice(0, 4),
+      {
+        type: "client.input.responded",
+        data: {
+          createdAt: 1_760_000_000_000,
+          responses: [{ requestId: "call_metric", optionId: "gmv_payors" }],
+        },
+      },
+      ...streamed.slice(4),
+    ];
+
+    render(
+      <ChatThread
+        chat={chat({ sessionState: { sessionId: "ses_1", streamIndex: 6 } })}
+        events={events}
+        pendingInput={EMPTY_PENDING}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /ask_question/i }));
+
+    expect(await screen.findByText(/Responded: Payors/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Message")).toBeEnabled();
   });
 
   it("submits freeform HITL text through the same continuation contract", async () => {
@@ -298,13 +753,23 @@ describe("ChatThread with Eve and AI Elements", () => {
       .mockResolvedValueOnce(ndjson([{ type: "session.waiting", data: { wait: "next-user-message" } }]));
     vi.stubGlobal("fetch", fetchMock);
 
-    render(<ChatThread chat={chat({ sessionState: { sessionId: "ses_1", streamIndex: 4 } })} events={events} />);
+    render(
+      <ChatThread
+        chat={chat({ sessionState: { sessionId: "ses_1", streamIndex: 4 } })}
+        events={events}
+        pendingInput={pendingBatches({
+          requests: [{ requestId: "req_text", kind: "question" }],
+        })}
+      />,
+    );
 
     fireEvent.change(screen.getByLabelText("Response"), { target: { value: "Proceed carefully" } });
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
-    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+    const turnCalls = () =>
+      fetchMock.mock.calls.filter((call) => !isPendingInputCall(call));
+    await waitFor(() => expect(turnCalls()).toHaveLength(2));
+    expect(JSON.parse(String(turnCalls()[0]?.[1]?.body))).toEqual({
       inputResponses: [{ requestId: "req_text", text: "Proceed carefully" }],
     });
   });
@@ -337,7 +802,7 @@ describe("ChatThread with Eve and AI Elements", () => {
       },
     ]);
 
-    render(<ChatThread chat={chat()} events={events} />);
+    render(<ChatThread chat={chat()} events={events} pendingInput={EMPTY_PENDING} />);
     fireEvent.click(screen.getByRole("button", { name: /count_rows/i }));
 
     expect(await screen.findByText("0")).toBeInTheDocument();
@@ -377,6 +842,7 @@ describe("ChatThread with Eve and AI Elements", () => {
       <ChatThread
         chat={chat({ id: "chat_pending", sessionState: null })}
         events={[]}
+        pendingInput={EMPTY_PENDING}
         pendingUserMessage="Hello Eve"
       />,
     );
@@ -384,7 +850,7 @@ describe("ChatThread with Eve and AI Elements", () => {
     expect(await screen.findByText("Hello from Eve.")).toBeInTheDocument();
     expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/chats/chat_pending/agent/eve/v1/session");
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({ message: "Hello Eve" });
-    expect(refreshMock).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(refreshMock).toHaveBeenCalledTimes(1));
   });
 
   it("sends persisted first-message attachments after the chat route mounts", async () => {
@@ -414,15 +880,18 @@ describe("ChatThread with Eve and AI Elements", () => {
       <ChatThread
         chat={chat({ id: "chat_pending_file", sessionState: null })}
         events={[]}
+        pendingInput={EMPTY_PENDING}
         pendingUserMessage={pendingMessage}
       />,
     );
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
-    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+    const turnCalls = () =>
+      fetchMock.mock.calls.filter((call) => !isPendingInputCall(call));
+    await waitFor(() => expect(turnCalls()).toHaveLength(2));
+    expect(turnCalls()[0]?.[0]).toBe(
       "/api/chats/chat_pending_file/agent/eve/v1/session",
     );
-    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+    expect(JSON.parse(String(turnCalls()[0]?.[1]?.body))).toEqual({
       message: pendingMessage,
     });
   });
@@ -472,11 +941,14 @@ describe("ChatThread with Eve and AI Elements", () => {
       <ChatThread
         chat={chat({ id: "chat_pending_preview", sessionState: null })}
         events={[]}
+        pendingInput={EMPTY_PENDING}
         pendingUserMessage={pendingMessage}
       />,
     );
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const turnCalls = () =>
+      fetchMock.mock.calls.filter((call) => !isPendingInputCall(call));
+    await waitFor(() => expect(turnCalls()).toHaveLength(1));
     expect(screen.getByRole("img", { name: "diagram.png" })).toBeInTheDocument();
 
     resolveSession(
@@ -485,7 +957,7 @@ describe("ChatThread with Eve and AI Elements", () => {
         headers: { "content-type": "application/json", "x-eve-session-id": "ses_1" },
       }),
     );
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(turnCalls()).toHaveLength(2));
     await waitFor(() =>
       expect(screen.getAllByRole("img", { name: "diagram.png" })).toHaveLength(1),
     );
@@ -509,7 +981,13 @@ describe("ChatThread with Eve and AI Elements", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    render(<ChatThread chat={chat({ id: "chat_file", sessionState: null })} events={[]} />);
+    render(
+      <ChatThread
+        chat={chat({ id: "chat_file", sessionState: null })}
+        events={[]}
+        pendingInput={EMPTY_PENDING}
+      />,
+    );
 
     fireEvent.change(screen.getByLabelText("Upload files"), { target: { files: [file] } });
     fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Review this" } });
@@ -543,6 +1021,9 @@ describe("ChatThread with Eve and AI Elements", () => {
     const fetchMock = vi.fn(
       async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
         const url = String(input);
+        if (url.includes("/pending-input")) {
+          return pendingInputResponse();
+        }
         if (url.endsWith("/cancel")) {
           return Response.json({
             ok: true,
@@ -588,6 +1069,7 @@ describe("ChatThread with Eve and AI Elements", () => {
       <ChatThread
         chat={chat({ sessionState: { sessionId: "ses_1", streamIndex: 0 } })}
         events={[]}
+        pendingInput={EMPTY_PENDING}
         getCallerToken={getCallerToken}
       />,
     );
@@ -614,6 +1096,10 @@ describe("ChatThread with Eve and AI Elements", () => {
       },
       body: "{}",
     });
+    // Whatever the cancel did server-side, the thread re-reads the ledger.
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some((call) => isPendingInputCall(call))).toBe(true),
+    );
   });
 
   it("retries the original turn with a Caller Token after an Eveland route challenge", async () => {
@@ -667,6 +1153,7 @@ describe("ChatThread with Eve and AI Elements", () => {
       <ChatThread
         chat={chat({ id: "chat_auth", sessionState: null })}
         events={[]}
+        pendingInput={EMPTY_PENDING}
         pendingUserMessage="Authenticate me"
         getAccessToken={getAccessToken}
         getCallerToken={getCallerToken}
@@ -720,6 +1207,7 @@ describe("ChatThread with Eve and AI Elements", () => {
       <ChatThread
         chat={chat({ id: "chat_rejected_caller", sessionState: null })}
         events={[]}
+        pendingInput={EMPTY_PENDING}
         pendingUserMessage="Authenticate me once"
         getAccessToken={async () => "app-token"}
         getCallerToken={async () => "caller-token"}
@@ -756,7 +1244,7 @@ describe("ChatThread with Eve and AI Elements", () => {
       },
     ]);
 
-    render(<ChatThread chat={chat()} events={events} />);
+    render(<ChatThread chat={chat()} events={events} pendingInput={EMPTY_PENDING} />);
 
     expect(screen.getByText("Connect Notion to continue.")).toBeInTheDocument();
     expect(screen.getByText("ABCD-1234")).toBeInTheDocument();
@@ -767,13 +1255,451 @@ describe("ChatThread with Eve and AI Elements", () => {
   });
 
   it("keeps failed chats retryable while completed chats stay read-only", () => {
-    const { rerender } = render(<ChatThread chat={chat({ status: "failed" })} events={[]} />);
+    const { rerender } = render(
+      <ChatThread chat={chat({ status: "failed" })} events={[]} pendingInput={EMPTY_PENDING} />,
+    );
 
     expect(screen.getByLabelText("Message")).toBeEnabled();
     expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled();
 
-    rerender(<ChatThread chat={chat({ status: "completed" })} events={[]} />);
+    rerender(
+      <ChatThread chat={chat({ status: "completed" })} events={[]} pendingInput={EMPTY_PENDING} />,
+    );
     expect(screen.getByLabelText("Message")).toBeDisabled();
     expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
+  });
+
+  it("answers each independently parked batch on its own", async () => {
+    const events = stampEvents([
+      { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
+      { type: "step.started", data: { sequence: 1, stepIndex: 0, turnId: "turn_1" } },
+      {
+        type: "input.requested",
+        data: {
+          requests: [
+            {
+              requestId: "call_child_a",
+              kind: "question",
+              prompt: "Child A asks: which region?",
+              display: "select",
+              options: [{ id: "emea", label: "EMEA" }],
+              action: {
+                kind: "tool-call",
+                callId: "call_child_a",
+                toolName: "ask_question",
+                input: {},
+              },
+            },
+          ],
+          sequence: 2,
+          stepIndex: 0,
+          turnId: "turn_c1",
+        },
+      },
+      {
+        type: "input.requested",
+        data: {
+          requests: [
+            {
+              requestId: "call_child_b",
+              kind: "question",
+              prompt: "Child B asks: which quarter?",
+              display: "select",
+              options: [{ id: "q3", label: "Q3" }],
+              action: {
+                kind: "tool-call",
+                callId: "call_child_b",
+                toolName: "ask_question",
+                input: {},
+              },
+            },
+          ],
+          sequence: 3,
+          stepIndex: 0,
+          turnId: "turn_c2",
+        },
+      },
+      {
+        type: "session.waiting",
+        data: { wait: "next-user-message", continuationToken: "ses_1" },
+      },
+    ]);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (isPendingInputCall([input])) {
+        // The proxy settled batch A at the accepted POST; B is still parked.
+        return pendingInputResponse(
+          pendingBatches({ requests: [{ requestId: "call_child_b", kind: "question" }] }),
+        );
+      }
+      if (init?.method === "POST") {
+        return new Response(JSON.stringify({ sessionId: "ses_1" }), {
+          status: 200,
+          headers: { "content-type": "application/json", "x-eve-session-id": "ses_1" },
+        });
+      }
+      return ndjson([{ type: "session.waiting", data: { wait: "next-user-message" } }]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({ sessionState: { sessionId: "ses_1", streamIndex: 5 } })}
+        events={events}
+        pendingInput={pendingBatches(
+          { requests: [{ requestId: "call_child_a", kind: "question" }] },
+          { requests: [{ requestId: "call_child_b", kind: "question" }] },
+        )}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "EMEA" }));
+
+    // Batch A goes out alone; batch B is a separate park and stays answerable.
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(
+          (call) => !isPendingInputCall(call) && call[1]?.method === "POST",
+        ),
+      ).toBe(true),
+    );
+    const post = fetchMock.mock.calls.find(
+      (call) => !isPendingInputCall(call) && call[1]?.method === "POST",
+    );
+    expect(JSON.parse(String(post?.[1]?.body))).toEqual({
+      inputResponses: [{ requestId: "call_child_a", optionId: "emea" }],
+    });
+    expect(screen.getByRole("button", { name: "Q3" })).toBeEnabled();
+  });
+
+  it("keeps the composer open while only dismissable questions are parked", () => {
+    const events = stampEvents([
+      { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
+      { type: "step.started", data: { sequence: 1, stepIndex: 0, turnId: "turn_1" } },
+      {
+        type: "input.requested",
+        data: {
+          requests: [
+            {
+              requestId: "call_metric",
+              kind: "question",
+              prompt: "Which paid-user metric?",
+              display: "select",
+              options: [{ id: "subscription", label: "Subscribers" }],
+              action: {
+                kind: "tool-call",
+                callId: "call_metric",
+                toolName: "ask_question",
+                input: {},
+              },
+            },
+          ],
+          sequence: 2,
+          stepIndex: 0,
+          turnId: "turn_1",
+        },
+      },
+      {
+        type: "session.waiting",
+        data: { wait: "next-user-message", continuationToken: "ses_1" },
+      },
+    ]);
+
+    render(
+      <ChatThread
+        chat={chat({ sessionState: { sessionId: "ses_1", streamIndex: 4 } })}
+        events={events}
+        pendingInput={pendingBatches({
+          requests: [{ requestId: "call_metric", kind: "question" }],
+        })}
+      />,
+    );
+
+    // A plain message is Eve's own dismiss gesture for a question batch, so
+    // the composer must not lock; the option stays clickable alongside it.
+    expect(screen.getByLabelText("Message")).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Subscribers" })).toBeEnabled();
+  });
+
+  it("reconciles open batches when a turn boundary arrives from another actor", async () => {
+    const events = stampEvents([
+      { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
+      { type: "step.started", data: { sequence: 1, stepIndex: 0, turnId: "turn_1" } },
+      {
+        type: "input.requested",
+        data: {
+          requests: [
+            {
+              requestId: "call_metric",
+              kind: "question",
+              prompt: "Which paid-user metric?",
+              display: "select",
+              options: [{ id: "subscription", label: "Subscribers" }],
+              action: {
+                kind: "tool-call",
+                callId: "call_metric",
+                toolName: "ask_question",
+                input: {},
+              },
+            },
+          ],
+          sequence: 2,
+          stepIndex: 0,
+          turnId: "turn_1",
+        },
+      },
+      {
+        type: "session.waiting",
+        data: { wait: "next-user-message", continuationToken: "ses_1" },
+      },
+    ]);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (isPendingInputCall([input])) {
+        // The other actor settled the batch; the ledger no longer holds it.
+        return pendingInputResponse();
+      }
+      if (init?.method === "POST") {
+        return new Response(JSON.stringify({ sessionId: "ses_1" }), {
+          status: 200,
+          headers: { "content-type": "application/json", "x-eve-session-id": "ses_1" },
+        });
+      }
+      return ndjson([
+        { type: "turn.started", data: { sequence: 3, turnId: "turn_2" } },
+        { type: "session.waiting", data: { wait: "next-user-message" } },
+      ]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({ sessionState: { sessionId: "ses_1", streamIndex: 4 } })}
+        events={events}
+        pendingInput={pendingBatches({
+          requests: [{ requestId: "call_metric", kind: "question" }],
+        })}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "Just answer generally" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some((call) => isPendingInputCall(call))).toBe(true),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Subscribers" })).not.toBeInTheDocument(),
+    );
+  });
+
+  it("ignores a stale ledger response that raced a newer live batch", async () => {
+    const events = stampEvents([
+      { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
+      { type: "step.started", data: { sequence: 1, stepIndex: 0, turnId: "turn_1" } },
+      {
+        type: "input.requested",
+        data: {
+          requests: [
+            {
+              requestId: "call_a",
+              kind: "question",
+              prompt: "Old question?",
+              display: "select",
+              options: [{ id: "old", label: "Old option" }],
+              action: {
+                kind: "tool-call",
+                callId: "call_a",
+                toolName: "ask_question",
+                input: {},
+              },
+            },
+          ],
+          sequence: 2,
+          stepIndex: 0,
+          turnId: "turn_1",
+        },
+      },
+      {
+        type: "session.waiting",
+        data: { wait: "next-user-message", continuationToken: "ses_1" },
+      },
+    ]);
+    const currentState = pendingBatches(
+      { requests: [{ requestId: "call_a", kind: "question" }] },
+      { requests: [{ requestId: "call_b", kind: "question" }] },
+    );
+    let resolveStale!: (response: Response) => void;
+    const staleResponse = new Promise<Response>((resolve) => {
+      resolveStale = resolve;
+    });
+    let ledgerReads = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (isPendingInputCall([input])) {
+        ledgerReads += 1;
+        // The first read races the stream: it was captured before batch B
+        // existed and resolves last.
+        return ledgerReads === 1 ? staleResponse : pendingInputResponse(currentState);
+      }
+      if (init?.method === "POST") {
+        return new Response(JSON.stringify({ sessionId: "ses_1" }), {
+          status: 200,
+          headers: { "content-type": "application/json", "x-eve-session-id": "ses_1" },
+        });
+      }
+      return ndjson([
+        { type: "turn.started", data: { sequence: 3, turnId: "turn_2" } },
+        {
+          type: "input.requested",
+          data: {
+            requests: [
+              {
+                requestId: "call_b",
+                kind: "question",
+                prompt: "New question?",
+                display: "select",
+                options: [{ id: "fresh", label: "Fresh option" }],
+                action: {
+                  kind: "tool-call",
+                  callId: "call_b",
+                  toolName: "ask_question",
+                  input: {},
+                },
+              },
+            ],
+            sequence: 4,
+            stepIndex: 0,
+            turnId: "turn_2",
+          },
+        },
+        { type: "session.waiting", data: { wait: "next-user-message" } },
+      ]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({ sessionState: { sessionId: "ses_1", streamIndex: 4 } })}
+        events={events}
+        pendingInput={pendingBatches({
+          requests: [{ requestId: "call_a", kind: "question" }],
+        })}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "Also consider this" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() => expect(ledgerReads).toBeGreaterThanOrEqual(2));
+    expect(await screen.findByRole("button", { name: "Fresh option" })).toBeEnabled();
+
+    resolveStale(pendingInputResponse(EMPTY_PENDING));
+
+    // The stale read was captured before batch B opened; applying it would
+    // erase a park Eve still holds.
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.filter((call) => isPendingInputCall(call)).length)
+        .toBeGreaterThanOrEqual(2),
+    );
+    expect(screen.getByRole("button", { name: "Fresh option" })).toBeEnabled();
+  });
+
+  it("commits first-time freeform text on blur so the batch can complete", async () => {
+    const events = stampEvents([
+      { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
+      { type: "step.started", data: { sequence: 1, stepIndex: 0, turnId: "turn_1" } },
+      {
+        type: "input.requested",
+        data: {
+          requests: [
+            {
+              requestId: "q_text",
+              kind: "question",
+              prompt: "Anything to add?",
+              display: "text",
+              allowFreeform: true,
+              action: {
+                kind: "tool-call",
+                callId: "q_text",
+                toolName: "ask_question",
+                input: {},
+              },
+            },
+            {
+              requestId: "q_opt",
+              kind: "question",
+              prompt: "Proceed?",
+              display: "select",
+              options: [{ id: "go", label: "Go ahead" }],
+              action: {
+                kind: "tool-call",
+                callId: "q_opt",
+                toolName: "ask_question",
+                input: {},
+              },
+            },
+          ],
+          sequence: 2,
+          stepIndex: 0,
+          turnId: "turn_1",
+        },
+      },
+      {
+        type: "session.waiting",
+        data: { wait: "next-user-message", continuationToken: "ses_1" },
+      },
+    ]);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (isPendingInputCall([input])) {
+        return pendingInputResponse();
+      }
+      if (init?.method === "POST") {
+        return new Response(JSON.stringify({ sessionId: "ses_1" }), {
+          status: 200,
+          headers: { "content-type": "application/json", "x-eve-session-id": "ses_1" },
+        });
+      }
+      return ndjson([{ type: "session.waiting", data: { wait: "next-user-message" } }]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({ sessionState: { sessionId: "ses_1", streamIndex: 4 } })}
+        events={events}
+        pendingInput={pendingBatches({
+          requests: [
+            { requestId: "q_text", kind: "question" },
+            { requestId: "q_opt", kind: "question" },
+          ],
+        })}
+      />,
+    );
+
+    // Fill the text card and move straight to the next one — no Enter.
+    fireEvent.change(screen.getByLabelText("Response"), {
+      target: { value: "All good" },
+    });
+    fireEvent.blur(screen.getByLabelText("Response"));
+    fireEvent.click(screen.getByRole("button", { name: "Go ahead" }));
+
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(
+          (call) => !isPendingInputCall(call) && call[1]?.method === "POST",
+        ),
+      ).toBe(true),
+    );
+    const post = fetchMock.mock.calls.find(
+      (call) => !isPendingInputCall(call) && call[1]?.method === "POST",
+    );
+    expect(JSON.parse(String(post?.[1]?.body))).toEqual({
+      inputResponses: [
+        { requestId: "q_text", text: "All good" },
+        { requestId: "q_opt", optionId: "go" },
+      ],
+    });
   });
 });
