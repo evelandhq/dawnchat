@@ -10,6 +10,7 @@ import type {
 } from "eve/react";
 import type { InputResponse } from "eve/client";
 import {
+  BookOpenIcon,
   CheckCircleIcon,
   ExternalLinkIcon,
   KeyRoundIcon,
@@ -32,7 +33,14 @@ import {
 } from "@/components/ai-elements/confirmation";
 import { Message, MessageContent, MessageResponse } from "@/components/ai-elements/message";
 import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-elements/reasoning";
-import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput } from "@/components/ai-elements/tool";
+import {
+  getStatusBadge,
+  Tool,
+  ToolContent,
+  ToolHeader,
+  ToolInput,
+  ToolOutput,
+} from "@/components/ai-elements/tool";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -110,6 +118,15 @@ function EveMessagePartView({
     case "authorization":
       return <AuthorizationPart part={part} />;
     case "dynamic-tool":
+      if (isLoadSkillPart(part)) {
+        return (
+          <LoadSkillPart
+            canRespond={canRespond}
+            onInputResponses={onInputResponses}
+            part={part}
+          />
+        );
+      }
       return (
         <Tool defaultOpen={part.state === "approval-requested"}>
           <ToolHeader
@@ -130,6 +147,62 @@ function EveMessagePartView({
         </Tool>
       );
   }
+}
+
+/**
+ * The eve metadata classifies framework skill loads; the tool name covers a
+ * part whose projection carried no eve metadata.
+ */
+function isLoadSkillPart(part: EveDynamicToolPart): boolean {
+  return part.toolMetadata?.eve?.kind === "load-skill" || part.toolName === "load_skill";
+}
+
+/**
+ * A skill load renders as a name and a lifecycle badge, with no expandable
+ * body: the tool result is the agent's own instruction text, which must never
+ * reach the transcript. Eve's own dev TUI and Slack channel present it the
+ * same way.
+ */
+function LoadSkillPart({
+  canRespond,
+  onInputResponses,
+  part,
+}: {
+  canRespond: boolean;
+  onInputResponses: (responses: readonly InputResponse[]) => void | Promise<void>;
+  part: EveDynamicToolPart;
+}): React.ReactElement {
+  const skill = skillNameFromInput(part.input);
+
+  return (
+    <div className="not-prose mb-4 w-full rounded-md border">
+      <div className="flex items-center gap-2 p-3">
+        <BookOpenIcon className="size-4 text-muted-foreground" />
+        <span className="font-medium text-sm">
+          {part.state === "output-available" ? "Loaded" : "Load"} skill
+          {skill ? ` · ${skill}` : ""}
+        </span>
+        {getStatusBadge(part.state)}
+      </div>
+      {part.toolMetadata?.eve?.inputRequest ? (
+        <div className="px-4 pb-4">
+          <InputRequestPart
+            canRespond={canRespond}
+            onInputResponses={onInputResponses}
+            part={part}
+          />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function skillNameFromInput(input: unknown): string | undefined {
+  if (typeof input !== "object" || input === null) {
+    return undefined;
+  }
+  const skill = (input as { skill?: unknown }).skill;
+  return typeof skill === "string" && skill.trim().length > 0 ? skill.trim() : undefined;
 }
 
 function FilePart({ part }: { part: EveFilePart }): React.ReactElement {
