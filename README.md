@@ -41,6 +41,58 @@ metadata cannot redirect a credential to another host.
 The former Gateway URL discovery flow and `/.well-known/eve/agents.json`
 directory protocol are not supported.
 
+## Eve HITL gaps handled here
+
+Eve parks a turn on a batch of input requests, but which batches a session is
+parked on lives only in Eve's server-side state — no stream event and no query
+exposes it, and no event ever records that a batch was answered. Both signals
+a browser could fall back on lie: an answered `ask_question` part stays
+`approval-requested` in the durable stream forever, while Eve's client store
+projects an answer as settled *before* posting it and never rolls that back.
+Upstream: [vercel/eve#1095](https://github.com/vercel/eve/issues/1095)
+proposes a durable `input.responded` event;
+[vercel/eve#1578](https://github.com/vercel/eve/pull/1578) drafts the contract
+but ships no runtime change; related
+[vercel/eve#1507](https://github.com/vercel/eve/issues/1507).
+
+**The proxy keeps a pending-input ledger** (`chats.pending_input_json`), being
+the one component that observes the truth: every `input.requested` passes
+through its stream tap (opening a batch), it alone sees which turn POSTs Eve
+accepted (settling the answered batch under Eve's own resolution rule —
+partial answers to a required batch stay parked and accumulate), and it owns
+the teardown paths (an `accepted` cancel, `turn.cancelled`, terminal session
+events, and session replacement clear all parks; a `no_active_turn` cancel and
+transient turn failures deliberately clear nothing, because Eve's park
+survived). Several batches can be open at once — subagent-proxied requests
+park independently. The client seeds from the ledger, closes optimistically on
+respond, and refetches it to reconcile on every failure or foreign turn
+boundary. Answers themselves are also stored as `client.input.responded`
+events so replays show what was picked. Chats from before the ledger derive
+their state from stored events on first read, erring conservative-open. The
+full analysis and rules live in
+[`docs/plans/2026-08-10-hitl-root-cause-and-fix.md`](docs/plans/2026-08-10-hitl-root-cause-and-fix.md).
+
+**One answer settles the whole batch.** Eve classifies `ask_question` as
+dismissable, so the first response resolves every request in the batch and the
+rest reach the model as `{ status: "ignored" }`. The thread collects an answer
+for every still-open request in a batch before it responds, the way Eve's own
+ACP adapter does — per batch, never a union across batches — and a draft stays
+revisable until its batch goes out. Only a required request (tool approval,
+session limit) locks the composer; a plain message is Eve's own dismiss
+gesture for a question-only park. Eve's scaffold web template and its
+Discord/Telegram/Teams/Linear channels still submit one answer per click.
+
+**Known residues** (each chosen over a worse alternative): a question batch a
+plain message dismissed keeps its controls on screen until clicked or the
+session moves on — the ledger cannot tell Eve's own batch from a
+subagent-proxied one a message never reaches, and wrongly closing a proxied
+park would strand the subagent; a second tab can answer a batch inside the
+window before its next reconcile, which Eve degrades to a synthetic user
+message; a cancel accepted in the instant between park emission and turn
+teardown can leave a required batch alive with the ledger cleared (recovery:
+session replacement); a batch Eve resolved by text-matching a plain message
+renders Dismissed although Eve recorded answers.
+
 ## Development
 
 See [`docs/local-development.md`](docs/local-development.md).

@@ -13,6 +13,7 @@ import {
   ChevronDownIcon,
   CircleIcon,
   ClockIcon,
+  MinusCircleIcon,
   WrenchIcon,
   XCircleIcon,
 } from "lucide-react";
@@ -32,39 +33,52 @@ export const Tool = ({ className, ...props }: ToolProps) => (
 
 export type ToolPart = ToolUIPart | DynamicToolUIPart;
 
+/**
+ * Tool states plus `input-dismissed`: an input request the agent stopped
+ * waiting on without any recorded answer. AI SDK has no state for it because
+ * it is an Eve HITL outcome, not a tool lifecycle step.
+ */
+export type ToolStatus = ToolPart["state"] | "input-dismissed";
+
 export type ToolHeaderProps = {
   title?: string;
   className?: string;
 } & (
-  | { type: ToolUIPart["type"]; state: ToolUIPart["state"]; toolName?: never }
+  | {
+      type: ToolUIPart["type"];
+      state: ToolUIPart["state"] | "input-dismissed";
+      toolName?: never;
+    }
   | {
       type: DynamicToolUIPart["type"];
-      state: DynamicToolUIPart["state"];
+      state: DynamicToolUIPart["state"] | "input-dismissed";
       toolName: string;
     }
 );
 
-const statusLabels: Record<ToolPart["state"], string> = {
+const statusLabels: Record<ToolStatus, string> = {
   "approval-requested": "Awaiting Approval",
   "approval-responded": "Responded",
   "input-available": "Running",
+  "input-dismissed": "Dismissed",
   "input-streaming": "Pending",
   "output-available": "Completed",
   "output-denied": "Denied",
   "output-error": "Error",
 };
 
-const statusIcons: Record<ToolPart["state"], ReactNode> = {
+const statusIcons: Record<ToolStatus, ReactNode> = {
   "approval-requested": <ClockIcon className="size-4 text-yellow-600" />,
   "approval-responded": <CheckCircleIcon className="size-4 text-blue-600" />,
   "input-available": <ClockIcon className="size-4 animate-pulse" />,
+  "input-dismissed": <MinusCircleIcon className="size-4 text-muted-foreground" />,
   "input-streaming": <CircleIcon className="size-4" />,
   "output-available": <CheckCircleIcon className="size-4 text-green-600" />,
   "output-denied": <XCircleIcon className="size-4 text-orange-600" />,
   "output-error": <XCircleIcon className="size-4 text-red-600" />,
 };
 
-export const getStatusBadge = (status: ToolPart["state"]) => (
+export const getStatusBadge = (status: ToolStatus) => (
   <Badge className="gap-1.5 rounded-full text-xs" variant="secondary">
     {statusIcons[status]}
     {statusLabels[status]}

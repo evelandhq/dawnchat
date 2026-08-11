@@ -13,6 +13,14 @@ import {
   type ChatStatus,
   schema,
 } from "@/db/schema";
+import {
+  EMPTY_PENDING_INPUT,
+  openPendingBatch,
+  parsePendingInput,
+  serializePendingInput,
+  type PendingInputRequest,
+  type PendingInputState,
+} from "@/eve/proxy-contract";
 
 export type RepositoryDb = NodePgDatabase<typeof schema>;
 
@@ -25,8 +33,13 @@ const sessionStateSchema = z.object({
 });
 
 export type AgentConnection = typeof agentConnections.$inferSelect;
-export type Chat = Omit<typeof chats.$inferSelect, "sessionStateJson"> & {
+export type Chat = Omit<
+  typeof chats.$inferSelect,
+  "sessionStateJson" | "pendingInputJson"
+> & {
   sessionState: SessionState | null;
+  /** `null` = legacy chat, state not derived yet (see proxy-contract). */
+  pendingInput: PendingInputState | null;
 };
 export type EveEvent = Omit<typeof events.$inferSelect, "payloadJson"> & {
   payload: unknown;
@@ -88,6 +101,12 @@ export type AppendEventInput = {
   chatId: string;
   type: string;
   payload: unknown;
+  /**
+   * Pending-input transition to run atomically with the insert, applied only
+   * when the event row is newly inserted — a replayed event must not reopen a
+   * settled batch.
+   */
+  pendingInput?: { open: PendingInputRequest[] } | { clear: true };
 } & (
   | {
       eventIndex: number;
@@ -98,6 +117,12 @@ export type AppendEventInput = {
       eventIndex?: never;
       sessionId: string;
       streamIndex: number;
+    }
+  // An app-owned event has no Eve stream coordinates and lands at the tail.
+  | {
+      eventIndex?: never;
+      sessionId?: never;
+      streamIndex?: never;
     }
 );
 
@@ -123,6 +148,15 @@ export type Repository = {
   clearPendingUserMessage(chatId: string): Promise<Chat>;
   updateChatSessionState(chatId: string, state: SessionState, status?: ChatStatus): Promise<Chat>;
   updateChatStatus(chatId: string, status: ChatStatus): Promise<Chat>;
+  /**
+   * Read-modify-write on the pending-input ledger under the same per-chat
+   * advisory lock as `appendEvent`. `fn` returns the state to persist, or
+   * `null` to leave the row untouched (including the legacy `NULL` marker).
+   */
+  updatePendingInput(
+    chatId: string,
+    fn: (current: PendingInputState | null) => PendingInputState | null,
+  ): Promise<PendingInputState | null>;
 };
 
 function parseSessionState(sessionStateJson: string | null): SessionState | null {
@@ -138,9 +172,11 @@ function parseSessionState(sessionStateJson: string | null): SessionState | null
 }
 
 function mapChat(row: typeof chats.$inferSelect): Chat {
+  const { sessionStateJson, pendingInputJson, ...rest } = row;
   return {
-    ...row,
-    sessionState: parseSessionState(row.sessionStateJson),
+    ...rest,
+    sessionState: parseSessionState(sessionStateJson),
+    pendingInput: parsePendingInput(pendingInputJson),
   };
 }
 
@@ -370,6 +406,7 @@ export function createRepository(db: RepositoryDb): Repository {
         ownerIdentityRealmId: input.ownerIdentityRealmId ?? null,
         evelandProjectId: input.evelandProjectId ?? null,
         sessionStateJson: null,
+        pendingInputJson: serializePendingInput(EMPTY_PENDING_INPUT),
         pendingUserMessage: input.pendingUserMessage ?? null,
         status: "active" satisfies ChatStatus,
         createdAt: now,
@@ -524,6 +561,28 @@ export function createRepository(db: RepositoryDb): Repository {
         };
 
         const [created] = await tx.insert(events).values(record).returning();
+
+        if (input.pendingInput) {
+          const [chatRow] = await tx
+            .select({ pendingInputJson: chats.pendingInputJson })
+            .from(chats)
+            .where(eq(chats.id, input.chatId))
+            .limit(1);
+          if (chatRow) {
+            const next =
+              "clear" in input.pendingInput
+                ? EMPTY_PENDING_INPUT
+                : openPendingBatch(
+                    parsePendingInput(chatRow.pendingInputJson) ?? EMPTY_PENDING_INPUT,
+                    { eventIndex: created.eventIndex, requests: input.pendingInput.open },
+                  );
+            await tx
+              .update(chats)
+              .set({ pendingInputJson: serializePendingInput(next), updatedAt: new Date() })
+              .where(eq(chats.id, input.chatId));
+          }
+        }
+
         return mapEvent(created);
       });
     },
@@ -581,6 +640,30 @@ export function createRepository(db: RepositoryDb): Repository {
       }
 
       return mapChat(updated);
+    },
+
+    async updatePendingInput(chatId, fn) {
+      return db.transaction(async (tx) => {
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${chatId}))`);
+        const [row] = await tx
+          .select({ pendingInputJson: chats.pendingInputJson })
+          .from(chats)
+          .where(eq(chats.id, chatId))
+          .limit(1);
+        if (!row) {
+          throw new Error(`Chat not found: ${chatId}`);
+        }
+        const current = parsePendingInput(row.pendingInputJson);
+        const next = fn(current);
+        if (next === null) {
+          return current;
+        }
+        await tx
+          .update(chats)
+          .set({ pendingInputJson: serializePendingInput(next), updatedAt: new Date() })
+          .where(eq(chats.id, chatId));
+        return next;
+      });
     },
   };
 }

@@ -40,6 +40,7 @@ import {
   ToolHeader,
   ToolInput,
   ToolOutput,
+  type ToolStatus,
 } from "@/components/ai-elements/tool";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -48,18 +49,27 @@ import { cn } from "@/lib/utils";
 
 type EveFilePart = Extract<EveMessagePart, { type: "file" }>;
 
-type EveMessageViewProps = {
+/** The input requests Eve is parked on, and the answers collected for them so far. */
+export type InputRequestBatch = {
+  /** False while the thread cannot send at all: read-only, busy, or completed. */
   canRespond: boolean;
+  /** Answers held back until every request in the batch has one, by request ID. */
+  drafts: ReadonlyMap<string, InputResponse>;
+  /** Request IDs Eve is waiting on right now. */
+  pending: ReadonlySet<string>;
+  respond: (response: InputResponse) => void | Promise<void>;
+};
+
+type EveMessageViewProps = {
+  inputRequests: InputRequestBatch;
   isStreaming: boolean;
   message: EveMessage;
-  onInputResponses: (responses: readonly InputResponse[]) => void | Promise<void>;
 };
 
 export function EveMessageView({
-  canRespond,
+  inputRequests,
   isStreaming,
   message,
-  onInputResponses,
 }: EveMessageViewProps): React.ReactElement {
   const lastTextIndex = message.parts.reduce(
     (last, part, index) => (part.type === "text" ? index : last),
@@ -74,9 +84,8 @@ export function EveMessageView({
       <MessageContent>
         {message.parts.map((part, index) => (
           <EveMessagePartView
-            canRespond={canRespond}
+            inputRequests={inputRequests}
             key={partKey(part, index)}
-            onInputResponses={onInputResponses}
             part={part}
             showCaret={isStreaming && message.role === "assistant" && index === lastTextIndex}
           />
@@ -87,13 +96,11 @@ export function EveMessageView({
 }
 
 function EveMessagePartView({
-  canRespond,
-  onInputResponses,
+  inputRequests,
   part,
   showCaret,
 }: {
-  canRespond: boolean;
-  onInputResponses: (responses: readonly InputResponse[]) => void | Promise<void>;
+  inputRequests: InputRequestBatch;
   part: EveMessagePart;
   showCaret: boolean;
 }): React.ReactNode {
@@ -117,35 +124,27 @@ function EveMessagePartView({
       return <FilePart part={part} />;
     case "authorization":
       return <AuthorizationPart part={part} />;
-    case "dynamic-tool":
+    case "dynamic-tool": {
+      const state = displayState(part, inputRequests);
       if (isLoadSkillPart(part)) {
-        return (
-          <LoadSkillPart
-            canRespond={canRespond}
-            onInputResponses={onInputResponses}
-            part={part}
-          />
-        );
+        return <LoadSkillPart inputRequests={inputRequests} part={part} state={state} />;
       }
       return (
-        <Tool defaultOpen={part.state === "approval-requested"}>
+        <Tool defaultOpen={state === "approval-requested"}>
           <ToolHeader
-            state={part.state}
+            state={state}
             title={part.toolName}
             toolName={part.toolName}
             type="dynamic-tool"
           />
           <ToolContent>
             <ToolInput input={part.input} />
-            <InputRequestPart
-              canRespond={canRespond}
-              onInputResponses={onInputResponses}
-              part={part}
-            />
+            <InputRequestPart inputRequests={inputRequests} part={part} state={state} />
             <ToolOutput errorText={part.errorText} output={part.output} />
           </ToolContent>
         </Tool>
       );
+    }
   }
 }
 
@@ -164,13 +163,13 @@ function isLoadSkillPart(part: EveDynamicToolPart): boolean {
  * same way.
  */
 function LoadSkillPart({
-  canRespond,
-  onInputResponses,
+  inputRequests,
   part,
+  state,
 }: {
-  canRespond: boolean;
-  onInputResponses: (responses: readonly InputResponse[]) => void | Promise<void>;
+  inputRequests: InputRequestBatch;
   part: EveDynamicToolPart;
+  state: ToolStatus;
 }): React.ReactElement {
   const skill = skillNameFromInput(part.input);
 
@@ -182,15 +181,11 @@ function LoadSkillPart({
           {part.state === "output-available" ? "Loaded" : "Load"} skill
           {skill ? ` · ${skill}` : ""}
         </span>
-        {getStatusBadge(part.state)}
+        {getStatusBadge(state)}
       </div>
       {part.toolMetadata?.eve?.inputRequest ? (
         <div className="px-4 pb-4">
-          <InputRequestPart
-            canRespond={canRespond}
-            onInputResponses={onInputResponses}
-            part={part}
-          />
+          <InputRequestPart inputRequests={inputRequests} part={part} state={state} />
         </div>
       ) : null}
     </div>
@@ -203,6 +198,28 @@ function skillNameFromInput(input: unknown): string | undefined {
   }
   const skill = (input as { skill?: unknown }).skill;
   return typeof skill === "string" && skill.trim().length > 0 ? skill.trim() : undefined;
+}
+
+/**
+ * Whether the thread can still answer decides the state, not the projection.
+ * The store marks a part answered before the turn is posted and never rolls
+ * that back, and an input request Eve moved past keeps `approval-requested`
+ * forever because Eve records no outcome for one. A part nobody is waiting on
+ * that still carries no answer reads as dismissed rather than claiming a
+ * response nobody has.
+ */
+function displayState(
+  part: EveDynamicToolPart,
+  inputRequests: InputRequestBatch,
+): ToolStatus {
+  const requestId = part.toolMetadata?.eve?.inputRequest?.requestId;
+  if (requestId === undefined) {
+    return part.state;
+  }
+  if (inputRequests.pending.has(requestId)) {
+    return "approval-requested";
+  }
+  return part.state === "approval-requested" ? "input-dismissed" : part.state;
 }
 
 function FilePart({ part }: { part: EveFilePart }): React.ReactElement {
@@ -240,37 +257,48 @@ function FilePart({ part }: { part: EveFilePart }): React.ReactElement {
 }
 
 function InputRequestPart({
-  canRespond,
-  onInputResponses,
+  inputRequests,
   part,
+  state,
 }: {
-  canRespond: boolean;
-  onInputResponses: (responses: readonly InputResponse[]) => void | Promise<void>;
+  inputRequests: InputRequestBatch;
   part: EveDynamicToolPart;
+  state: ToolStatus;
 }): React.ReactElement | null {
   const inputRequest = part.toolMetadata?.eve?.inputRequest;
   if (!inputRequest) {
     return null;
   }
 
-  const inputResponse = part.toolMetadata?.eve?.inputResponse;
+  const pending = inputRequests.pending.has(inputRequest.requestId);
+  const draft = inputRequests.drafts.get(inputRequest.requestId);
+  // While the thread is still waiting on a request, any projected response is
+  // optimistic: the draft is the answer, and it has not reached Eve yet.
+  const submitted = pending ? undefined : part.toolMetadata?.eve?.inputResponse;
+  const inputResponse = submitted ?? draft;
   const selectedOption = inputRequest.options?.find(
     (option) => option.id === inputResponse?.optionId,
   );
 
   return (
-    <Confirmation approval={confirmationApproval(part)} state={part.state}>
+    <Confirmation approval={confirmationApproval(part)} state={state}>
       <ConfirmationTitle>{inputRequest.prompt}</ConfirmationTitle>
-      <ConfirmationRequest>
-        <InputRequestControls
-          canRespond={canRespond}
-          inputRequest={inputRequest}
-          onInputResponses={onInputResponses}
-        />
-      </ConfirmationRequest>
+      {submitted ? null : (
+        // A draft keeps its controls: the rest of the batch may still be
+        // unanswered, and an answer is not final until every request has one.
+        <ConfirmationRequest>
+          <InputRequestControls
+            canRespond={inputRequests.canRespond && pending}
+            draft={draft}
+            inputRequest={inputRequest}
+            onInputResponse={inputRequests.respond}
+          />
+        </ConfirmationRequest>
+      )}
       {inputResponse ? (
         <p className="text-sm font-medium">
-          Responded: {selectedOption?.label ?? inputResponse.text ?? inputResponse.optionId}
+          {submitted ? "Responded" : "Selected"}:{" "}
+          {selectedOption?.label ?? inputResponse.text ?? inputResponse.optionId}
         </p>
       ) : null}
     </Confirmation>
@@ -293,14 +321,16 @@ function confirmationApproval(part: EveDynamicToolPart): ConfirmationProps["appr
 
 function InputRequestControls({
   canRespond,
+  draft,
   inputRequest,
-  onInputResponses,
+  onInputResponse,
 }: {
   canRespond: boolean;
+  draft: InputResponse | undefined;
   inputRequest: EveMessageInputRequest;
-  onInputResponses: (responses: readonly InputResponse[]) => void | Promise<void>;
+  onInputResponse: (response: InputResponse) => void | Promise<void>;
 }): React.ReactElement {
-  const [text, setText] = useState("");
+  const [text, setText] = useState(draft?.text ?? "");
   const acceptsText =
     inputRequest.display === "text" ||
     inputRequest.allowFreeform === true ||
@@ -311,21 +341,39 @@ function InputRequestControls({
     if (!response || !canRespond) {
       return;
     }
-    void onInputResponses([{ requestId: inputRequest.requestId, text: response }]);
+    void onInputResponse({ requestId: inputRequest.requestId, text: response });
+  };
+
+  // Blur is the commit the user actually performs when moving to the next
+  // card: first-time text must land in the drafts or a multi-question batch
+  // never completes, and text edited after its draft landed must re-commit or
+  // the field shows one answer while the wire carries another.
+  const commitTextOnBlur = (): void => {
+    const response = text.trim();
+    if (!canRespond || !response || response === draft?.text) {
+      return;
+    }
+    void onInputResponse({ requestId: inputRequest.requestId, text: response });
   };
 
   return (
     <div className="flex flex-col gap-3 pt-2">
       {inputRequest.options?.length ? (
-        <ConfirmationActions className="self-start">
+        <ConfirmationActions className="flex-wrap justify-start self-start">
           {inputRequest.options.map((option) => (
             <ConfirmationAction
+              aria-pressed={draft?.optionId === option.id}
+              className={cn(
+                "h-auto min-h-8 whitespace-normal px-3 py-1.5 text-left text-sm",
+                draft?.optionId === option.id && "ring-2 ring-ring",
+              )}
               disabled={!canRespond}
               key={option.id}
               onClick={() => {
-                void onInputResponses([
-                  { requestId: inputRequest.requestId, optionId: option.id },
-                ]);
+                void onInputResponse({
+                  requestId: inputRequest.requestId,
+                  optionId: option.id,
+                });
               }}
               variant={
                 option.style === "danger"
@@ -345,6 +393,7 @@ function InputRequestControls({
           <Input
             aria-label="Response"
             disabled={!canRespond}
+            onBlur={commitTextOnBlur}
             onChange={(event) => setText(event.currentTarget.value)}
             onKeyDown={(event) => {
               if (event.key === "Enter") {

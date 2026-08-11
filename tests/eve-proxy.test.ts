@@ -1,8 +1,10 @@
+import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { resolveAppBrowserSession } from "@/app-session";
 import { setDbClientForTests } from "@/db/provider";
 import { createRepository } from "@/db/repository";
+import { chats } from "@/db/schema";
 import { startFakeEveServer, type FakeEveServer } from "@/eve/fake-eve-server.test-helper";
 import {
   CallerTokenError,
@@ -575,6 +577,112 @@ describe("per-chat Eve protocol proxy", () => {
     });
   });
 
+  it("records forwarded HITL answers so a replay can show what was picked", async () => {
+    const server = await fakeServer({ generation: "0.31" });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Answering Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Which metric?",
+      ...chatIdentity,
+    });
+    await repository.updateChatSessionState(chat.id, { sessionId: "ses_1", streamIndex: 4 });
+    await repository.appendEvent({
+      chatId: chat.id,
+      sessionId: "ses_1",
+      streamIndex: 0,
+      type: "session.waiting",
+      payload: { type: "session.waiting", data: { wait: "next-user-message" } },
+    });
+    const routes = await loadProxyRoutes();
+    const inputResponses = [{ requestId: "call_metric", optionId: "gmv_payors" }];
+
+    const response = await routes.continueSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ inputResponses }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+
+    expect(response.status).toBe(202);
+    const stored = await repository.listEvents(chat.id);
+    expect(stored.at(-1)).toMatchObject({
+      type: "client.input.responded",
+      payload: { type: "client.input.responded", data: { responses: inputResponses } },
+    });
+  });
+
+  it("stores no response event when the turn never reaches the Agent", async () => {
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Unreachable Eve",
+      // Port 1 refuses, so the turn fails before Eve ever sees the answer.
+      baseUrl: "http://127.0.0.1:1",
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Refused answer",
+      ...chatIdentity,
+    });
+    await repository.updateChatSessionState(chat.id, { sessionId: "ses_1", streamIndex: 4 });
+    const routes = await loadProxyRoutes();
+
+    const response = await routes.continueSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({
+          inputResponses: [{ requestId: "call_metric", optionId: "gmv_payors" }],
+        }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+
+    expect(response.ok).toBe(false);
+    await expect(repository.listEvents(chat.id)).resolves.toEqual([]);
+  });
+
+  it("stores no response event for a turn that only carries a message", async () => {
+    const server = await fakeServer({ generation: "0.31" });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Chatting Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Plain turn",
+      ...chatIdentity,
+    });
+    await repository.updateChatSessionState(chat.id, { sessionId: "ses_1", streamIndex: 4 });
+    const routes = await loadProxyRoutes();
+
+    await routes.continueSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ message: "Keep going" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+
+    await expect(repository.listEvents(chat.id)).resolves.toEqual([]);
+  });
+
   it("drops a stale continuation token when the Agent upgrades to Eve 0.31", async () => {
     const server = await fakeServer({ generation: "0.31" });
     const repository = createRepository(testDb.db);
@@ -716,6 +824,512 @@ describe("per-chat Eve protocol proxy", () => {
       body: { turnId: "turn_1" },
     });
     expect(server.requests[0].headers.authorization).toBe("Bearer caller-token");
+  });
+
+  it("opens a park on persist, settles it on acceptance, and survives a replay", async () => {
+    const streamEvents = [
+      {
+        type: "input.requested",
+        data: {
+          requests: [
+            {
+              requestId: "req_1",
+              kind: "tool-approval",
+              prompt: "Allow?",
+              display: "confirmation",
+              options: [{ id: "approve", label: "Allow" }],
+              action: { kind: "tool-call", callId: "call_1", toolName: "delete_record", input: {} },
+            },
+          ],
+          sequence: 1,
+          stepIndex: 0,
+          turnId: "turn_1",
+        },
+      },
+      { type: "session.waiting", data: { wait: "next-user-message" } },
+    ] as const;
+    const server = await fakeServer({ generation: "0.31", streamEvents });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Parked Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Parked",
+      ...chatIdentity,
+    });
+    await repository.updateChatSessionState(chat.id, { sessionId: "ses_1", streamIndex: 0 });
+    const routes = await loadProxyRoutes();
+    const stream = () =>
+      routes.streamSession(
+        new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1/stream`, {
+          headers: callerHeaders(),
+        }),
+        { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+      );
+
+    await (await stream()).text();
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      pendingInput: {
+        batches: [
+          {
+            eventIndex: 1,
+            requests: [{ requestId: "req_1", kind: "tool-approval" }],
+            answered: [],
+          },
+        ],
+      },
+    });
+
+    const responded = await routes.continueSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ inputResponses: [{ requestId: "req_1", optionId: "approve" }] }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+    expect(responded.status).toBe(202);
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      pendingInput: { batches: [] },
+    });
+
+    // A client re-attaching from an older cursor replays the event; the
+    // settled batch must not reopen.
+    await repository.updateChatSessionState(chat.id, { sessionId: "ses_1", streamIndex: 0 });
+    await (await stream()).text();
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      pendingInput: { batches: [] },
+    });
+  });
+
+  it("keeps a required batch open across partial answers and dedupes repeats", async () => {
+    const server = await fakeServer({ generation: "0.31" });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Deferred Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Two approvals",
+      ...chatIdentity,
+    });
+    await repository.updateChatSessionState(chat.id, { sessionId: "ses_1", streamIndex: 2 });
+    await repository.updatePendingInput(chat.id, () => ({
+      batches: [
+        {
+          eventIndex: 1,
+          requests: [
+            { requestId: "req_a", kind: "tool-approval" },
+            { requestId: "req_b", kind: "tool-approval" },
+          ],
+          answered: [],
+        },
+      ],
+    }));
+    const routes = await loadProxyRoutes();
+    const respond = (responses: unknown[]) =>
+      routes.continueSession(
+        new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1`, {
+          method: "POST",
+          headers: callerHeaders({ "content-type": "application/json" }),
+          body: JSON.stringify({ inputResponses: responses }),
+        }),
+        { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+      );
+
+    await respond([{ requestId: "req_a", optionId: "approve" }]);
+    await respond([{ requestId: "req_a", optionId: "approve" }]);
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      pendingInput: {
+        batches: [expect.objectContaining({ answered: ["req_a"] })],
+      },
+    });
+
+    await respond([{ requestId: "req_b", optionId: "deny" }]);
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      pendingInput: { batches: [] },
+    });
+  });
+
+  it("leaves every park open for a message-only turn", async () => {
+    const server = await fakeServer({ generation: "0.31" });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Buffering Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Question parked",
+      ...chatIdentity,
+    });
+    await repository.updateChatSessionState(chat.id, { sessionId: "ses_1", streamIndex: 2 });
+    const parked = {
+      batches: [
+        {
+          eventIndex: 1,
+          requests: [{ requestId: "req_q", kind: "question" }],
+          answered: [],
+        },
+      ],
+    };
+    await repository.updatePendingInput(chat.id, () => parked);
+    const routes = await loadProxyRoutes();
+
+    // Eve dismisses its own question batch on a plain message, but a lone open
+    // batch may equally be a subagent-proxied park the message never reaches —
+    // the ledger stays conservative-open.
+    await routes.continueSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ message: "Just decide yourself" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      pendingInput: parked,
+    });
+  });
+
+  it("clears parks only when Eve reports the cancel as accepted", async () => {
+    const repository = createRepository(testDb.db);
+    const routes = await loadProxyRoutes();
+    const parked = {
+      batches: [
+        {
+          eventIndex: 1,
+          requests: [{ requestId: "req_1", kind: "tool-approval" }],
+          answered: [],
+        },
+      ],
+    };
+    const setUpChat = async (cancelStatus: "accepted" | "no_active_turn") => {
+      const server = await fakeServer({ generation: "0.31", cancelStatus });
+      const agent = await repository.createAgentConnection({
+        name: `Cancel ${cancelStatus}`,
+        baseUrl: server.baseUrl,
+        authType: "none",
+        evelandProjectId: "project_support",
+      });
+      await repository.updateAgentHealth(agent.id, { status: "healthy" });
+      const chat = await repository.createChat({
+        agentConnectionId: agent.id,
+        title: `Cancel ${cancelStatus}`,
+        ...chatIdentity,
+      });
+      await repository.updateChatSessionState(chat.id, { sessionId: "ses_1", streamIndex: 2 });
+      await repository.updatePendingInput(chat.id, () => parked);
+      return chat;
+    };
+    const cancel = (chatId: string) =>
+      routes.cancelSession(
+        new Request(`http://localhost/api/chats/${chatId}/agent/eve/v1/session/ses_1/cancel`, {
+          method: "POST",
+          headers: callerHeaders({ "content-type": "application/json" }),
+          body: "{}",
+        }),
+        { params: Promise.resolve({ chatId, sessionId: "ses_1" }) },
+      );
+
+    // Between turns, cancel is a no-op on Eve's side; the batch survives there
+    // and must survive here, or every later message is silently deferred.
+    const parkedChat = await setUpChat("no_active_turn");
+    expect((await cancel(parkedChat.id)).status).toBe(200);
+    await expect(repository.getChat(parkedChat.id)).resolves.toMatchObject({
+      pendingInput: parked,
+    });
+
+    const runningChat = await setUpChat("accepted");
+    expect((await cancel(runningChat.id)).status).toBe(200);
+    await expect(repository.getChat(runningChat.id)).resolves.toMatchObject({
+      pendingInput: { batches: [] },
+    });
+  });
+
+  it("clears parks when the session reaches a terminal event", async () => {
+    const streamEvents = [
+      {
+        type: "input.requested",
+        data: {
+          requests: [
+            {
+              requestId: "req_1",
+              kind: "question",
+              prompt: "Anything else?",
+              action: { kind: "tool-call", callId: "call_1", toolName: "ask_question", input: {} },
+            },
+          ],
+          sequence: 1,
+          stepIndex: 0,
+          turnId: "turn_1",
+        },
+      },
+      { type: "session.completed", data: { reason: "done" } },
+    ] as const;
+    const server = await fakeServer({ generation: "0.31", streamEvents });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Finishing Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Finishing",
+      ...chatIdentity,
+    });
+    await repository.updateChatSessionState(chat.id, { sessionId: "ses_1", streamIndex: 0 });
+    const routes = await loadProxyRoutes();
+
+    const response = await routes.streamSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1/stream`, {
+        headers: callerHeaders(),
+      }),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+    await response.text();
+
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      status: "completed",
+      pendingInput: { batches: [] },
+    });
+  });
+
+  it("keeps parks when a turn fails without reaching Eve", async () => {
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Flaky Eve",
+      baseUrl: "http://127.0.0.1:1",
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Flaky",
+      ...chatIdentity,
+    });
+    await repository.updateChatSessionState(chat.id, { sessionId: "ses_1", streamIndex: 2 });
+    const parked = {
+      batches: [
+        {
+          eventIndex: 1,
+          requests: [{ requestId: "req_1", kind: "tool-approval" }],
+          answered: [],
+        },
+      ],
+    };
+    await repository.updatePendingInput(chat.id, () => parked);
+    const routes = await loadProxyRoutes();
+
+    const response = await routes.continueSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ message: "Are you there?" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+
+    // A transient failure marks the chat failed, but Eve's session and its
+    // park are alive; clearing here would hide answerable controls forever.
+    expect(response.ok).toBe(false);
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      status: "failed",
+      pendingInput: parked,
+    });
+  });
+
+  it("clears stale parks when a new session replaces the old one", async () => {
+    const server = await fakeServer({ generation: "0.31" });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Replaced Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Replaced",
+      ...chatIdentity,
+    });
+    await repository.updateChatSessionState(chat.id, { sessionId: "ses_dead", streamIndex: 9 });
+    await repository.updateChatStatus(chat.id, "failed");
+    await repository.updatePendingInput(chat.id, () => ({
+      batches: [
+        {
+          eventIndex: 1,
+          requests: [{ requestId: "req_old", kind: "tool-approval" }],
+          answered: [],
+        },
+      ],
+    }));
+    const routes = await loadProxyRoutes();
+
+    const response = await routes.createSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ message: "Start over" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id }) },
+    );
+
+    expect(response.status).toBe(202);
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      sessionState: { sessionId: "ses_1", streamIndex: 0 },
+      pendingInput: { batches: [] },
+    });
+  });
+
+  it("derives a legacy chat's parks from stored events on first read", async () => {
+    const repository = createRepository(testDb.db);
+    const server = await fakeServer({ generation: "0.31" });
+    const agent = await repository.createAgentConnection({
+      name: "Legacy Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Legacy",
+      ...chatIdentity,
+    });
+    await repository.updateChatSessionState(chat.id, { sessionId: "ses_1", streamIndex: 2 });
+    await repository.appendEvent({
+      chatId: chat.id,
+      sessionId: "ses_1",
+      streamIndex: 0,
+      type: "input.requested",
+      payload: {
+        type: "input.requested",
+        data: {
+          requests: [
+            {
+              requestId: "req_1",
+              kind: "tool-approval",
+              prompt: "Allow?",
+              action: { kind: "tool-call", callId: "call_1", toolName: "delete_record", input: {} },
+            },
+          ],
+        },
+      },
+    });
+    await repository.appendEvent({
+      chatId: chat.id,
+      sessionId: "ses_1",
+      streamIndex: 1,
+      type: "session.waiting",
+      payload: { type: "session.waiting", data: { wait: "next-user-message" } },
+    });
+    // A chat from before the ledger carries no state at all.
+    await testDb.db
+      .update(chats)
+      .set({ pendingInputJson: null })
+      .where(eq(chats.id, chat.id));
+
+    const routeModule = await loadRouteModule(
+      "../src/app/api/chats/[chatId]/pending-input/route.ts",
+    );
+    expect(routeModule, "the pending-input route should exist").not.toBeNull();
+    const get = routeModule!.GET as GetRoute<{ chatId: string }>;
+
+    const response = await get(
+      new Request(`http://localhost/api/chats/${chat.id}/pending-input`, {
+        headers: { authorization: "Bearer app-token" },
+      }),
+      { params: Promise.resolve({ chatId: chat.id }) },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      pendingInput: {
+        batches: [
+          {
+            eventIndex: 1,
+            requests: [{ requestId: "req_1", kind: "tool-approval" }],
+            answered: [],
+          },
+        ],
+      },
+    });
+    // The derivation is one-shot: the result is written back.
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      pendingInput: { batches: [expect.objectContaining({ eventIndex: 1 })] },
+    });
+  });
+
+  it("serves the ledger to a Caller Token client", async () => {
+    const server = await fakeServer({ generation: "0.31" });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Challenged Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Challenged",
+      ...chatIdentity,
+    });
+    await repository.updateChatSessionState(chat.id, { sessionId: "ses_1", streamIndex: 2 });
+    const parked = {
+      batches: [
+        {
+          eventIndex: 1,
+          requests: [{ requestId: "req_1", kind: "tool-approval" }],
+          answered: [],
+        },
+      ],
+    };
+    await repository.updatePendingInput(chat.id, () => parked);
+
+    const routeModule = await loadRouteModule(
+      "../src/app/api/chats/[chatId]/pending-input/route.ts",
+    );
+    const get = routeModule!.GET as GetRoute<{ chatId: string }>;
+
+    // After an Eveland challenge the thread holds only a Caller Token; the
+    // reconcile reads must work with it or every failure path goes blind.
+    const response = await get(
+      new Request(`http://localhost/api/chats/${chat.id}/pending-input`, {
+        headers: callerHeaders(),
+      }),
+      { params: Promise.resolve({ chatId: chat.id }) },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ pendingInput: parked });
+
+    const foreign = await get(
+      new Request(`http://localhost/api/chats/${chat.id}/pending-input`, {
+        headers: callerHeaders({}, "other-caller-token"),
+      }),
+      { params: Promise.resolve({ chatId: chat.id }) },
+    );
+    expect(foreign.status).toBe(404);
   });
 
   it("returns 404 instead of revealing another principal's chat", async () => {

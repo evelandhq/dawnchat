@@ -51,6 +51,9 @@ export const chats = pgTable("chats", {
   ownerIdentityRealmId: text("owner_identity_realm_id"),
   evelandProjectId: text("eveland_project_id"),
   sessionStateJson: text("session_state_json"),
+  // NULL marks a chat from before the pending-input ledger; its open batches
+  // are derived from stored events on first touch and written back.
+  pendingInputJson: text("pending_input_json"),
   pendingUserMessage: text("pending_user_message"),
   status: text("status", { enum: chatStatuses }).notNull().default("active"),
   createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),

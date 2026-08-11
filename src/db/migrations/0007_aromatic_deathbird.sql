@@ -1,0 +1,1 @@
+ALTER TABLE "chats" ADD COLUMN "pending_input_json" text;
