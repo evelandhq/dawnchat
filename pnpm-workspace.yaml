@@ -8,5 +8,5 @@ allowBuilds:
   sharp: true
 minimumReleaseAgeExclude:
   # The client library is pinned to the newest verified release of the support
-  # window Eveland hosts: Eve 0.29.x, 0.30.x, and 0.31.x agents.
-  - eve@0.31.1
+  # window Eveland hosts: Eve 0.31.x, 0.32.x, and 0.33.x agents.
+  - eve@0.33.2

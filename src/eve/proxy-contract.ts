@@ -45,6 +45,13 @@ export type PendingInputBatch = {
   requests: PendingInputRequest[];
   /** Request IDs Eve has accepted answers for so far. */
   answered: string[];
+  /**
+   * The turn that raised this batch, from the `input.requested` payload.
+   * Cancelling a turn only tears down the parks that turn owns, so a batch
+   * that predates this field (or an event without one) survives every cancel
+   * and settles through an answer or a terminal session event instead.
+   */
+  turnId?: string;
 };
 
 export type PendingInputState = { batches: PendingInputBatch[] };
@@ -54,6 +61,53 @@ export const EMPTY_PENDING_INPUT: PendingInputState = { batches: [] };
 /** Mirrors Eve's `classifyInputRequest`: only these two kinds park a turn hard. */
 export function isRequiredKind(kind: string): boolean {
   return kind === "tool-approval" || kind === "session-limit";
+}
+
+/**
+ * The Eve version serving this chat, as `session.started` reports it. The last
+ * one wins: a replaced session reports the version the Agent runs now, and a
+ * child session's events arrive wrapped in `subagent.event` rather than as a
+ * bare `session.started`.
+ */
+export function agentEveVersion(events: readonly unknown[]): string | undefined {
+  let version: string | undefined;
+  for (const event of events) {
+    if (!event || typeof event !== "object") continue;
+    if ((event as { type?: unknown }).type !== "session.started") continue;
+    const data = (event as { data?: unknown }).data;
+    if (!data || typeof data !== "object") continue;
+    const runtime = (data as { runtime?: unknown }).runtime;
+    if (!runtime || typeof runtime !== "object") continue;
+    const candidate = (runtime as { eveVersion?: unknown }).eveVersion;
+    if (typeof candidate === "string" && candidate.length > 0) {
+      version = candidate;
+    }
+  }
+  return version;
+}
+
+/**
+ * Whether an unrelated message sent while a request is open would be held
+ * rather than run.
+ *
+ * Up to Eve 0.31 an ordinary message stalled behind an open tool approval or
+ * an interactive authorization challenge: Eve kept it until the request was
+ * answered, so a UI that let it through looked wedged. Eve 0.32 stopped
+ * deferring behind authorization challenges and 0.33.1 behind tool approvals —
+ * the message runs as its own turn, the request stays open, and a later
+ * structured answer still resolves the original tool call.
+ *
+ * An unreadable or missing version answers `true`: locking the composer is
+ * visible and recoverable, while a silently deferred message is neither.
+ */
+export function holdsMessagesForPendingInput(version: string | undefined): boolean {
+  if (version === undefined) return true;
+  const match = /^(\d+)\.(\d+)\./.exec(version.trim());
+  if (!match) return true;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  if (major > 0) return false;
+  return minor < 32;
 }
 
 export function hasUnansweredRequiredRequest(state: PendingInputState): boolean {
@@ -106,7 +160,12 @@ function parsePendingBatch(value: unknown): PendingInputBatch | null {
     requests.push({ requestId, kind });
   }
   if (!batch.answered.every((id) => typeof id === "string")) return null;
-  return { eventIndex: batch.eventIndex, requests, answered: batch.answered as string[] };
+  return {
+    eventIndex: batch.eventIndex,
+    requests,
+    answered: batch.answered as string[],
+    ...(typeof batch.turnId === "string" ? { turnId: batch.turnId } : {}),
+  };
 }
 
 export function serializePendingInput(state: PendingInputState): string {
@@ -121,24 +180,93 @@ export function pendingRequestsFromEvent(payload: unknown): PendingInputRequest[
     : null;
 }
 
+/** The turn a stream event belongs to, for events that name one. */
+export function turnIdFromEvent(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== "object") return undefined;
+  const data = (payload as { data?: unknown }).data;
+  if (!data || typeof data !== "object") return undefined;
+  const turnId = (data as { turnId?: unknown }).turnId;
+  return typeof turnId === "string" && turnId.length > 0 ? turnId : undefined;
+}
+
+/**
+ * The turn still open when these events end, if any — a turn Eve started and
+ * neither ended nor lost to a terminal session. A turn parked on input counts:
+ * it is suspended, not finished, and cancelling it is what tears its park
+ * down. A reload resumes the stream from its cursor without replaying
+ * `turn.started`, so reading it from stored events is what lets a Stop after a
+ * reload still name the turn it stops.
+ */
+export function activeTurnIdFromEvents(events: readonly unknown[]): string | null {
+  let active: string | null = null;
+  for (const event of events) {
+    if (!event || typeof event !== "object") continue;
+    const type = (event as { type?: unknown }).type;
+    if (type === "turn.started") {
+      active = turnIdFromEvent(event) ?? null;
+    } else if (
+      type === "turn.completed" ||
+      type === "turn.failed" ||
+      type === "turn.cancelled"
+    ) {
+      const ended = turnIdFromEvent(event);
+      if (!ended || ended === active) active = null;
+    } else if (type === "session.completed" || type === "session.failed") {
+      active = null;
+    }
+  }
+  return active;
+}
+
 /** Opens a batch, replacing any earlier record of the same event. */
 export function openPendingBatch(
   state: PendingInputState,
-  batch: { eventIndex: number; requests: PendingInputRequest[] },
+  batch: { eventIndex: number; requests: PendingInputRequest[]; turnId?: string },
 ): PendingInputState {
   return {
     batches: [
       ...state.batches.filter((existing) => existing.eventIndex !== batch.eventIndex),
-      { eventIndex: batch.eventIndex, requests: batch.requests, answered: [] },
+      {
+        eventIndex: batch.eventIndex,
+        requests: batch.requests,
+        answered: [],
+        ...(batch.turnId ? { turnId: batch.turnId } : {}),
+      },
     ].sort((left, right) => left.eventIndex - right.eventIndex),
   };
 }
 
 /**
- * Applies the answers of one turn Eve accepted — a mirror of Eve's
- * `resolvePendingInput`/`hasUnansweredRequiredRequest` (eve@0.31.1). A batch
- * closes once it has been addressed and no required request is unanswered; an
- * addressed-but-incomplete required batch stays open, matching Eve's deferral.
+ * Drops the parks one cancelled turn owned.
+ *
+ * From Eve 0.33 a plain message sent while a turn runs *steers* by default:
+ * Eve cancels that turn and starts the replacement under a new turn ID, while
+ * every batch parked by an earlier turn stays open and answerable. A blanket
+ * clear on `turn.cancelled` would therefore hide live approval controls, and
+ * the tool call behind them can only come back if the model asks again. Only
+ * the cancelled turn's own parks are gone.
+ *
+ * A batch with no recorded `turnId` is kept: erring open costs controls that
+ * linger until the next reconcile, and a late answer to a batch Eve really did
+ * tear down degrades to Eve's stale-response conversion, while erring closed
+ * strands a required request with no way back.
+ */
+export function clearPendingBatchesForTurn(
+  state: PendingInputState,
+  turnId: string,
+): PendingInputState {
+  return { batches: state.batches.filter((batch) => batch.turnId !== turnId) };
+}
+
+/**
+ * Applies the answers of one turn Eve accepted — a mirror of Eve's own batch
+ * resolution (`resolveApprovalInputBatches`/`resolveQuestionOnlyInputBatches`,
+ * eve@0.33.2; `resolvePendingInput` before 0.33 restructured it into an
+ * ordered collection of batches, with the same two rules). A batch closes once
+ * it has been addressed and no required request is unanswered: Eve resolves a
+ * question batch on any one answer and an approval batch only once every
+ * approval in it has one, carrying the leftovers forward. An
+ * addressed-but-incomplete required batch therefore stays open here too.
  * A message-only turn (no responses) closes nothing: Eve does dismiss its own
  * all-dismissable batch on one, but a lone open batch may equally be a
  * subagent-proxied park the message never reaches, and wrongly closing that
@@ -241,11 +369,13 @@ export function derivePendingInput(input: {
     );
     const hasRequired = requests.some((request) => isRequiredKind(request.kind));
 
+    const turnId = turnIdFromEvent(event.payload);
     if (requiredOpen) {
       batches.push({
         eventIndex: event.eventIndex,
         requests: requests.map(({ requestId, kind }) => ({ requestId, kind })),
         answered,
+        ...(turnId ? { turnId } : {}),
       });
       continue;
     }
@@ -266,6 +396,7 @@ export function derivePendingInput(input: {
         eventIndex: event.eventIndex,
         requests: requests.map(({ requestId, kind }) => ({ requestId, kind })),
         answered,
+        ...(turnId ? { turnId } : {}),
       });
     }
   }
@@ -345,8 +476,9 @@ function derivedRequestsFromEvent(payload: unknown): DerivedRequest[] | null {
 /**
  * Requests predating `kind` (Eve < 0.28) are told apart by shape, the way
  * their emitters built them: approvals render a confirmation with
- * approve/deny options, questions a select/text prompt. Both carry an
- * `action.callId`, so the action's presence distinguishes nothing. The
+ * approve/deny options, questions a select/text prompt. (Eve 0.32 renamed the
+ * negative option to `cancel`; no request this path sees is that new.) Both
+ * carry an `action.callId`, so the action's presence distinguishes nothing. The
  * unrecognisable rest defaults to required — a wrongly locked composer is
  * answerable on screen, a wrongly dismissed approval silently defers every
  * later message.

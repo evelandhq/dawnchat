@@ -108,7 +108,7 @@ describe("ChatThread with Eve and AI Elements", () => {
           turnId: "turn_1",
         },
       },
-      { type: "step.started", data: { sequence: 2, stepIndex: 0, turnId: "turn_1" } },
+      { type: "step.started", data: { modelId: "fake/model", sequence: 2, stepIndex: 0, turnId: "turn_1" } },
       {
         type: "reasoning.completed",
         data: {
@@ -195,7 +195,7 @@ describe("ChatThread with Eve and AI Elements", () => {
 
   it("submits a structured HITL option through the Eve continuation route", async () => {
     const events = stampEvents([
-      { type: "step.started", data: { sequence: 1, stepIndex: 0, turnId: "turn_1" } },
+      { type: "step.started", data: { modelId: "fake/model", sequence: 1, stepIndex: 0, turnId: "turn_1" } },
       {
         type: "actions.requested",
         data: {
@@ -288,7 +288,7 @@ describe("ChatThread with Eve and AI Elements", () => {
   it("holds a multi-question batch until every question is answered", async () => {
     const events = stampEvents([
       { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
-      { type: "step.started", data: { sequence: 1, stepIndex: 0, turnId: "turn_1" } },
+      { type: "step.started", data: { modelId: "fake/model", sequence: 1, stepIndex: 0, turnId: "turn_1" } },
       {
         type: "input.requested",
         data: {
@@ -394,7 +394,7 @@ describe("ChatThread with Eve and AI Elements", () => {
   it("keeps a rejected batch answerable instead of stranding it", async () => {
     const events = stampEvents([
       { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
-      { type: "step.started", data: { sequence: 1, stepIndex: 0, turnId: "turn_1" } },
+      { type: "step.started", data: { modelId: "fake/model", sequence: 1, stepIndex: 0, turnId: "turn_1" } },
       {
         type: "input.requested",
         data: {
@@ -465,7 +465,7 @@ describe("ChatThread with Eve and AI Elements", () => {
   it("unlocks a chat whose stored stream never recorded the resuming turn", () => {
     const streamed = stampEvents([
       { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
-      { type: "step.started", data: { sequence: 1, stepIndex: 0, turnId: "turn_1" } },
+      { type: "step.started", data: { modelId: "fake/model", sequence: 1, stepIndex: 0, turnId: "turn_1" } },
       {
         type: "input.requested",
         data: {
@@ -522,7 +522,7 @@ describe("ChatThread with Eve and AI Elements", () => {
   it("keeps a partly answered approval batch answerable across the deferred turn", () => {
     const events = stampEvents([
       { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
-      { type: "step.started", data: { sequence: 1, stepIndex: 0, turnId: "turn_1" } },
+      { type: "step.started", data: { modelId: "fake/model", sequence: 1, stepIndex: 0, turnId: "turn_1" } },
       {
         type: "input.requested",
         data: {
@@ -581,7 +581,7 @@ describe("ChatThread with Eve and AI Elements", () => {
   it("reopens the composer for a replayed batch Eve is no longer parked on", () => {
     const events = stampEvents([
       { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
-      { type: "step.started", data: { sequence: 1, stepIndex: 0, turnId: "turn_1" } },
+      { type: "step.started", data: { modelId: "fake/model", sequence: 1, stepIndex: 0, turnId: "turn_1" } },
       {
         type: "input.requested",
         data: {
@@ -648,7 +648,7 @@ describe("ChatThread with Eve and AI Elements", () => {
   it("replays the option a stored response picked", async () => {
     const streamed = stampEvents([
       { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
-      { type: "step.started", data: { sequence: 1, stepIndex: 0, turnId: "turn_1" } },
+      { type: "step.started", data: { modelId: "fake/model", sequence: 1, stepIndex: 0, turnId: "turn_1" } },
       {
         type: "input.requested",
         data: {
@@ -710,7 +710,7 @@ describe("ChatThread with Eve and AI Elements", () => {
 
   it("submits freeform HITL text through the same continuation contract", async () => {
     const events = stampEvents([
-      { type: "step.started", data: { sequence: 1, stepIndex: 0, turnId: "turn_1" } },
+      { type: "step.started", data: { modelId: "fake/model", sequence: 1, stepIndex: 0, turnId: "turn_1" } },
       {
         type: "actions.requested",
         data: {
@@ -781,7 +781,7 @@ describe("ChatThread with Eve and AI Elements", () => {
 
   it("renders falsy tool outputs instead of dropping valid results", async () => {
     const events = stampEvents([
-      { type: "step.started", data: { sequence: 1, stepIndex: 0, turnId: "turn_1" } },
+      { type: "step.started", data: { modelId: "fake/model", sequence: 1, stepIndex: 0, turnId: "turn_1" } },
       {
         type: "actions.requested",
         data: {
@@ -1107,6 +1107,66 @@ describe("ChatThread with Eve and AI Elements", () => {
     );
   });
 
+  it("names the running turn when stopping, leaving other parks alone", async () => {
+    const getCallerToken = vi.fn().mockResolvedValue("caller-token");
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (url.endsWith("/pending-input")) return pendingInputResponse();
+        if (url.endsWith("/cancel")) return Response.json({ ok: true, status: "accepted" });
+        if (!url.includes("/stream")) {
+          return Response.json(
+            { sessionId: "ses_1" },
+            { headers: { "x-eve-session-id": "ses_1" } },
+          );
+        }
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            // The park an earlier turn raised is still open; only `turn_7`
+            // is running, and only its parks may go with it.
+            controller.enqueue(
+              new TextEncoder().encode(
+                `${JSON.stringify({ type: "turn.started", data: { sequence: 1, turnId: "turn_7" } })}\n`,
+              ),
+            );
+            init?.signal?.addEventListener("abort", () => {
+              controller.error(new DOMException("Aborted", "AbortError"));
+            });
+          },
+        });
+        return new Response(body, {
+          headers: { "content-type": "application/x-ndjson; charset=utf-8" },
+        });
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({ sessionState: { sessionId: "ses_1", streamIndex: 0 } })}
+        events={[]}
+        pendingInput={EMPTY_PENDING}
+        getCallerToken={getCallerToken}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "Start a long task" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Stop generating" }));
+
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([input]) => String(input).endsWith("/cancel")),
+      ).toBe(true),
+    );
+    const cancelCall = fetchMock.mock.calls.find(([input]) =>
+      String(input).endsWith("/cancel"),
+    );
+    expect(JSON.parse(String(cancelCall?.[1]?.body))).toEqual({ turnId: "turn_7" });
+  });
+
   it("retries the original turn with a Caller Token after an Eveland route challenge", async () => {
     const challenge =
       'Bearer realm="eveland", authorization_uri="https://identity.example.com/identity/login", project_id="project_support", display_name="Eveland"';
@@ -1231,7 +1291,7 @@ describe("ChatThread with Eve and AI Elements", () => {
 
   it("renders connection authorization challenges without exposing credentials", () => {
     const events = stampEvents([
-      { type: "step.started", data: { sequence: 1, stepIndex: 0, turnId: "turn_1" } },
+      { type: "step.started", data: { modelId: "fake/model", sequence: 1, stepIndex: 0, turnId: "turn_1" } },
       {
         type: "authorization.required",
         data: {
@@ -1277,7 +1337,7 @@ describe("ChatThread with Eve and AI Elements", () => {
   it("answers each independently parked batch on its own", async () => {
     const events = stampEvents([
       { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
-      { type: "step.started", data: { sequence: 1, stepIndex: 0, turnId: "turn_1" } },
+      { type: "step.started", data: { modelId: "fake/model", sequence: 1, stepIndex: 0, turnId: "turn_1" } },
       {
         type: "input.requested",
         data: {
@@ -1379,7 +1439,7 @@ describe("ChatThread with Eve and AI Elements", () => {
   it("keeps the composer open while only dismissable questions are parked", () => {
     const events = stampEvents([
       { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
-      { type: "step.started", data: { sequence: 1, stepIndex: 0, turnId: "turn_1" } },
+      { type: "step.started", data: { modelId: "fake/model", sequence: 1, stepIndex: 0, turnId: "turn_1" } },
       {
         type: "input.requested",
         data: {
@@ -1425,10 +1485,110 @@ describe("ChatThread with Eve and AI Elements", () => {
     expect(screen.getByRole("button", { name: "Subscribers" })).toBeEnabled();
   });
 
+  it("locks the composer behind an open approval only for an Agent that would hold the message", () => {
+    const parkedApproval = (eveVersion: string) =>
+      stampEvents([
+        {
+          type: "session.started",
+          data: { runtime: { agentId: "agt_1", eveVersion } },
+        },
+        { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
+        {
+          type: "input.requested",
+          data: {
+            requests: [
+              {
+                requestId: "req_1",
+                kind: "tool-approval",
+                prompt: "Delete record 7?",
+                display: "confirmation",
+                options: [
+                  { id: "approve", label: "Allow", style: "primary" },
+                  { id: "cancel", label: "Cancel", style: "danger" },
+                ],
+                action: {
+                  kind: "tool-call",
+                  callId: "call_1",
+                  toolName: "delete_record",
+                  input: { id: 7 },
+                },
+              },
+            ],
+            sequence: 2,
+            stepIndex: 0,
+            turnId: "turn_1",
+          },
+        },
+        {
+          type: "session.waiting",
+          data: { wait: "next-user-message", continuationToken: "ses_1" },
+        },
+      ]);
+    const parked = pendingBatches({
+      requests: [{ requestId: "req_1", kind: "tool-approval" }],
+    });
+
+    // Through 0.31 Eve held an unrelated message until the approval was
+    // answered, so the composer had to say the chat was blocked.
+    const held = render(
+      <ChatThread
+        chat={chat({ sessionState: { sessionId: "ses_1", streamIndex: 4 } })}
+        events={parkedApproval("0.31.1")}
+        pendingInput={parked}
+      />,
+    );
+    expect(screen.getByLabelText("Message")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Allow" })).toBeEnabled();
+    held.unmount();
+
+    // From 0.32 the message runs as its own turn beside the open approval,
+    // which stays answerable, so there is nothing left to lock.
+    render(
+      <ChatThread
+        chat={chat({ sessionState: { sessionId: "ses_1", streamIndex: 4 } })}
+        events={parkedApproval("0.33.2")}
+        pendingInput={parked}
+      />,
+    );
+    expect(screen.getByLabelText("Message")).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Allow" })).toBeEnabled();
+  });
+
+  it("asks for the queue turn policy so a message never steers a running turn", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ sessionId: "ses_1" }), {
+        status: 200,
+        headers: { "content-type": "application/json", "x-eve-session-id": "ses_1" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({ sessionState: { sessionId: "ses_1", streamIndex: 4 } })}
+        events={[]}
+        pendingInput={EMPTY_PENDING}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "One more thing" },
+    });
+    fireEvent.submit(screen.getByLabelText("Message").closest("form")!);
+
+    const turnCalls = () =>
+      fetchMock.mock.calls.filter((call) => !isPendingInputCall(call));
+    await waitFor(() => expect(turnCalls().length).toBeGreaterThan(0));
+    // Eve 0.33 would otherwise cancel whatever turn is running and replace it.
+    expect(JSON.parse(String(turnCalls()[0]?.[1]?.body))).toMatchObject({
+      turnPolicy: "queue",
+    });
+  });
+
   it("reconciles open batches when a turn boundary arrives from another actor", async () => {
     const events = stampEvents([
       { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
-      { type: "step.started", data: { sequence: 1, stepIndex: 0, turnId: "turn_1" } },
+      { type: "step.started", data: { modelId: "fake/model", sequence: 1, stepIndex: 0, turnId: "turn_1" } },
       {
         type: "input.requested",
         data: {
@@ -1501,7 +1661,7 @@ describe("ChatThread with Eve and AI Elements", () => {
   it("ignores a stale ledger response that raced a newer live batch", async () => {
     const events = stampEvents([
       { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
-      { type: "step.started", data: { sequence: 1, stepIndex: 0, turnId: "turn_1" } },
+      { type: "step.started", data: { modelId: "fake/model", sequence: 1, stepIndex: 0, turnId: "turn_1" } },
       {
         type: "input.requested",
         data: {
@@ -1614,7 +1774,7 @@ describe("ChatThread with Eve and AI Elements", () => {
   it("commits first-time freeform text on blur so the batch can complete", async () => {
     const events = stampEvents([
       { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
-      { type: "step.started", data: { sequence: 1, stepIndex: 0, turnId: "turn_1" } },
+      { type: "step.started", data: { modelId: "fake/model", sequence: 1, stepIndex: 0, turnId: "turn_1" } },
       {
         type: "input.requested",
         data: {

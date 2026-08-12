@@ -10,11 +10,13 @@ import {
 import { getDbClient } from "@/db/provider";
 import { createEveClientForConnection } from "@/eve/client";
 import {
+  clearPendingBatchesForTurn,
   EMPTY_PENDING_INPUT,
   inputRespondedEvent,
   pendingRequestsFromEvent,
   readInputResponses,
   settlePendingInput,
+  turnIdFromEvent,
   withoutContinuationToken,
   type PendingInputRequest,
 } from "@/eve/proxy-contract";
@@ -97,9 +99,19 @@ export async function proxyCancelEveTurn(
     // (the session was parked between turns) leaves Eve's batch alive, and
     // clearing the ledger for it would hide the controls while every later
     // message is silently deferred.
+    //
+    // The browser stops its stream before it cancels, so the `turn.cancelled`
+    // event may never reach the tap — this is the ledger's only chance to
+    // record the teardown. A caller that named the turn it was stopping gets
+    // the same turn-scoped clear the tap applies; an unattributed cancel keeps
+    // the blanket one, which is what "cancel this chat" has always meant.
     if (cancelWasAccepted(result)) {
       await resolved.repository
-        .updatePendingInput(resolved.chat.id, () => EMPTY_PENDING_INPUT)
+        .updatePendingInput(resolved.chat.id, (current) =>
+          turnId
+            ? current && clearPendingBatchesForTurn(current, turnId)
+            : EMPTY_PENDING_INPUT,
+        )
         .catch((error: unknown) => {
           console.error(`Failed to clear pending input for ${resolved.chat.id}:`, error);
         });
@@ -542,23 +554,34 @@ function createPersistedEventStream(input: {
 }
 
 /**
- * The ledger transition an event carries. An `input.requested` opens its
- * batch; a cancelled turn or a terminal session closes every park. Turn
- * boundaries deliberately map to nothing — Eve emits them without resolving
- * anything (a re-parked required batch), so only real teardown events clear.
+ * The ledger transition an event carries. An `input.requested` opens its batch
+ * under the turn that raised it; a terminal session closes every park; a
+ * cancelled turn closes only the parks that turn owns, because from Eve 0.33 a
+ * steered message cancels the running turn while older batches stay parked and
+ * answerable. Turn boundaries deliberately map to nothing — Eve emits them
+ * without resolving anything (a re-parked required batch), so only real
+ * teardown events clear.
  */
 function pendingInputTransition(
   event: MessageStreamEvent,
-): { open: PendingInputRequest[] } | { clear: true } | undefined {
+):
+  | { open: PendingInputRequest[]; turnId?: string }
+  | { clear: true }
+  | { clearTurn: string }
+  | undefined {
   if (event.type === "input.requested") {
     const requests = pendingRequestsFromEvent(event);
-    return requests ? { open: requests } : undefined;
+    if (!requests) return undefined;
+    const turnId = turnIdFromEvent(event);
+    return { open: requests, ...(turnId ? { turnId } : {}) };
   }
-  if (
-    event.type === "turn.cancelled" ||
-    event.type === "session.completed" ||
-    event.type === "session.failed"
-  ) {
+  if (event.type === "turn.cancelled") {
+    const turnId = turnIdFromEvent(event);
+    // A cancel that names no turn is unattributable; keeping every batch is
+    // the recoverable direction (see `clearPendingBatchesForTurn`).
+    return turnId ? { clearTurn: turnId } : undefined;
+  }
+  if (event.type === "session.completed" || event.type === "session.failed") {
     return { clear: true };
   }
   return undefined;

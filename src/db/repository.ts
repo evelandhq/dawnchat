@@ -14,6 +14,7 @@ import {
   schema,
 } from "@/db/schema";
 import {
+  clearPendingBatchesForTurn,
   EMPTY_PENDING_INPUT,
   openPendingBatch,
   parsePendingInput,
@@ -106,7 +107,10 @@ export type AppendEventInput = {
    * when the event row is newly inserted — a replayed event must not reopen a
    * settled batch.
    */
-  pendingInput?: { open: PendingInputRequest[] } | { clear: true };
+  pendingInput?:
+    | { open: PendingInputRequest[]; turnId?: string }
+    | { clear: true }
+    | { clearTurn: string };
 } & (
   | {
       eventIndex: number;
@@ -569,13 +573,18 @@ export function createRepository(db: RepositoryDb): Repository {
             .where(eq(chats.id, input.chatId))
             .limit(1);
           if (chatRow) {
+            const current = parsePendingInput(chatRow.pendingInputJson) ?? EMPTY_PENDING_INPUT;
+            const transition = input.pendingInput;
             const next =
-              "clear" in input.pendingInput
+              "clear" in transition
                 ? EMPTY_PENDING_INPUT
-                : openPendingBatch(
-                    parsePendingInput(chatRow.pendingInputJson) ?? EMPTY_PENDING_INPUT,
-                    { eventIndex: created.eventIndex, requests: input.pendingInput.open },
-                  );
+                : "clearTurn" in transition
+                  ? clearPendingBatchesForTurn(current, transition.clearTurn)
+                  : openPendingBatch(current, {
+                      eventIndex: created.eventIndex,
+                      requests: transition.open,
+                      ...(transition.turnId ? { turnId: transition.turnId } : {}),
+                    });
             await tx
               .update(chats)
               .set({ pendingInputJson: serializePendingInput(next), updatedAt: new Date() })

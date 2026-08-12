@@ -38,8 +38,12 @@ import {
 import { EveMessageView, type InputRequestBatch } from "@/components/eve-message";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import {
+  activeTurnIdFromEvents,
+  agentEveVersion,
+  holdsMessagesForPendingInput,
   isRequiredKind,
   pendingRequestsFromEvent,
+  turnIdFromEvent,
   type ChatEvent,
   type PendingInputRequest,
   type PendingInputState,
@@ -52,6 +56,17 @@ import {
 
 /** One outbound turn: a user message, or a reply to pending HITL requests. */
 type TurnPayload = Parameters<PrepareSend>[0];
+
+/**
+ * Eve 0.33 sends messages with `turnPolicy: "steer"` by default: a message
+ * that arrives while a turn is running cancels that turn and replaces it,
+ * keeping its partial output. This chat offers Stop as the deliberate way to
+ * interrupt, so every message asks for the queue policy Eve applied before
+ * 0.33 — a racing second tab then waits for the running turn instead of
+ * destroying it. Older agents in the support window parse request fields one
+ * by one and ignore the key.
+ */
+const TURN_POLICY = "queue" as const;
 
 export type ChatThreadSummary = {
   id: string;
@@ -223,6 +238,10 @@ function ChatThreadSession({
     draftResponsesRef.current,
   );
   const pendingBatchesRef = useRef<ClientPendingBatch[]>(initialPendingBatches);
+  // The turn a Stop should name, so the proxy tears down that turn's parks
+  // instead of every open batch (see `clearPendingBatchesForTurn`). Seeded
+  // from history because a reload resumes the stream mid-turn.
+  const activeTurnIdRef = useRef<string | null>(activeTurnIdFromEvents(events));
   // Every local change advances the generation; a refetch started before the
   // latest change is stale and must not overwrite it (a slow GET returning an
   // intermediate state would otherwise erase a batch a live event just opened).
@@ -328,6 +347,19 @@ function ChatThreadSession({
       if (event.type === "message.received") {
         setShowPendingUserMessage(false);
       }
+      if (event.type === "turn.started") {
+        activeTurnIdRef.current = turnIdFromEvent(event) ?? null;
+      }
+      if (
+        event.type === "turn.cancelled" ||
+        event.type === "turn.completed" ||
+        event.type === "turn.failed"
+      ) {
+        const ended = turnIdFromEvent(event);
+        if (!ended || ended === activeTurnIdRef.current) {
+          activeTurnIdRef.current = null;
+        }
+      }
       if (event.type === "input.requested") {
         const requests = pendingRequestsFromEvent(event);
         if (requests) {
@@ -369,20 +401,26 @@ function ChatThreadSession({
     }
     return ids;
   }, [pendingBatches]);
-  // Only a required request locks the composer. A dismissable-only park keeps
-  // it open: a plain message is Eve's own dismiss gesture for such a batch.
+  // The lock exists only for Agents that would hold the message: through Eve
+  // 0.31 an unrelated message sent while a tool approval or an authorization
+  // challenge was open never ran, so the composer had to say so. From 0.32 the
+  // message runs beside the open request and the controls stay answerable,
+  // which leaves nothing to lock. A dismissable-only park never locked either
+  // way: a plain message is Eve's own dismiss gesture for such a batch.
+  const holdsMessages = holdsMessagesForPendingInput(agentEveVersion(agent.events));
   const hasPendingInteraction =
-    pendingBatches.some((batch) =>
+    holdsMessages &&
+    (pendingBatches.some((batch) =>
       batch.requests.some(
         (request) =>
           isRequiredKind(request.kind) && !batch.answered.has(request.requestId),
       ),
     ) ||
-    agent.data.messages.some((message) =>
-      message.parts.some(
-        (part) => part.type === "authorization" && part.state === "required",
-      ),
-    );
+      agent.data.messages.some((message) =>
+        message.parts.some(
+          (part) => part.type === "authorization" && part.state === "required",
+        ),
+      ));
   const composerDisabled =
     readOnly || chat.status === "completed" || hasPendingInteraction;
   const visibleMessages =
@@ -428,7 +466,7 @@ function ChatThreadSession({
     }
     pendingSentRef.current = true;
     setLocalError(null);
-    void agent.send(pendingUserMessage).catch((error: unknown) => {
+    void agent.send(pendingUserMessage, { turnPolicy: TURN_POLICY }).catch((error: unknown) => {
       pendingSentRef.current = false;
       setLocalError(errorMessage(error));
     });
@@ -442,7 +480,9 @@ function ChatThreadSession({
 
     setLocalError(null);
     try {
-      await agent.send(promptMessageToUserContent(message));
+      await agent.send(promptMessageToUserContent(message), {
+        turnPolicy: TURN_POLICY,
+      });
     } catch (error) {
       setLocalError(errorMessage(error));
       throw error;
@@ -505,6 +545,7 @@ function ChatThreadSession({
   };
 
   const handleStop = (): void => {
+    const stoppedTurnId = activeTurnIdRef.current;
     agent.stop();
     const sessionId = agent.session?.sessionId;
     const getCancelToken = getAccessToken ?? getCallerToken;
@@ -522,7 +563,7 @@ function ChatThreadSession({
               authorization: `Bearer ${accessToken}`,
               "content-type": "application/json",
             },
-            body: "{}",
+            body: JSON.stringify(stoppedTurnId ? { turnId: stoppedTurnId } : {}),
           },
         ),
       )
@@ -618,7 +659,7 @@ async function sendTurn(
   if (inputResponses !== undefined) {
     return agent.respond(inputResponses, options);
   }
-  return agent.send(message, options);
+  return agent.send(message, { ...options, turnPolicy: TURN_POLICY });
 }
 
 function pendingUserContentMessage(

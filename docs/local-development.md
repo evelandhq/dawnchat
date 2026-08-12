@@ -102,6 +102,7 @@ is forwarded upstream. After an Eveland challenge, a Caller Token for the exact
 Project is accepted and forwarded only to the signed Catalog endpoint.
 External turns forward only the external Agent's stored authentication. A turn
 creates or continues an Eve session, consumes the stream, persists canonical
-events, and stores `sessionId`, `streamIndex`, and — for an Eve 0.29/0.30
-Agent — a server-only `continuationToken` for follow-up messages. An Eve 0.31
-Agent addresses the session by ID, so no token is stored and none is sent.
+events, and stores `sessionId`, `streamIndex`, and — for a session opened
+against an Eve 0.29/0.30 Agent — a server-only `continuationToken` for
+follow-up messages. Every Agent in the supported window (0.31.x through
+0.33.x) addresses the session by ID, so no token is stored and none is sent.
