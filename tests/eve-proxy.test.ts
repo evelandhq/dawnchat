@@ -1111,6 +1111,146 @@ describe("per-chat Eve protocol proxy", () => {
     });
   });
 
+  it("clears only the cancelled turn's parks, so a steered turn spares the rest", async () => {
+    const repository = createRepository(testDb.db);
+    const routes = await loadProxyRoutes();
+    const parkThenCancel = (cancelledTurnId: string) =>
+      [
+        {
+          type: "input.requested",
+          data: {
+            requests: [
+              {
+                requestId: "req_1",
+                kind: "tool-approval",
+                prompt: "Delete the record?",
+                action: {
+                  kind: "tool-call",
+                  callId: "call_1",
+                  toolName: "delete_record",
+                  input: {},
+                },
+              },
+            ],
+            sequence: 1,
+            stepIndex: 0,
+            turnId: "turn_1",
+          },
+        },
+        { type: "turn.cancelled", data: { sequence: 2, turnId: cancelledTurnId } },
+      ] as const;
+
+    const drain = async (cancelledTurnId: string): Promise<string> => {
+      const server = await fakeServer({
+        generation: "0.33",
+        streamEvents: parkThenCancel(cancelledTurnId),
+      });
+      const agent = await repository.createAgentConnection({
+        name: `Steering Eve ${cancelledTurnId}`,
+        baseUrl: server.baseUrl,
+        authType: "none",
+        evelandProjectId: "project_support",
+      });
+      await repository.updateAgentHealth(agent.id, { status: "healthy" });
+      const chat = await repository.createChat({
+        agentConnectionId: agent.id,
+        title: `Steered by ${cancelledTurnId}`,
+        ...chatIdentity,
+      });
+      await repository.updateChatSessionState(chat.id, { sessionId: "ses_1", streamIndex: 0 });
+      const response = await routes.streamSession(
+        new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1/stream`, {
+          headers: callerHeaders(),
+        }),
+        { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+      );
+      // No terminal event ends this stream — a steered session parks and waits
+      // — so read exactly the two scripted events and drop the reader, which
+      // is what a browser navigating away does.
+      await readStreamedEvents(response, 2);
+      return chat.id;
+    };
+
+    // Eve 0.33 steers a message that arrives mid-turn: it cancels the running
+    // turn and replaces it, while every batch an earlier turn parked stays
+    // open and answerable. Clearing those would strand the tool call behind
+    // controls the browser stopped rendering.
+    const steered = await drain("turn_2");
+    await expect(repository.getChat(steered)).resolves.toMatchObject({
+      pendingInput: {
+        batches: [
+          expect.objectContaining({
+            requests: [{ requestId: "req_1", kind: "tool-approval" }],
+            turnId: "turn_1",
+          }),
+        ],
+      },
+    });
+
+    // Cancelling the turn that raised the park does tear it down.
+    const torndown = await drain("turn_1");
+    await expect(repository.getChat(torndown)).resolves.toMatchObject({
+      pendingInput: { batches: [] },
+    });
+  });
+
+  it("scopes an accepted cancel to the turn the caller named", async () => {
+    const repository = createRepository(testDb.db);
+    const routes = await loadProxyRoutes();
+    const parked = {
+      batches: [
+        {
+          eventIndex: 1,
+          requests: [{ requestId: "req_1", kind: "tool-approval" }],
+          answered: [],
+          turnId: "turn_1",
+        },
+      ],
+    };
+    const setUpChat = async (title: string) => {
+      const server = await fakeServer({ generation: "0.33", cancelStatus: "accepted" });
+      const agent = await repository.createAgentConnection({
+        name: `Cancel ${title}`,
+        baseUrl: server.baseUrl,
+        authType: "none",
+        evelandProjectId: "project_support",
+      });
+      await repository.updateAgentHealth(agent.id, { status: "healthy" });
+      const chat = await repository.createChat({
+        agentConnectionId: agent.id,
+        title,
+        ...chatIdentity,
+      });
+      await repository.updateChatSessionState(chat.id, { sessionId: "ses_1", streamIndex: 2 });
+      await repository.updatePendingInput(chat.id, () => parked);
+      return chat;
+    };
+    const cancel = (chatId: string, body: unknown) =>
+      routes.cancelSession(
+        new Request(`http://localhost/api/chats/${chatId}/agent/eve/v1/session/ses_1/cancel`, {
+          method: "POST",
+          headers: callerHeaders({ "content-type": "application/json" }),
+          body: JSON.stringify(body),
+        }),
+        { params: Promise.resolve({ chatId, sessionId: "ses_1" }) },
+      );
+
+    // Stopping the turn a message is streaming under leaves the approval an
+    // earlier turn parked; the browser stops its stream before it cancels, so
+    // this request is the only record the ledger gets.
+    const other = await setUpChat("Stopped another turn");
+    expect((await cancel(other.id, { turnId: "turn_2" })).status).toBe(200);
+    await expect(repository.getChat(other.id)).resolves.toMatchObject({
+      pendingInput: parked,
+    });
+
+    const own = await setUpChat("Stopped the parked turn");
+    expect((await cancel(own.id, { turnId: "turn_1" })).status).toBe(200);
+    await expect(repository.getChat(own.id)).resolves.toMatchObject({
+      pendingInput: { batches: [] },
+    });
+  });
+
   it("keeps parks when a turn fails without reaching Eve", async () => {
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
@@ -1378,6 +1518,35 @@ function callerHeaders(
   token = "caller-token",
 ): Record<string, string> {
   return { authorization: `Bearer ${token}`, ...headers };
+}
+
+/**
+ * Reads the first `count` NDJSON events off a proxied stream and releases it.
+ * A session that parks instead of finishing never closes its stream, so a test
+ * that only cares about what the proxy persisted stops reading itself.
+ */
+async function readStreamedEvents(response: Response, count: number): Promise<unknown[]> {
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("Streamed response carried no body");
+  const decoder = new TextDecoder();
+  const events: unknown[] = [];
+  let buffer = "";
+  try {
+    while (events.length < count) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let newline = buffer.indexOf("\n");
+      while (newline !== -1 && events.length < count) {
+        events.push(JSON.parse(buffer.slice(0, newline)));
+        buffer = buffer.slice(newline + 1);
+        newline = buffer.indexOf("\n");
+      }
+    }
+  } finally {
+    await reader.cancel();
+  }
+  return events;
 }
 
 const testVerifier: CallerTokenVerifier = {

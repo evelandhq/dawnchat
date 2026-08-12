@@ -379,3 +379,50 @@ difference there degrades to lingering controls rather than a lost park. The
 proxy tests pin each mirrored behaviour, so an Eve upgrade that changes them
 turns tests red instead of shipping a silent mislabel — the failure mode of
 the previous two passes.
+
+### 2.11 Addendum — re-audited against Eve 0.32 and 0.33
+
+Eveland's support window moved to 0.31.x/0.32.x/0.33.x, and 0.33 rewrote the
+harness internals §2.10 mirrors: pending input became an ordered collection of
+batches (`harness/pending-input-batches.js`) resolved by
+`resolveApprovalInputBatches` / `resolveQuestionOnlyInputBatches` /
+`resolveSessionLimitInput` instead of a single `resolvePendingInput`. Re-read
+against 0.33.2:
+
+- **Settle rules survive.** A question batch still resolves on any one answer,
+  with the rest reaching the model as `{ status: "ignored" }`
+  (`findAnsweredQuestionBatches`); an approval batch still resolves only once
+  every approval request in it is answered, and leftover answers are carried
+  forward as deferred input rather than dropped. §2.1's `answered` accumulation
+  and the required-open rule are unchanged.
+- **No new signal.** 0.33.2 emits the same stream event types as 0.31, so
+  nothing replaces the ledger and #1095 remains the blocking upstream gap.
+- **`turn.cancelled` is no longer a teardown signal by itself.** From 0.33 a
+  message sent while a turn runs steers by default: Eve cancels that turn,
+  emits `turn.cancelled` + `session.waiting`, and starts the replacement under
+  a new turn ID — while batches parked by *earlier* turns stay open and
+  answerable. §2.2's blanket clear would have hidden live approval controls, so
+  a batch now records the `turnId` from its `input.requested` and a cancel
+  clears only that turn's batches. A batch with no recorded turn (stored before
+  this change, or an event without one) is kept: conservative-open, as
+  everywhere else. The Stop button names the turn it stopped so the cancel
+  route can apply the same scoping, since the browser drops its stream before
+  cancelling and the tap may never see the event.
+- **Deferral is gone upstream, so the composer lock is version-gated.** 0.32
+  stopped holding ordinary messages behind an open authorization challenge and
+  0.33.1 behind an open tool approval (both now run as their own turn, with a
+  later structured answer still resolving the original call). §2.4's lock is
+  the local workaround for that deferral and now applies only to Agents below
+  0.32, read from `session.started`'s `runtime.eveVersion`; an unknown version
+  keeps the lock.
+- **Sends ask for `turnPolicy: "queue"`** so steering never applies to this
+  chat's own turns. Agents before 0.33 parse request fields individually and
+  ignore the key.
+
+§2.10's bet only half held. The settle rules are pinned by tests, so a change
+there would have gone red — but the steering change would not have: the fake
+Agent replays scripted events and never steers, so the whole suite stayed green
+on 0.33.2 and only a re-read of the changelog and harness found it. Behaviour
+that lives in Eve's session driver rather than in a response the proxy parses
+needs a scripted stream to pin it, which is what
+`tests/eve-proxy.test.ts`'s steer case now does.

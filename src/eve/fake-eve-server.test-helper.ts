@@ -12,9 +12,18 @@ export interface CapturedEveRequest {
 /**
  * Session-protocol generation of the fake Agent. Eve 0.29 and 0.30 address a
  * follow-up turn by continuation token and refuse a request without one; Eve
- * 0.31 addresses it by session ID and refuses a request that carries one.
+ * 0.31 and later address it by session ID and refuse a request that carries
+ * one.
+ *
+ * 0.31, 0.32, and 0.33 are the window Eveland hosts and are identical on the
+ * wire — same stream version, same routes, same session addressing. They
+ * differ in runtime behaviour this fake does not simulate (0.32+ runs a
+ * message beside an open request instead of holding it; 0.33 steers by
+ * default), which tests drive through scripted `streamEvents` instead. The
+ * older two remain because the proxy still tolerates a token-addressed
+ * session it opened before the Agent upgraded.
  */
-export type FakeEveGeneration = "0.29" | "0.30" | "0.31";
+export type FakeEveGeneration = "0.29" | "0.30" | "0.31" | "0.32" | "0.33";
 
 export interface FakeEveServerOptions {
   readonly authenticationChallenge?: {
@@ -39,6 +48,8 @@ const streamVersionByGeneration: Record<FakeEveGeneration, number> = {
   "0.29": 20,
   "0.30": 21,
   "0.31": 21,
+  "0.32": 21,
+  "0.33": 21,
 };
 
 export interface FakeEveServer {
@@ -84,8 +95,8 @@ function writeNdjson(
 
 export async function startFakeEveServer(options: FakeEveServerOptions = {}): Promise<FakeEveServer> {
   const requests: CapturedEveRequest[] = [];
-  const generation = options.generation ?? "0.31";
-  const fixedSessions = generation === "0.31";
+  const generation = options.generation ?? "0.33";
+  const fixedSessions = generation !== "0.29" && generation !== "0.30";
   let nextSessionId = 1;
 
   const server = createServer(async (request, response) => {

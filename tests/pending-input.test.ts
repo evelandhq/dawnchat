@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  activeTurnIdFromEvents,
+  agentEveVersion,
+  clearPendingBatchesForTurn,
   derivePendingInput,
+  holdsMessagesForPendingInput,
   parsePendingInput,
   serializePendingInput,
   settlePendingInput,
@@ -26,13 +30,14 @@ function event(
 
 function inputRequested(
   requests: Array<{ requestId: string; kind?: string; callId?: string }>,
-  options: { sessionId?: string | null } = {},
+  options: { sessionId?: string | null; turnId?: string } = {},
 ): StoredChatEvent {
   return event(
     "input.requested",
     {
       type: "input.requested",
       data: {
+        ...(options.turnId ? { turnId: options.turnId } : {}),
         requests: requests.map((request) => ({
           requestId: request.requestId,
           ...(request.kind ? { kind: request.kind } : {}),
@@ -83,14 +88,14 @@ function derive(events: StoredChatEvent[], overrides: Partial<{ sessionId: strin
 }
 
 describe("legacy pending-input derivation", () => {
-  it("derives an unanswered required batch at the tail as open", () => {
+  it("derives an unanswered required batch at the tail as open, under its own turn", () => {
     nextIndex = 1;
     const events = [
-      inputRequested([{ requestId: "req_1", kind: "tool-approval" }]),
+      inputRequested([{ requestId: "req_1", kind: "tool-approval" }], { turnId: "turn_1" }),
       event("session.waiting", { type: "session.waiting", data: {} }),
     ];
     expect(derive(events).batches).toEqual([
-      expect.objectContaining({ eventIndex: 1, answered: [] }),
+      expect.objectContaining({ eventIndex: 1, answered: [], turnId: "turn_1" }),
     ]);
   });
 
@@ -211,6 +216,17 @@ describe("legacy pending-input derivation", () => {
     // Unrecognisable shapes err required: a locked composer is answerable on
     // screen, a dismissed approval silently defers every later message.
     expect(kindOf({ action })).toBe("tool-approval");
+    // Eve 0.32 renamed the negative approval option from `deny` to `cancel`.
+    // Nothing here has to learn the new id: a request that old predates `kind`
+    // by four minors, and every Agent in the support window states its kind.
+    expect(
+      kindOf({
+        kind: "tool-approval",
+        display: "confirmation",
+        options: [{ id: "approve", label: "Allow" }, { id: "cancel", label: "Cancel" }],
+        action,
+      }),
+    ).toBe("tool-approval");
   });
 });
 
@@ -251,6 +267,101 @@ describe("settlePendingInput", () => {
   });
 });
 
+describe("clearPendingBatchesForTurn", () => {
+  const parked: PendingInputState = {
+    batches: [
+      {
+        eventIndex: 1,
+        requests: [{ requestId: "req_a", kind: "tool-approval" }],
+        answered: [],
+        turnId: "turn_1",
+      },
+      {
+        eventIndex: 2,
+        requests: [{ requestId: "req_b", kind: "question" }],
+        answered: [],
+        turnId: "turn_2",
+      },
+      // Parked before the ledger recorded turns.
+      {
+        eventIndex: 3,
+        requests: [{ requestId: "req_c", kind: "tool-approval" }],
+        answered: [],
+      },
+    ],
+  };
+
+  it("drops the cancelled turn's own parks and nothing else", () => {
+    expect(clearPendingBatchesForTurn(parked, "turn_1").batches).toEqual([
+      parked.batches[1],
+      parked.batches[2],
+    ]);
+  });
+
+  it("spares every park when a steered turn is cancelled", () => {
+    expect(clearPendingBatchesForTurn(parked, "turn_9")).toEqual(parked);
+  });
+});
+
+describe("activeTurnIdFromEvents", () => {
+  const turn = (type: string, turnId: string) => ({ type, data: { turnId } });
+
+  it("reports the turn a reload resumes into, parked turns included", () => {
+    expect(
+      activeTurnIdFromEvents([
+        turn("turn.started", "turn_1"),
+        turn("turn.completed", "turn_1"),
+        turn("turn.started", "turn_2"),
+        // Parked on input: suspended, not finished.
+        { type: "input.requested", data: { turnId: "turn_2", requests: [] } },
+        { type: "session.waiting", data: {} },
+      ]),
+    ).toBe("turn_2");
+  });
+
+  it("reports nothing once the turn or the session ended", () => {
+    expect(
+      activeTurnIdFromEvents([turn("turn.started", "turn_1"), turn("turn.cancelled", "turn_1")]),
+    ).toBeNull();
+    expect(
+      activeTurnIdFromEvents([
+        turn("turn.started", "turn_1"),
+        { type: "session.failed", data: {} },
+      ]),
+    ).toBeNull();
+    expect(activeTurnIdFromEvents([])).toBeNull();
+  });
+});
+
+describe("holdsMessagesForPendingInput", () => {
+  it("locks through 0.31 and releases from 0.32", () => {
+    expect(holdsMessagesForPendingInput("0.31.1")).toBe(true);
+    expect(holdsMessagesForPendingInput("0.32.0")).toBe(false);
+    expect(holdsMessagesForPendingInput("0.33.2")).toBe(false);
+    expect(holdsMessagesForPendingInput("1.0.0")).toBe(false);
+  });
+
+  it("locks when the version is missing or unreadable", () => {
+    expect(holdsMessagesForPendingInput(undefined)).toBe(true);
+    expect(holdsMessagesForPendingInput("nightly")).toBe(true);
+  });
+});
+
+describe("agentEveVersion", () => {
+  it("reads the newest session.started runtime and ignores everything else", () => {
+    expect(
+      agentEveVersion([
+        { type: "turn.started", data: { turnId: "turn_1" } },
+        { type: "session.started", data: { runtime: { eveVersion: "0.31.1" } } },
+        // A replaced session reports what the Agent runs now.
+        { type: "session.started", data: { runtime: { eveVersion: "0.33.2" } } },
+      ]),
+    ).toBe("0.33.2");
+    expect(agentEveVersion([{ type: "session.started", data: {} }])).toBeUndefined();
+    expect(agentEveVersion([])).toBeUndefined();
+  });
+});
+
 describe("pending-input serialization", () => {
   it("round-trips and treats unreadable values as legacy", () => {
     const state: PendingInputState = {
@@ -259,10 +370,21 @@ describe("pending-input serialization", () => {
           eventIndex: 7,
           requests: [{ requestId: "req_1", kind: "session-limit" }],
           answered: ["req_1"],
+          turnId: "turn_1",
         },
       ],
     };
     expect(parsePendingInput(serializePendingInput(state))).toEqual(state);
+    // A batch stored before turns were recorded stays readable.
+    expect(
+      parsePendingInput(
+        '{"batches":[{"eventIndex":1,"requests":[{"requestId":"req_1","kind":"question"}],"answered":[]}]}',
+      ),
+    ).toEqual({
+      batches: [
+        { eventIndex: 1, requests: [{ requestId: "req_1", kind: "question" }], answered: [] },
+      ],
+    });
     expect(parsePendingInput(null)).toBeNull();
     expect(parsePendingInput("not json")).toBeNull();
     expect(parsePendingInput('{"batches":[{"eventIndex":"x"}]}')).toBeNull();
