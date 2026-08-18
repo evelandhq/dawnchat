@@ -1021,8 +1021,12 @@ describe("ChatThread with Eve and AI Elements", () => {
     });
   });
 
-  it("requests authenticated cooperative cancellation when stopping a turn", async () => {
-    const getCallerToken = vi.fn(async () => "caller-token");
+  it("cancels the exact durable turn, authenticated like every other request", async () => {
+    // Eve 0.38 replaced the binding's local-abort stop() with cancel(): the
+    // store waits for the turn's `turn.started`, POSTs `{ turnId }` to the
+    // session cancel route under the same auth as sends, and keeps the stream
+    // attached — an unattributed cancel body is no longer possible.
+    const getAccessToken = vi.fn(async () => "app-token");
     const fetchMock = vi.fn(
       async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
         const url = String(input);
@@ -1044,20 +1048,21 @@ describe("ChatThread with Eve and AI Elements", () => {
         }
         const body = new ReadableStream<Uint8Array>({
           start(controller) {
-            controller.enqueue(
-              new TextEncoder().encode(
-                `${JSON.stringify({
-                  type: "message.appended",
-                  data: {
-                    messageDelta: "Working",
-                    messageSoFar: "Working",
-                    sequence: 1,
-                    stepIndex: 0,
-                    turnId: "turn_1",
-                  },
-                })}\n`,
-              ),
-            );
+            for (const event of [
+              { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
+              {
+                type: "message.appended",
+                data: {
+                  messageDelta: "Working",
+                  messageSoFar: "Working",
+                  sequence: 2,
+                  stepIndex: 0,
+                  turnId: "turn_1",
+                },
+              },
+            ]) {
+              controller.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
+            }
             init?.signal?.addEventListener("abort", () => {
               controller.error(new DOMException("Aborted", "AbortError"));
             });
@@ -1075,7 +1080,7 @@ describe("ChatThread with Eve and AI Elements", () => {
         chat={chat({ sessionState: { sessionId: "ses_1", streamIndex: 0 } })}
         events={[]}
         pendingInput={EMPTY_PENDING}
-        getCallerToken={getCallerToken}
+        getAccessToken={getAccessToken}
       />,
     );
 
@@ -1093,14 +1098,11 @@ describe("ChatThread with Eve and AI Elements", () => {
     const cancelCall = fetchMock.mock.calls.find(([input]) =>
       String(input).endsWith("/cancel"),
     );
-    expect(cancelCall?.[1]).toMatchObject({
-      method: "POST",
-      headers: {
-        authorization: "Bearer caller-token",
-        "content-type": "application/json",
-      },
-      body: "{}",
-    });
+    expect(cancelCall?.[1]?.method).toBe("POST");
+    const cancelHeaders = new Headers(cancelCall?.[1]?.headers);
+    expect(cancelHeaders.get("authorization")).toBe("Bearer app-token");
+    expect(cancelHeaders.get("content-type")).toBe("application/json");
+    expect(JSON.parse(String(cancelCall?.[1]?.body))).toEqual({ turnId: "turn_1" });
     // Whatever the cancel did server-side, the thread re-reads the ledger.
     await waitFor(() =>
       expect(fetchMock.mock.calls.some((call) => isPendingInputCall(call))).toBe(true),

@@ -19,6 +19,7 @@ import {
   openPendingBatch,
   parsePendingInput,
   serializePendingInput,
+  settleAnsweredRequests,
   type PendingInputRequest,
   type PendingInputState,
 } from "@/eve/proxy-contract";
@@ -110,7 +111,8 @@ export type AppendEventInput = {
   pendingInput?:
     | { open: PendingInputRequest[]; turnId?: string }
     | { clear: true }
-    | { clearTurn: string };
+    | { clearTurn: string }
+    | { settle: string[] };
 } & (
   | {
       eventIndex: number;
@@ -596,19 +598,25 @@ export function createRepository(db: RepositoryDb): Repository {
             .from(chats)
             .where(eq(chats.id, input.chatId))
             .limit(1);
-          if (chatRow) {
+          const legacy = chatRow ? parsePendingInput(chatRow.pendingInputJson) === null : false;
+          const transition = input.pendingInput;
+          // A settle on a legacy chat keeps the NULL marker: the event just
+          // stored feeds the one-shot derivation instead, which would miss
+          // batches this write would wrongly declare empty.
+          if (chatRow && !(legacy && "settle" in transition)) {
             const current = parsePendingInput(chatRow.pendingInputJson) ?? EMPTY_PENDING_INPUT;
-            const transition = input.pendingInput;
             const next =
               "clear" in transition
                 ? EMPTY_PENDING_INPUT
                 : "clearTurn" in transition
                   ? clearPendingBatchesForTurn(current, transition.clearTurn)
-                  : openPendingBatch(current, {
-                      eventIndex: created.eventIndex,
-                      requests: transition.open,
-                      ...(transition.turnId ? { turnId: transition.turnId } : {}),
-                    });
+                  : "settle" in transition
+                    ? settleAnsweredRequests(current, transition.settle)
+                    : openPendingBatch(current, {
+                        eventIndex: created.eventIndex,
+                        requests: transition.open,
+                        ...(transition.turnId ? { turnId: transition.turnId } : {}),
+                      });
             await tx
               .update(chats)
               .set({ pendingInputJson: serializePendingInput(next), updatedAt: new Date() })

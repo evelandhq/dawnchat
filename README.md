@@ -32,16 +32,22 @@ metadata cannot redirect a credential to another host.
 - Stream and render text, reasoning, tool calls/results, HITL requests, authorization challenges, and files through AI Elements.
 - Persist Eve events as the canonical chat history, with continuation tokens redacted and idempotent `(chat, session, stream index)` replay handling.
 - Continue existing chats through `useEveAgent` while keeping remote auth and the real `continuationToken` server-side.
-- Connect to Eve agents running 0.31.x, 0.32.x, or 0.33.x — the same support
-  window Eveland hosts. All three are identical on the wire: stream version 21,
-  the same routes, and a session addressed by ID. They differ in runtime
-  behaviour the chat adapts to (see below). A session this app opened against a
-  0.29/0.30 Agent is still continued by continuation token, which never leaves
-  the server, so an Agent that upgrades mid-session does not strand its chats.
-- Send every message with `turnPolicy: "queue"`. Eve 0.33 defaults message
-  sends to `"steer"` — a message arriving mid-turn cancels that turn and
-  replaces it — and this chat offers Stop as the deliberate way to interrupt
-  instead. Agents before 0.33 ignore the field.
+- Connect to Eve agents running 0.38.x or 0.39.x — the same support window
+  Eveland hosts. Both are identical on the wire: stream version 22 (bumped in
+  0.35 alongside the durable `approval.candidate`/`approval.settled` events),
+  the same routes, and a session addressed by ID. Eve's client parses stream
+  events without a version gate, so sessions this app opened against
+  0.31–0.33 Agents continue by ID and 0.29/0.30 sessions by continuation
+  token, which never leaves the server — an Agent that upgrades mid-session
+  does not strand its chats.
+- Send every message with `turnPolicy: "queue"`. Eve defaults message sends to
+  `"steer"` from 0.33 through 0.39 — a message arriving mid-turn cancels that
+  turn and replaces it — and this chat offers Stop as the deliberate way to
+  interrupt instead.
+- Stop is Eve 0.38's durable `cancel()`: the binding waits for the turn's
+  `turn.started`, cancels exactly that turn through the per-chat proxy's
+  cancel route, and stays attached to the stream until the turn settles, so
+  the proxy observes the `turn.cancelled` it caused.
 - PostgreSQL 16 persistence for agents, chats, protocol events, and Eve session state.
 - Provider-neutral Eveland login, identity-scope switching, and pre-expiry App/Caller Token refresh.
 - Require an Eveland Identity Session to use the app; the sidebar shows the
@@ -56,17 +62,20 @@ directory protocol are not supported.
 
 Eve parks a turn on a batch of input requests, but which batches a session is
 parked on lives only in Eve's server-side state — no stream event and no query
-exposes it, and no event ever records that a batch was answered. Both signals
-a browser could fall back on lie: an answered `ask_question` part stays
-`approval-requested` in the durable stream forever, while Eve's client store
-projects an answer as settled *before* posting it and never rolls that back.
-Upstream: [vercel/eve#1095](https://github.com/vercel/eve/issues/1095)
+exposes it, and no event records that a batch was answered *by this channel*.
+Both signals a browser could fall back on lie: an answered `ask_question` part
+stays `approval-requested` in the durable stream forever, while Eve's client
+store projects an answer as settled *before* posting it and never rolls that
+back. Upstream: [vercel/eve#1095](https://github.com/vercel/eve/issues/1095)
 proposes a durable `input.responded` event;
 [vercel/eve#1578](https://github.com/vercel/eve/pull/1578) drafts the contract
 but ships no runtime change; related
-[vercel/eve#1507](https://github.com/vercel/eve/issues/1507). Eve 0.33.2 emits
-the same stream event types as 0.31, so the ledger below is still the only
-record of a park.
+[vercel/eve#1507](https://github.com/vercel/eve/issues/1507). Eve 0.39 still
+emits nothing for a question answer or an unauthenticated approval answer, so
+the ledger below remains the record of a park. What 0.35 did add is
+`approval.settled`: a durable event for a tool approval an *authenticated*
+responder resolved, whichever channel carried the answer — the one settlement
+the stream now reports, and the ledger consumes it (below).
 
 **The proxy keeps a pending-input ledger** (`chats.pending_input_json`), being
 the one component that observes the truth: every `input.requested` passes
@@ -74,26 +83,31 @@ through its stream tap (opening a batch under the turn that raised it), it
 alone sees which turn POSTs Eve accepted (settling the answered batch under
 Eve's own resolution rule — one answer resolves a question batch, an approval
 batch needs every approval answered, and partial answers stay parked and
-accumulate), and it owns the teardown paths (terminal session events and
-session replacement clear all parks; a cancelled turn clears only the parks
-that turn raised, because from 0.33 a steered message cancels the running turn
-while older batches stay open and answerable; a `no_active_turn` cancel and
-transient turn failures deliberately clear nothing, because Eve's park
-survived). Several batches can be open at once — subagent-proxied requests
-park independently. The client seeds from the ledger, closes optimistically on
-respond, names the turn it stops so a Stop tears down no more than that turn,
-and refetches to reconcile on every failure or foreign turn boundary. Answers
+accumulate), the tap also settles the request an `approval.settled` event
+names (an answer that never passes through this proxy's turn route), and it
+owns the teardown paths (terminal session events and session replacement clear
+all parks; a cancelled turn clears only the parks that turn raised, because
+from 0.33 a steered message cancels the running turn while older batches stay
+open and answerable; a `no_active_turn` cancel and transient turn failures
+deliberately clear nothing, because Eve's park survived). Several batches can
+be open at once — subagent-proxied requests park independently, and from 0.35
+a turn that parked on an approval beside a subagent call re-parks on the same
+still-pending approval when the delegation result arrives, so one answer may
+settle several recorded copies of the batch. The client seeds from the ledger,
+closes optimistically on respond, cancels through Eve's own `cancel()` so a
+Stop names the exact turn and tears down no more than that turn's parks, and
+refetches to reconcile on every failure or foreign turn boundary. Answers
 themselves are also stored as `client.input.responded` events so replays show
 what was picked. Chats from before the ledger derive their state from stored
-events on first read, erring conservative-open. The full analysis and rules
-live in
+events on first read (counting `approval.settled` as answered), erring
+conservative-open. The full analysis and rules live in
 [`docs/plans/2026-08-10-hitl-root-cause-and-fix.md`](docs/plans/2026-08-10-hitl-root-cause-and-fix.md).
 
 **One answer settles the whole batch.** Eve classifies `ask_question` as
 dismissable, so the first response resolves every request in the batch and the
-rest reach the model as `{ status: "ignored" }` — still true in 0.33, which
-restructured pending input into an ordered collection of batches without
-changing that rule. The thread collects an answer for every still-open request
+rest reach the model as `{ status: "ignored" }` — still true in 0.39, whose
+`resolveQuestionOnlyInputBatches`/`resolveApprovalInputBatches` carry the same
+two rules 0.33 introduced. The thread collects an answer for every still-open request
 in a batch before it responds, the way Eve's own ACP adapter does — per batch,
 never a union across batches — and a draft stays revisable until its batch goes
 out. A plain message is Eve's own dismiss gesture for a question-only park.
@@ -117,13 +131,14 @@ subagent-proxied one a message never reaches, and wrongly closing a proxied
 park would strand the subagent (from 0.33 Eve itself declines to guess once
 more than one batch is open, and dismisses nothing); a second tab can answer a
 batch inside the window before its next reconcile, which Eve degrades to a
-synthetic user message; a batch Eve resolved by text-matching a plain message
-renders Dismissed although Eve recorded answers; a park whose `input.requested`
-named no turn is never cleared by a cancel, only by an answer or a terminal
-session event; and a Stop that cannot name its turn — no `turn.started` seen
-since the page loaded — still clears every park, so a cancel accepted in the
-instant between park emission and turn teardown can leave a batch alive that
-the ledger dropped (recovery: session replacement).
+synthetic user message — `approval.settled` narrows this to question answers
+and unauthenticated approval answers, the cases Eve still emits nothing for; a
+batch Eve resolved by text-matching a plain message renders Dismissed although
+Eve recorded answers; and a park whose `input.requested` named no turn is
+never cleared by a cancel, only by an answer or a terminal session event. The
+previous residue of an unattributable Stop clearing every park is gone: Eve
+0.38's `cancel()` waits to name the exact turn, so a cancel can no longer
+outrun the park it tears down.
 
 ## Development
 

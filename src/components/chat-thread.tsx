@@ -38,12 +38,10 @@ import {
 import { EveMessageView, type InputRequestBatch } from "@/components/eve-message";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import {
-  activeTurnIdFromEvents,
   agentEveVersion,
   holdsMessagesForPendingInput,
   isRequiredKind,
   pendingRequestsFromEvent,
-  turnIdFromEvent,
   type ChatEvent,
   type PendingInputRequest,
   type PendingInputState,
@@ -58,13 +56,13 @@ import {
 type TurnPayload = Parameters<PrepareSend>[0];
 
 /**
- * Eve 0.33 sends messages with `turnPolicy: "steer"` by default: a message
- * that arrives while a turn is running cancels that turn and replaces it,
- * keeping its partial output. This chat offers Stop as the deliberate way to
- * interrupt, so every message asks for the queue policy Eve applied before
- * 0.33 — a racing second tab then waits for the running turn instead of
- * destroying it. Older agents in the support window parse request fields one
- * by one and ignore the key.
+ * Eve sends messages with `turnPolicy: "steer"` by default (0.33 through
+ * 0.39): a message that arrives while a turn is running cancels that turn and
+ * replaces it, keeping its partial output. This chat offers Stop as the
+ * deliberate way to interrupt, so every message asks for the queue policy Eve
+ * applied before 0.33 — a racing second tab then waits for the running turn
+ * instead of destroying it. Agents before 0.33 parse request fields one by
+ * one and ignore the key.
  */
 const TURN_POLICY = "queue" as const;
 
@@ -238,10 +236,6 @@ function ChatThreadSession({
     draftResponsesRef.current,
   );
   const pendingBatchesRef = useRef<ClientPendingBatch[]>(initialPendingBatches);
-  // The turn a Stop should name, so the proxy tears down that turn's parks
-  // instead of every open batch (see `clearPendingBatchesForTurn`). Seeded
-  // from history because a reload resumes the stream mid-turn.
-  const activeTurnIdRef = useRef<string | null>(activeTurnIdFromEvents(events));
   // Every local change advances the generation; a refetch started before the
   // latest change is stale and must not overwrite it (a slow GET returning an
   // intermediate state would otherwise erase a batch a live event just opened).
@@ -347,19 +341,6 @@ function ChatThreadSession({
       if (event.type === "message.received") {
         setShowPendingUserMessage(false);
       }
-      if (event.type === "turn.started") {
-        activeTurnIdRef.current = turnIdFromEvent(event) ?? null;
-      }
-      if (
-        event.type === "turn.cancelled" ||
-        event.type === "turn.completed" ||
-        event.type === "turn.failed"
-      ) {
-        const ended = turnIdFromEvent(event);
-        if (!ended || ended === activeTurnIdRef.current) {
-          activeTurnIdRef.current = null;
-        }
-      }
       if (event.type === "input.requested") {
         const requests = pendingRequestsFromEvent(event);
         if (requests) {
@@ -380,8 +361,8 @@ function ChatThreadSession({
       }
     },
     onFinish(snapshot) {
-      // `stop()` aborts without an error surfacing anywhere else (the store
-      // skips `onError` for aborts), so every finish reconciles.
+      // A cancelled turn settles here without an error surfacing anywhere
+      // else, so every finish reconciles.
       void refetchPendingInput();
       if (snapshot.status === "ready") {
         router.refresh();
@@ -544,32 +525,23 @@ function ChatThreadSession({
     respond: handleInputResponse,
   };
 
+  /**
+   * Eve 0.38 replaced the binding's local-abort `stop()` with a durable
+   * `cancel()`: the store waits for the in-flight turn's `turn.started`, POSTs
+   * `{ turnId }` to the session cancel route — this chat's per-chat proxy,
+   * which scopes its ledger clear to exactly that turn — and keeps the stream
+   * attached until the turn settles, so `turn.cancelled` still reaches the
+   * proxy's tap. That is everything the previous hand-rolled cancel fetch
+   * existed to guarantee, without the unattributable blanket clear a Stop
+   * before `turn.started` used to cause.
+   */
   const handleStop = (): void => {
-    const stoppedTurnId = activeTurnIdRef.current;
-    agent.stop();
-    const sessionId = agent.session?.sessionId;
-    const getCancelToken = getAccessToken ?? getCallerToken;
-    if (!sessionId || !getCancelToken) {
-      return;
-    }
-
-    void getCancelToken()
-      .then((accessToken) =>
-        fetch(
-          `/api/chats/${encodeURIComponent(chat.id)}/agent/eve/v1/session/${encodeURIComponent(sessionId)}/cancel`,
-          {
-            method: "POST",
-            headers: {
-              authorization: `Bearer ${accessToken}`,
-              "content-type": "application/json",
-            },
-            body: JSON.stringify(stoppedTurnId ? { turnId: stoppedTurnId } : {}),
-          },
-        ),
-      )
-      .catch(() => {
-        // The local stream is already stopped; the reconcile below reads
-        // whatever the proxy recorded about the cancel.
+    void agent
+      .cancel()
+      .catch((error: unknown) => {
+        // The turn keeps running when the cancel never reached Eve, so this
+        // failure is worth surfacing, unlike a `no_active_turn` result.
+        setLocalError(errorMessage(error));
       })
       .finally(() => {
         void refetchPendingInput();

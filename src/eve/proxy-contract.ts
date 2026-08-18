@@ -8,12 +8,14 @@ import {
 /**
  * One event as EveChats stores it and replays it into the browser.
  *
- * Eve emits no stream event when a pending input batch is answered — an
- * answered `ask_question` part stays `approval-requested` in the stored stream
- * forever — so the proxy records the answers it forwards as
- * `client.input.responded`, the reducer event Eve's own client uses for them.
- *
- * Upstream gap: https://github.com/vercel/eve/issues/1095
+ * Eve emits no stream event when a question batch is answered, or when an
+ * unauthenticated responder answers an approval — an answered `ask_question`
+ * part stays `approval-requested` in the stored stream forever — so the proxy
+ * records the answers it forwards as `client.input.responded`, the reducer
+ * event Eve's own client uses for them. From 0.35 an *authenticated*
+ * responder's approval answer does emit a durable `approval.settled`, which
+ * the ledger consumes; everything else is still upstream gap
+ * https://github.com/vercel/eve/issues/1095.
  */
 export type ChatEvent = MessageStreamEvent | ClientInputRespondedEvent;
 
@@ -180,6 +182,22 @@ export function pendingRequestsFromEvent(payload: unknown): PendingInputRequest[
     : null;
 }
 
+/**
+ * The approval request an `approval.settled` event resolves. Emitted from Eve
+ * 0.35 (stream version 22) when an authenticated responder answers a tool
+ * approval, whichever channel carried the answer; either outcome — approved
+ * or cancelled — settles the request. Unauthenticated answers emit nothing,
+ * so this narrows the foreign-answer gap rather than closing it.
+ */
+export function settledApprovalRequestId(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== "object") return undefined;
+  if ((payload as { type?: unknown }).type !== "approval.settled") return undefined;
+  const data = (payload as { data?: unknown }).data;
+  if (!data || typeof data !== "object") return undefined;
+  const requestId = (data as { requestId?: unknown }).requestId;
+  return typeof requestId === "string" && requestId.length > 0 ? requestId : undefined;
+}
+
 /** The turn a stream event belongs to, for events that name one. */
 export function turnIdFromEvent(payload: unknown): string | undefined {
   if (!payload || typeof payload !== "object") return undefined;
@@ -187,35 +205,6 @@ export function turnIdFromEvent(payload: unknown): string | undefined {
   if (!data || typeof data !== "object") return undefined;
   const turnId = (data as { turnId?: unknown }).turnId;
   return typeof turnId === "string" && turnId.length > 0 ? turnId : undefined;
-}
-
-/**
- * The turn still open when these events end, if any — a turn Eve started and
- * neither ended nor lost to a terminal session. A turn parked on input counts:
- * it is suspended, not finished, and cancelling it is what tears its park
- * down. A reload resumes the stream from its cursor without replaying
- * `turn.started`, so reading it from stored events is what lets a Stop after a
- * reload still name the turn it stops.
- */
-export function activeTurnIdFromEvents(events: readonly unknown[]): string | null {
-  let active: string | null = null;
-  for (const event of events) {
-    if (!event || typeof event !== "object") continue;
-    const type = (event as { type?: unknown }).type;
-    if (type === "turn.started") {
-      active = turnIdFromEvent(event) ?? null;
-    } else if (
-      type === "turn.completed" ||
-      type === "turn.failed" ||
-      type === "turn.cancelled"
-    ) {
-      const ended = turnIdFromEvent(event);
-      if (!ended || ended === active) active = null;
-    } else if (type === "session.completed" || type === "session.failed") {
-      active = null;
-    }
-  }
-  return active;
 }
 
 /** Opens a batch, replacing any earlier record of the same event. */
@@ -261,8 +250,8 @@ export function clearPendingBatchesForTurn(
 /**
  * Applies the answers of one turn Eve accepted — a mirror of Eve's own batch
  * resolution (`resolveApprovalInputBatches`/`resolveQuestionOnlyInputBatches`,
- * eve@0.33.2; `resolvePendingInput` before 0.33 restructured it into an
- * ordered collection of batches, with the same two rules). A batch closes once
+ * unchanged through eve@0.39.0; `resolvePendingInput` before 0.33 restructured
+ * it into an ordered collection of batches, with the same two rules). A batch closes once
  * it has been addressed and no required request is unanswered: Eve resolves a
  * question batch on any one answer and an approval batch only once every
  * approval in it has one, carrying the leftovers forward. An
@@ -276,10 +265,28 @@ export function settlePendingInput(
   state: PendingInputState,
   responses: readonly InputResponse[],
 ): PendingInputState {
-  if (responses.length === 0) {
+  return settleAnsweredRequests(
+    state,
+    responses.map((response) => response.requestId),
+  );
+}
+
+/**
+ * Marks request IDs answered, whatever carried the answer. Turn bodies this
+ * proxy forwarded arrive via `settlePendingInput`; an `approval.settled`
+ * stream event (Eve ≥ 0.35) reports an approval an authenticated responder
+ * resolved through *any* surface — another channel, another tab — and is the
+ * one durable settlement signal Eve emits, so the tap feeds it through here
+ * too. Batch closure follows Eve's own rule either way.
+ */
+export function settleAnsweredRequests(
+  state: PendingInputState,
+  requestIds: readonly string[],
+): PendingInputState {
+  if (requestIds.length === 0) {
     return state;
   }
-  const responded = new Set(responses.map((response) => response.requestId));
+  const responded = new Set(requestIds);
   const batches: PendingInputBatch[] = [];
   for (const batch of state.batches) {
     const addressed = batch.requests.some((request) => responded.has(request.requestId));
@@ -335,6 +342,10 @@ export function derivePendingInput(input: {
       for (const requestId of respondedRequestIds(event.payload)) {
         answeredIds.add(requestId);
       }
+    }
+    if (event.type === "approval.settled") {
+      const requestId = settledApprovalRequestId(event.payload);
+      if (requestId) answeredIds.add(requestId);
     }
     if (event.type === "action.result") {
       for (const id of actionResultIds(event.payload)) {

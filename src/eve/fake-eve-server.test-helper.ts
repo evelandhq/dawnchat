@@ -15,15 +15,24 @@ export interface CapturedEveRequest {
  * 0.31 and later address it by session ID and refuse a request that carries
  * one.
  *
- * 0.31, 0.32, and 0.33 are the window Eveland hosts and are identical on the
- * wire — same stream version, same routes, same session addressing. They
- * differ in runtime behaviour this fake does not simulate (0.32+ runs a
- * message beside an open request instead of holding it; 0.33 steers by
- * default), which tests drive through scripted `streamEvents` instead. The
- * older two remain because the proxy still tolerates a token-addressed
- * session it opened before the Agent upgraded.
+ * 0.38 and 0.39 are the window Eveland hosts and are identical on the wire —
+ * stream version 22 (bumped in 0.35 alongside the `approval.candidate` and
+ * `approval.settled` events), same routes, same session addressing. They
+ * differ from 0.31–0.33 only in runtime behaviour this fake does not simulate
+ * (0.32+ runs a message beside an open request instead of holding it; 0.33+
+ * steers by default; 0.35+ emits `approval.settled` for authenticated
+ * responders), which tests drive through scripted `streamEvents` instead. The
+ * older generations remain because sessions this proxy opened against them
+ * are still continued — by continuation token for 0.29/0.30, by ID above.
  */
-export type FakeEveGeneration = "0.29" | "0.30" | "0.31" | "0.32" | "0.33";
+export type FakeEveGeneration =
+  | "0.29"
+  | "0.30"
+  | "0.31"
+  | "0.32"
+  | "0.33"
+  | "0.38"
+  | "0.39";
 
 export interface FakeEveServerOptions {
   readonly authenticationChallenge?: {
@@ -50,6 +59,8 @@ const streamVersionByGeneration: Record<FakeEveGeneration, number> = {
   "0.31": 21,
   "0.32": 21,
   "0.33": 21,
+  "0.38": 22,
+  "0.39": 22,
 };
 
 export interface FakeEveServer {
@@ -95,7 +106,7 @@ function writeNdjson(
 
 export async function startFakeEveServer(options: FakeEveServerOptions = {}): Promise<FakeEveServer> {
   const requests: CapturedEveRequest[] = [];
-  const generation = options.generation ?? "0.33";
+  const generation = options.generation ?? "0.39";
   const fixedSessions = generation !== "0.29" && generation !== "0.30";
   let nextSessionId = 1;
 

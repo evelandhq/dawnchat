@@ -1,13 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  activeTurnIdFromEvents,
   agentEveVersion,
   clearPendingBatchesForTurn,
   derivePendingInput,
   holdsMessagesForPendingInput,
   parsePendingInput,
   serializePendingInput,
+  settleAnsweredRequests,
+  settledApprovalRequestId,
   settlePendingInput,
   type PendingInputState,
   type StoredChatEvent,
@@ -115,6 +116,40 @@ describe("legacy pending-input derivation", () => {
       actionResult("call_1"),
     ];
     expect(derive(events).batches).toEqual([]);
+  });
+
+  it("derives an approval closed when a stored approval.settled covers it", () => {
+    nextIndex = 1;
+    const events = [
+      inputRequested([{ requestId: "req_1", kind: "tool-approval" }]),
+      event("approval.settled", {
+        type: "approval.settled",
+        data: {
+          outcome: "approved",
+          requestId: "req_1",
+          responderPrincipalId: "prn_other",
+          sequence: 2,
+          stepIndex: 0,
+          turnId: "turn_1",
+        },
+      }),
+    ];
+    expect(derive(events).batches).toEqual([]);
+  });
+
+  it("settles every copy of a re-parked batch on one answer", () => {
+    nextIndex = 1;
+    // From Eve 0.35 a turn that parked on an approval beside a subagent call
+    // re-parks on the same still-pending approval when the delegation result
+    // arrives, emitting `input.requested` again with the same request IDs.
+    const events = [
+      inputRequested([{ requestId: "req_1", kind: "tool-approval" }], { turnId: "turn_1" }),
+      inputRequested([{ requestId: "req_1", kind: "tool-approval" }], { turnId: "turn_1" }),
+    ];
+    expect(derive(events).batches).toHaveLength(2);
+
+    const answered = [...events, responded(["req_1"])];
+    expect(derive(answered).batches).toEqual([]);
   });
 
   it("keeps a required batch open across later turn activity", () => {
@@ -303,33 +338,44 @@ describe("clearPendingBatchesForTurn", () => {
   });
 });
 
-describe("activeTurnIdFromEvents", () => {
-  const turn = (type: string, turnId: string) => ({ type, data: { turnId } });
-
-  it("reports the turn a reload resumes into, parked turns included", () => {
-    expect(
-      activeTurnIdFromEvents([
-        turn("turn.started", "turn_1"),
-        turn("turn.completed", "turn_1"),
-        turn("turn.started", "turn_2"),
-        // Parked on input: suspended, not finished.
-        { type: "input.requested", data: { turnId: "turn_2", requests: [] } },
-        { type: "session.waiting", data: {} },
-      ]),
-    ).toBe("turn_2");
+describe("approval.settled (Eve ≥ 0.35, stream version 22)", () => {
+  const settledEvent = (requestId: string, outcome: "approved" | "cancelled") => ({
+    type: "approval.settled",
+    data: {
+      outcome,
+      requestId,
+      responderPrincipalId: "prn_other",
+      sequence: 9,
+      stepIndex: 0,
+      turnId: "turn_1",
+    },
   });
 
-  it("reports nothing once the turn or the session ended", () => {
+  it("reads the settled request out of the event and nothing else", () => {
+    expect(settledApprovalRequestId(settledEvent("req_a", "approved"))).toBe("req_a");
+    expect(settledApprovalRequestId(settledEvent("req_a", "cancelled"))).toBe("req_a");
     expect(
-      activeTurnIdFromEvents([turn("turn.started", "turn_1"), turn("turn.cancelled", "turn_1")]),
-    ).toBeNull();
-    expect(
-      activeTurnIdFromEvents([
-        turn("turn.started", "turn_1"),
-        { type: "session.failed", data: {} },
-      ]),
-    ).toBeNull();
-    expect(activeTurnIdFromEvents([])).toBeNull();
+      settledApprovalRequestId({ type: "approval.candidate", data: { requestId: "req_a" } }),
+    ).toBeUndefined();
+    expect(settledApprovalRequestId({ type: "approval.settled", data: {} })).toBeUndefined();
+  });
+
+  it("settles the approval whichever channel answered it, closing a completed batch", () => {
+    const parked: PendingInputState = {
+      batches: [
+        {
+          eventIndex: 1,
+          requests: [
+            { requestId: "req_a", kind: "tool-approval" },
+            { requestId: "req_b", kind: "tool-approval" },
+          ],
+          answered: [],
+        },
+      ],
+    };
+    const partial = settleAnsweredRequests(parked, ["req_a"]);
+    expect(partial.batches[0]).toMatchObject({ answered: ["req_a"] });
+    expect(settleAnsweredRequests(partial, ["req_b"]).batches).toEqual([]);
   });
 });
 

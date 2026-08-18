@@ -6,6 +6,7 @@ import { setDbClientForTests } from "@/db/provider";
 import { createRepository } from "@/db/repository";
 import { chats } from "@/db/schema";
 import { startFakeEveServer, type FakeEveServer } from "@/eve/fake-eve-server.test-helper";
+import { derivePendingInput } from "@/eve/proxy-contract";
 import {
   CallerTokenError,
   setCallerTokenVerifierForTests,
@@ -905,6 +906,165 @@ describe("per-chat Eve protocol proxy", () => {
     await expect(repository.getChat(chat.id)).resolves.toMatchObject({
       pendingInput: { batches: [] },
     });
+  });
+
+  it("settles an approval another responder answered when approval.settled streams through", async () => {
+    // From Eve 0.35 (stream version 22) an authenticated responder's answer —
+    // whichever channel carried it — emits a durable `approval.settled`. The
+    // tap is the only place this proxy observes it, and it is the one
+    // settlement signal that does not pass through a turn POST.
+    const streamEvents = [
+      {
+        type: "input.requested",
+        data: {
+          requests: [
+            {
+              requestId: "req_a",
+              kind: "tool-approval",
+              prompt: "Allow?",
+              action: { kind: "tool-call", callId: "call_a", toolName: "delete_record", input: {} },
+            },
+            {
+              requestId: "req_b",
+              kind: "tool-approval",
+              prompt: "Allow more?",
+              action: { kind: "tool-call", callId: "call_b", toolName: "drop_table", input: {} },
+            },
+          ],
+          sequence: 1,
+          stepIndex: 0,
+          turnId: "turn_1",
+        },
+      },
+      {
+        type: "approval.settled",
+        data: {
+          outcome: "approved",
+          requestId: "req_a",
+          responderPrincipalId: "prn_slack",
+          sequence: 2,
+          stepIndex: 0,
+          turnId: "turn_1",
+        },
+      },
+      { type: "session.waiting", data: { wait: "next-user-message" } },
+    ] as const;
+    const server = await fakeServer({ generation: "0.39", streamEvents });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Settling Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Settled elsewhere",
+      ...chatIdentity,
+    });
+    await repository.updateChatSessionState(chat.id, { sessionId: "ses_1", streamIndex: 0 });
+    const routes = await loadProxyRoutes();
+
+    const response = await routes.streamSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1/stream`, {
+        headers: callerHeaders(),
+      }),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+    await response.text();
+
+    // The approval batch stays parked on the still-open req_b; req_a is
+    // answered without any turn POST having passed through this proxy.
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      pendingInput: {
+        batches: [expect.objectContaining({ answered: ["req_a"] })],
+      },
+    });
+  });
+
+  it("keeps a legacy chat's NULL marker when approval.settled streams through", async () => {
+    // Promoting the legacy marker on a settle would declare the ledger empty
+    // and skip the one-shot derivation; the stored event feeds that
+    // derivation instead.
+    const streamEvents = [
+      {
+        type: "approval.settled",
+        data: {
+          outcome: "cancelled",
+          requestId: "req_1",
+          responderPrincipalId: "prn_other",
+          sequence: 3,
+          stepIndex: 0,
+          turnId: "turn_1",
+        },
+      },
+      { type: "session.waiting", data: { wait: "next-user-message" } },
+    ] as const;
+    const server = await fakeServer({ generation: "0.39", streamEvents });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Legacy settling Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Legacy settled",
+      ...chatIdentity,
+    });
+    await repository.updateChatSessionState(chat.id, { sessionId: "ses_1", streamIndex: 2 });
+    await repository.appendEvent({
+      chatId: chat.id,
+      sessionId: "ses_1",
+      streamIndex: 0,
+      type: "input.requested",
+      payload: {
+        type: "input.requested",
+        data: {
+          turnId: "turn_1",
+          requests: [
+            {
+              requestId: "req_1",
+              kind: "tool-approval",
+              prompt: "Allow?",
+              action: { kind: "tool-call", callId: "call_1", toolName: "delete_record", input: {} },
+            },
+          ],
+        },
+      },
+    });
+    await testDb.db
+      .update(chats)
+      .set({ pendingInputJson: null })
+      .where(eq(chats.id, chat.id));
+    const routes = await loadProxyRoutes();
+
+    const response = await routes.streamSession(
+      new Request(
+        `http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1/stream?startIndex=2`,
+        { headers: callerHeaders() },
+      ),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+    await response.text();
+
+    // Still the legacy marker — and the derivation it feeds reads the batch
+    // as settled by the stored approval.settled event.
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({ pendingInput: null });
+    const derived = derivePendingInput({
+      events: (await repository.listEvents(chat.id)).map((event) => ({
+        eventIndex: event.eventIndex,
+        sessionId: event.sessionId,
+        type: event.type,
+        payload: event.payload,
+      })),
+      sessionId: "ses_1",
+      active: true,
+    });
+    expect(derived.batches).toEqual([]);
   });
 
   it("keeps a required batch open across partial answers and dedupes repeats", async () => {
