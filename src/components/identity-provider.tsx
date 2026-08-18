@@ -26,6 +26,7 @@ type IdentityContextValue = {
     expectedProjectId: string,
     returnPath: string,
   ): Promise<string | null>;
+  login(returnPath: string): never;
   switchRealm(returnPath: string): never;
   logout(): Promise<void>;
 };
@@ -80,6 +81,7 @@ export function IdentityProvider({
       getCallerToken,
       respondToAuthenticationChallenge:
         client.respondToAuthenticationChallenge,
+      login: client.login,
       switchRealm: client.switchRealm,
       async logout() {
         await client.logout();

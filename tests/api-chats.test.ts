@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 
 import { GET, POST } from "@/app/api/chats/route";
+import { POST as POST_CLAIM } from "@/app/api/chats/claim/route";
 import { setDbClientForTests } from "@/db/provider";
 import { createRepository } from "@/db/repository";
 import { chats } from "@/db/schema";
@@ -97,6 +98,70 @@ describe("Chat API", () => {
           title: "Hello anonymously",
         },
       ],
+    });
+  });
+
+  it("claims this browser's anonymous chats into the signed-in identity", async () => {
+    const agent = await createAgent();
+    const createdResponse = await POST(
+      new Request("http://localhost/api/chats", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ agentId: agent.id, message: "Claim me" }),
+      }),
+    );
+    expect(createdResponse.status).toBe(201);
+    const sessionCookie = createdResponse.headers
+      .get("set-cookie")!
+      .split(";")[0]!;
+    const created = (await createdResponse.json()) as { chat: { id: string } };
+
+    const claimResponse = await POST_CLAIM(
+      new Request("http://localhost/api/chats/claim", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer app-user-1",
+          cookie: sessionCookie,
+        },
+      }),
+    );
+    expect(claimResponse.status).toBe(200);
+    await expect(claimResponse.json()).resolves.toEqual({ claimed: 1 });
+
+    // The chat now follows the identity: listing without the browser session
+    // cookie still returns it.
+    const listedResponse = await GET(
+      new Request("http://localhost/api/chats", {
+        headers: { authorization: "Bearer app-user-1" },
+      }),
+    );
+    expect(listedResponse.status).toBe(200);
+    await expect(listedResponse.json()).resolves.toMatchObject({
+      chats: [{ id: created.chat.id }],
+    });
+
+    // Claiming is idempotent and never re-owns identity-owned chats.
+    const secondClaim = await POST_CLAIM(
+      new Request("http://localhost/api/chats/claim", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer app-user-2",
+          cookie: sessionCookie,
+        },
+      }),
+    );
+    expect(secondClaim.status).toBe(200);
+    await expect(secondClaim.json()).resolves.toEqual({ claimed: 0 });
+  });
+
+  it("rejects claiming chats without an Eveland App Token", async () => {
+    const response = await POST_CLAIM(
+      new Request("http://localhost/api/chats/claim", { method: "POST" }),
+    );
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({
+      error: "Eveland Identity is required to claim chats",
     });
   });
 

@@ -83,6 +83,27 @@ export async function listChats(request: Request): Promise<Response> {
   }
 }
 
+export async function claimChats(request: Request): Promise<Response> {
+  try {
+    const access = await resolveChatAccess(request);
+    if (!access.identity) {
+      return jsonResponse(
+        { error: "Eveland Identity is required to claim chats" },
+        { status: 401 },
+      );
+    }
+    const repository = createRepository(getDbClient());
+    const claimed = await repository.claimChatsForClient(
+      access.session.clientId,
+      appIdentityScope(access.identity),
+    );
+    return applyAppBrowserSession(jsonResponse({ claimed }), access.session);
+  } catch (error) {
+    if (error instanceof CallerTokenError) return callerTokenErrorResponse(error);
+    return jsonResponse({ error: "Internal server error" }, { status: 500 });
+  }
+}
+
 export async function createChatWithFirstMessage(
   request: Request,
   body: unknown,

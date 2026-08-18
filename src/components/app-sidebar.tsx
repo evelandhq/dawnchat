@@ -2,11 +2,13 @@ import Link from "next/link";
 import type { Route } from "next";
 
 import { AuthenticatedSidebarNav } from "@/components/authenticated-sidebar-nav";
+import { SidebarAccount } from "@/components/sidebar-account";
 import { createRepository } from "@/db/repository";
 import { getDbClient } from "@/db/provider";
 import {
   Sidebar,
   SidebarContent,
+  SidebarFooter,
   SidebarHeader,
   SidebarMenu,
   SidebarMenuButton,
@@ -64,6 +66,9 @@ export async function AppSidebar({ data }: AppSidebarProps = {}): Promise<React.
       <SidebarContent>
         <AuthenticatedSidebarNav initialChats={navigationData.chats} />
       </SidebarContent>
+      <SidebarFooter>
+        <SidebarAccount />
+      </SidebarFooter>
     </Sidebar>
   );
 }
