@@ -147,6 +147,11 @@ export type Repository = {
   getChatForIdentity(id: string, scope: ChatIdentityScope): Promise<Chat | null>;
   listChatsForAppIdentity(scope: AppIdentityScope): Promise<Chat[]>;
   getChatForAppIdentity(id: string, scope: AppIdentityScope): Promise<Chat | null>;
+  /**
+   * Adopt the browser session's identity-less chats into the given identity.
+   * Chats that already belong to an identity are never re-owned.
+   */
+  claimChatsForClient(clientId: string, scope: AppIdentityScope): Promise<number>;
   appendEvent(input: AppendEventInput): Promise<EveEvent>;
   listEvents(chatId: string): Promise<EveEvent[]>;
   clearPendingUserMessage(chatId: string): Promise<Chat>;
@@ -520,6 +525,25 @@ export function createRepository(db: RepositoryDb): Repository {
         )
         .limit(1);
       return row ? mapChat(row) : null;
+    },
+
+    async claimChatsForClient(clientId, scope) {
+      const claimed = await db
+        .update(chats)
+        .set({
+          ownerIdentityIssuer: scope.issuer,
+          ownerIdentityPrincipalId: scope.principalId,
+          ownerIdentityRealmId: scope.realmId,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(chats.ownerClientId, clientId),
+            isNull(chats.ownerIdentityPrincipalId),
+          ),
+        )
+        .returning({ id: chats.id });
+      return claimed.length;
     },
 
     async appendEvent(input) {

@@ -34,19 +34,22 @@ Project's Stable route. EveChats then displays Greeter automatically at
 Catalog. `/` opens the most recent Chat visible to the current browser/Identity
 scope and falls back to `/agents` when there is no history. Clicking a Catalog
 Agent lazily creates the local connection keyed by Eveland issuer and Project
-ID without starting login.
+ID.
 
 The browser enters Eveland through `/identity/login`; it never reads Better
 Auth or selects Internal/OIDC itself. App Tokens and Caller Tokens stay in
-memory and are refreshed before expiry. An anonymous session check on `/` or
-`/agents` does not redirect and does not request an App Token. A signed, HttpOnly
-EveChats browser-session cookie owns anonymous local chats. When an Eveland
-Identity Session already exists, App Tokens additionally scope history and
-mutations to that identity without being forwarded upstream. If the Agent
+memory and are refreshed before expiry. Opening any page runs the app-level
+identity gate: without an Eveland Identity Session the browser is redirected
+to Eveland login and returned to the page it opened. A signed, HttpOnly
+EveChats browser-session cookie still identifies the browser; the first
+authenticated load claims that cookie's identity-less chats into the
+signed-in identity via `POST /api/chats/claim`. App Tokens scope history and
+mutations to the identity without being forwarded upstream. If the Agent
 advertises Eveland Identity in its `WWW-Authenticate` challenge, EveChats
 follows the Agent-provided continuation, obtains a Project Caller Token, and
-retries the original request. Catalog membership alone never starts login or
-causes a Caller Token to be requested or forwarded.
+retries the original request. Catalog membership alone never causes a Caller
+Token to be requested or forwarded, and an Agent that requests no Eveland
+Identity receives no Eveland credential.
 
 Because local Eveland Identity and EveChats share the `localhost` hostname,
 cookie-bearing Identity session, App Token, Caller Token, and logout requests

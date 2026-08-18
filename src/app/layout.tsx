@@ -8,6 +8,7 @@ import "./globals.css";
 import { AppHeader } from "@/components/app-header";
 import { AppSidebar, getAppNavigationData } from "@/components/app-sidebar";
 import { ThemeProvider } from "@/components/theme-provider";
+import { IdentityGate } from "@/components/identity-gate";
 import { IdentityProvider } from "@/components/identity-provider";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { cn } from "@/lib/utils";
@@ -40,13 +41,15 @@ export default async function RootLayout({ children }: { children: ReactNode }):
               "eve-chats"
             }
           >
-            <SidebarProvider defaultOpen={defaultOpen}>
-              <AppSidebar data={navigationData} />
-              <SidebarInset className="h-svh overflow-hidden">
-                <AppHeader {...navigationData} />
-                <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
-              </SidebarInset>
-            </SidebarProvider>
+            <IdentityGate>
+              <SidebarProvider defaultOpen={defaultOpen}>
+                <AppSidebar data={navigationData} />
+                <SidebarInset className="h-svh overflow-hidden">
+                  <AppHeader {...navigationData} />
+                  <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
+                </SidebarInset>
+              </SidebarProvider>
+            </IdentityGate>
           </IdentityProvider>
         </ThemeProvider>
       </body>

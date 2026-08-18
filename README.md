@@ -1,7 +1,7 @@
 # eve-chats
 
-Standalone chat UI with a public Eveland Agent Catalog and identity-scoped
-history.
+Standalone chat UI with the Eveland Agent Catalog and identity-scoped
+history. Using the app requires an Eveland Identity Session.
 
 `/` opens the most recent Chat visible to the current browser/Identity scope
 and falls back to `/agents` when there is no history. The public Eveland Agent
@@ -13,7 +13,9 @@ Catalog lives at `/agents`. Chat history is ordered newest first.
 AgentConnection -> Chat -> Eve Event Stream
 ```
 
-The browser renders Eve's `defaultMessageReducer` projection with AI Elements and talks to a same-origin, per-chat Eve protocol proxy. Eveland owns provider login, the Identity Session, and the public Agent Catalog. Opening a Catalog Agent and chatting with an Agent that does not request Eveland Identity never starts login. EveChats uses a signed, HttpOnly browser-session cookie for local anonymous chat ownership and uses an app-scoped token only when an Eveland Identity Session already exists or the user chooses an explicitly authenticated EveChats action. If the Agent responds with an Eveland authentication challenge, the browser obtains a project-scoped Caller Token and automatically retries that request. The proxy verifies App and Caller Tokens against Eveland JWKS, never infers route auth from Catalog membership, preserves configured auth for external Agents, and keeps the real continuation token server-side.
+The browser renders Eve's `defaultMessageReducer` projection with AI Elements and talks to a same-origin, per-chat Eve protocol proxy. Eveland owns provider login, the Identity Session, and the Agent Catalog. Opening any EveChats page requires an Eveland Identity Session: an app-level gate redirects unauthenticated visitors to Eveland login and returns them to the page they opened, so the sidebar lists the identity's chat history — across every Agent, from any browser — without entering an Agent first. The gate is a UI policy only; it changes nothing about Agent credentials. Chatting with an Agent that does not request Eveland Identity still sends that Agent no Eveland token, and externally registered Agents keep their configured auth. If the Agent responds with an Eveland authentication challenge, the browser obtains a project-scoped Caller Token and automatically retries that request. The proxy verifies App and Caller Tokens against Eveland JWKS, never infers route auth from Catalog membership, and keeps the real continuation token server-side.
+
+EveChats still sets a signed, HttpOnly browser-session cookie. Chats created before the login requirement existed are owned only by that cookie; on the first authenticated load the browser calls `POST /api/chats/claim`, which adopts this browser's identity-less chats into the signed-in identity so they follow the user to other devices. Claiming is idempotent and never re-owns a chat that already belongs to an identity.
 
 Before upserting a managed connection, the EveChats server re-fetches the
 authoritative Catalog entry from Eveland. Caller Tokens carry Eveland's signed
@@ -42,6 +44,9 @@ metadata cannot redirect a credential to another host.
   instead. Agents before 0.33 ignore the field.
 - PostgreSQL 16 persistence for agents, chats, protocol events, and Eve session state.
 - Provider-neutral Eveland login, identity-scope switching, and pre-expiry App/Caller Token refresh.
+- Require an Eveland Identity Session to use the app; the sidebar shows the
+  signed-in principal with sign-out and identity-scope switching, and the
+  first authenticated load claims this browser's pre-login chats.
 - Preserve historical chats after a managed Agent leaves the Catalog, while marking that Agent unavailable for new turns.
 
 The former Gateway URL discovery flow and `/.well-known/eve/agents.json`
