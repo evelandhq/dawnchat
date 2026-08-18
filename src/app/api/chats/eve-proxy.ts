@@ -15,6 +15,7 @@ import {
   inputRespondedEvent,
   pendingRequestsFromEvent,
   readInputResponses,
+  settledApprovalRequestId,
   settlePendingInput,
   turnIdFromEvent,
   withoutContinuationToken,
@@ -555,12 +556,13 @@ function createPersistedEventStream(input: {
 
 /**
  * The ledger transition an event carries. An `input.requested` opens its batch
- * under the turn that raised it; a terminal session closes every park; a
- * cancelled turn closes only the parks that turn owns, because from Eve 0.33 a
- * steered message cancels the running turn while older batches stay parked and
- * answerable. Turn boundaries deliberately map to nothing — Eve emits them
- * without resolving anything (a re-parked required batch), so only real
- * teardown events clear.
+ * under the turn that raised it; an `approval.settled` (Eve ≥ 0.35) marks the
+ * one approval an authenticated responder resolved through any channel; a
+ * terminal session closes every park; a cancelled turn closes only the parks
+ * that turn owns, because from Eve 0.33 a steered message cancels the running
+ * turn while older batches stay parked and answerable. Turn boundaries
+ * deliberately map to nothing — Eve emits them without resolving anything (a
+ * re-parked required batch), so only real teardown events clear.
  */
 function pendingInputTransition(
   event: MessageStreamEvent,
@@ -568,12 +570,17 @@ function pendingInputTransition(
   | { open: PendingInputRequest[]; turnId?: string }
   | { clear: true }
   | { clearTurn: string }
+  | { settle: string[] }
   | undefined {
   if (event.type === "input.requested") {
     const requests = pendingRequestsFromEvent(event);
     if (!requests) return undefined;
     const turnId = turnIdFromEvent(event);
     return { open: requests, ...(turnId ? { turnId } : {}) };
+  }
+  if (event.type === "approval.settled") {
+    const requestId = settledApprovalRequestId(event);
+    return requestId ? { settle: [requestId] } : undefined;
   }
   if (event.type === "turn.cancelled") {
     const turnId = turnIdFromEvent(event);

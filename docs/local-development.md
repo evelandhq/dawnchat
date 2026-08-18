@@ -107,5 +107,5 @@ External turns forward only the external Agent's stored authentication. A turn
 creates or continues an Eve session, consumes the stream, persists canonical
 events, and stores `sessionId`, `streamIndex`, and — for a session opened
 against an Eve 0.29/0.30 Agent — a server-only `continuationToken` for
-follow-up messages. Every Agent in the supported window (0.31.x through
-0.33.x) addresses the session by ID, so no token is stored and none is sent.
+follow-up messages. Every Agent in the supported window (0.38.x and 0.39.x)
+addresses the session by ID, so no token is stored and none is sent.

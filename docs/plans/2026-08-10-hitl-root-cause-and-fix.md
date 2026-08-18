@@ -426,3 +426,51 @@ on 0.33.2 and only a re-read of the changelog and harness found it. Behaviour
 that lives in Eve's session driver rather than in a response the proxy parses
 needs a scripted stream to pin it, which is what
 `tests/eve-proxy.test.ts`'s steer case now does.
+
+### 2.12 Addendum — re-audited against Eve 0.38 and 0.39
+
+Eveland's support window moved to 0.38.x/0.39.x. On the wire that is stream
+version 22 and agent-info schema v2, both bumped in 0.35; routes and session
+addressing are unchanged, and Eve's client parses stream events without a
+version gate, so sessions opened against 0.29–0.33 agents continue exactly as
+before. Re-read against 0.39.0:
+
+- **Settle rules survive again.** `resolveApprovalInputBatches` /
+  `resolveQuestionOnlyInputBatches` and `classifyInputRequest` carry the same
+  two rules; §2.1's `answered` accumulation and required-open rule stand.
+- **A first durable settlement signal exists.** 0.35 added
+  `approval.candidate`/`approval.settled` (`harness/approval-candidates`).
+  `approval.settled` is emitted when an *authenticated* responder resolves a
+  tool approval — `settleDirectApprovalResponse` runs only when the answer
+  carries a session auth context, so an anonymous answer still emits nothing,
+  and question batches never emit anything. The tap now feeds the named
+  request through `settleAnsweredRequests`, and the legacy derivation counts
+  the stored event as answered; a settle on a legacy `NULL` chat leaves the
+  marker so derivation still runs. #1095 remains the gap for everything else.
+- **The re-park emits its batch again.** From 0.35 a model step that requests
+  an approval and a subagent call in the same response parks on both: the
+  approval surfaces immediately, and when the delegation result arrives the
+  turn re-parks on the still-pending approval, emitting `input.requested`
+  again with the same request IDs. The ledger holds each copy as its own
+  batch; one answer settles every copy (`settleAnsweredRequests` closes all
+  batches containing the answered request), and the client keys rendered
+  batches by first request ID so duplicates never stack on screen.
+- **Stop is Eve's own cancel now.** 0.38 replaced the frontend binding's
+  local-abort `stop()` with `cancel()`: `MessageResponse.cancel()` waits for
+  the in-flight turn's `turn.started`, POSTs `{ turnId }` to the session
+  cancel route — this app's per-chat proxy, which applies §2.11's turn-scoped
+  ledger clear — and keeps the stream attached until the turn settles, so the
+  tap also sees the `turn.cancelled`. The hand-rolled cancel fetch and the
+  history-seeded turn naming are deleted, and with them the residue of an
+  unattributable Stop clearing every park: a cancel can no longer be accepted
+  before the turn it tears down is named.
+- **Steer is still the default** (`DEFAULT_TURN_POLICY = "steer"` in 0.39.0);
+  sends keep asking for `"queue"`.
+
+The compile cost of the upgrade was one line — `stop()` no longer exists —
+which is what §2.11 predicted for behaviour that lives in the client binding
+rather than the wire. The behaviour that would *not* have turned tests red is
+again the part found only by reading: `approval.settled`'s
+authenticated-responder precondition, and the re-park's duplicate
+`input.requested`. Both are now pinned by scripted streams in
+`tests/eve-proxy.test.ts` and `tests/pending-input.test.ts`.
