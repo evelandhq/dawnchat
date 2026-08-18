@@ -423,16 +423,27 @@ function ChatThreadSession({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [retryInput]);
 
+  // Both mount-time sends below are deferred one tick. StrictMode's simulated
+  // remount runs this component's cleanup right after its first effects pass;
+  // that cleanup detaches the eve store, aborting a turn already in flight,
+  // and the sent-once ref would then swallow the message for good. A timer
+  // scheduled in the first pass is cleared by that same cleanup before it can
+  // send, so only the surviving pass sends — after the abort window has
+  // closed. A real unmount clears the timer the same way.
   useEffect(() => {
     if (!retryInput || retrySentRef.current || agent.status !== "ready") {
       return;
     }
-    retrySentRef.current = true;
-    setLocalError(null);
-    void sendTurn(agent, retryInput).catch((error: unknown) => {
-      retrySentRef.current = false;
-      setLocalError(errorMessage(error));
-    });
+    const timer = setTimeout(() => {
+      if (agentRef.current?.status !== "ready") return;
+      retrySentRef.current = true;
+      setLocalError(null);
+      void sendTurn(agent, retryInput).catch((error: unknown) => {
+        retrySentRef.current = false;
+        setLocalError(errorMessage(error));
+      });
+    }, 0);
+    return () => clearTimeout(timer);
   }, [agent, retryInput]);
 
   useEffect(() => {
@@ -445,12 +456,16 @@ function ChatThreadSession({
     ) {
       return;
     }
-    pendingSentRef.current = true;
-    setLocalError(null);
-    void agent.send(pendingUserMessage, { turnPolicy: TURN_POLICY }).catch((error: unknown) => {
-      pendingSentRef.current = false;
-      setLocalError(errorMessage(error));
-    });
+    const timer = setTimeout(() => {
+      if (agentRef.current?.status !== "ready") return;
+      pendingSentRef.current = true;
+      setLocalError(null);
+      void agent.send(pendingUserMessage, { turnPolicy: TURN_POLICY }).catch((error: unknown) => {
+        pendingSentRef.current = false;
+        setLocalError(errorMessage(error));
+      });
+    }, 0);
+    return () => clearTimeout(timer);
   }, [agent, pendingUserMessage, readOnly, retryInput, pendingSentRef]);
 
   const handleSubmit = async (message: PromptInputMessage): Promise<void> => {
