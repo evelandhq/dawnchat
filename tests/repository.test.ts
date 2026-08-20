@@ -3,7 +3,7 @@ import { eq } from "drizzle-orm";
 
 import { createRepository, DuplicateAgentUrlError } from "@/db/repository";
 import type { DbClient } from "@/db/client";
-import { chats, events, messages } from "@/db/schema";
+import { chats, events } from "@/db/schema";
 import { createTestDbHandle, type TestDbHandle } from "@/test/db";
 
 describe("repository", () => {
@@ -155,19 +155,9 @@ describe("repository", () => {
       type: "message.completed",
       payload: { message: "gone" },
     });
-    await db.insert(messages).values({
-      id: "msg_delete_test",
-      chatId: chat.id,
-      role: "user",
-      content: "gone",
-      eventIndex: 0,
-      createdAt: new Date(),
-    });
-
     await expect(repository.deleteAgentConnection(agent.id)).resolves.toBe(true);
     await expect(repository.getAgentConnection(agent.id)).resolves.toBeNull();
     await expect(db.select().from(chats)).resolves.toEqual([]);
-    await expect(db.select().from(messages)).resolves.toEqual([]);
     await expect(db.select().from(events)).resolves.toEqual([]);
   });
 

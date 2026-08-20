@@ -5,13 +5,11 @@ export const authTypes = ["none", "bearer", "header"] as const;
 export const agentConnectionStatuses = ["unknown", "healthy", "unreachable"] as const;
 export const agentConnectionSources = ["external", "managed"] as const;
 export const chatStatuses = ["active", "completed", "failed"] as const;
-export const messageRoles = ["user", "assistant", "system"] as const;
 
 export type AuthType = (typeof authTypes)[number];
 export type AgentConnectionStatus = (typeof agentConnectionStatuses)[number];
 export type AgentConnectionSource = (typeof agentConnectionSources)[number];
 export type ChatStatus = (typeof chatStatuses)[number];
-export type MessageRole = (typeof messageRoles)[number];
 
 export const agentConnections = pgTable(
   "agent_connections",
@@ -74,15 +72,6 @@ export const chats = pgTable(
   ],
 );
 
-export const messages = pgTable("messages", {
-  id: text("id").primaryKey(),
-  chatId: text("chat_id").notNull().references(() => chats.id, { onDelete: "cascade" }),
-  role: text("role", { enum: messageRoles }).notNull(),
-  content: text("content").notNull(),
-  eventIndex: integer("event_index"),
-  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
-});
-
 export const events = pgTable(
   "events",
   {
@@ -111,4 +100,4 @@ export const events = pgTable(
   ],
 );
 
-export const schema = { agentConnections, chats, messages, events };
+export const schema = { agentConnections, chats, events };
