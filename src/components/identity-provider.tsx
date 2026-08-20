@@ -12,6 +12,7 @@ import {
 import {
   createEvelandIdentityClient,
   type IdentityCatalog,
+  type IdentityLoginAvailability,
   type IdentitySession,
 } from "@/identity/client";
 
@@ -21,6 +22,7 @@ type IdentityContextValue = {
   getCatalog(returnPath?: string): Promise<IdentityCatalog>;
   getAppToken(returnPath?: string): Promise<string>;
   getCallerToken(projectId: string, returnPath: string): Promise<string>;
+  getLoginAvailability(returnPath?: string): Promise<IdentityLoginAvailability>;
   respondToAuthenticationChallenge(
     header: string | null,
     expectedProjectId: string,
@@ -81,6 +83,7 @@ export function IdentityProvider({
       getCallerToken,
       respondToAuthenticationChallenge:
         client.respondToAuthenticationChallenge,
+      getLoginAvailability: client.getLoginAvailability,
       login: client.login,
       switchRealm: client.switchRealm,
       async logout() {

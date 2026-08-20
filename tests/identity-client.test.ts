@@ -3,6 +3,67 @@ import { describe, expect, it, vi } from "vitest";
 import { createEvelandIdentityClient } from "@/identity/client";
 
 describe("Eveland browser identity client", () => {
+  it("reports login as available when the login route answers with a redirect", async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(new Response(null, { status: 302, headers: { location: "http://localhost:3000/login" } }));
+    const client = createEvelandIdentityClient({
+      baseUrl: "http://localhost:4000",
+      returnTarget: "eve-chats",
+      fetch,
+      redirect: vi.fn(),
+    });
+
+    await expect(client.getLoginAvailability("/chats/chat_1")).resolves.toEqual({
+      available: true,
+    });
+    expect(fetch).toHaveBeenCalledWith(
+      "http://localhost:4000/identity/login?target=eve-chats&returnPath=%2Fchats%2Fchat_1",
+      expect.objectContaining({ credentials: "include", redirect: "manual" }),
+    );
+  });
+
+  it("reports the refusal code of an open-access instance", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValueOnce(
+      Response.json(
+        {
+          code: "identity_login_not_required",
+          error: "This Eveland instance is open to all callers; no identity login is used.",
+        },
+        { status: 503 },
+      ),
+    );
+    const client = createEvelandIdentityClient({
+      baseUrl: "http://localhost:4000",
+      returnTarget: "eve-chats",
+      fetch,
+      redirect: vi.fn(),
+    });
+
+    await expect(client.getLoginAvailability("/")).resolves.toEqual({
+      available: false,
+      code: "identity_login_not_required",
+      message: "This Eveland instance is open to all callers; no identity login is used.",
+    });
+  });
+
+  it("treats an unreachable Identity as unavailable, not as open access", async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockRejectedValueOnce(new TypeError("fetch failed"));
+    const client = createEvelandIdentityClient({
+      baseUrl: "http://localhost:4000",
+      returnTarget: "eve-chats",
+      fetch,
+      redirect: vi.fn(),
+    });
+
+    await expect(client.getLoginAvailability("/")).rejects.toMatchObject({
+      code: "identity_unavailable",
+    });
+  });
+
+
   it("uses a same-origin proxy for cookie-bearing Identity requests without changing login ownership", async () => {
     const expiresAt = new Date(Date.now() + 60_000).toISOString();
     const fetch = vi

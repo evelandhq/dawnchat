@@ -24,6 +24,10 @@ export type IdentityCatalog = {
   }>;
 };
 
+export type IdentityLoginAvailability =
+  | { available: true }
+  | { available: false; code: string; message: string };
+
 export type EvelandAuthenticationChallenge = {
   kind: "eveland";
   url: string;
@@ -265,6 +269,54 @@ export function createEvelandIdentityClient(options: IdentityClientOptions) {
     return getCallerToken(expectedProjectId, returnPath);
   }
 
+  /**
+   * Whether this Eveland instance can log a browser in at all. An instance
+   * whose only provider is open access answers the login route with a JSON
+   * refusal instead of a redirect — sending the browser there would strand it
+   * on raw JSON, so callers probe before redirecting.
+   */
+  async function getLoginAvailability(
+    returnPath = "/",
+  ): Promise<IdentityLoginAvailability> {
+    const login = new URL(`${baseUrl}/identity/login`);
+    login.searchParams.set("target", options.returnTarget);
+    login.searchParams.set("returnPath", safeReturnPath(returnPath));
+    let response: Response;
+    try {
+      response = await fetchIdentity(login.toString(), {
+        credentials: "include",
+        headers: { accept: "application/json" },
+        redirect: "manual",
+      });
+    } catch {
+      throw new EvelandIdentityError(
+        "identity_unavailable",
+        503,
+        "Eveland Identity is unavailable.",
+      );
+    }
+    // A login that can proceed answers with a redirect toward the provider —
+    // or toward the return URL when a session already exists.
+    if (
+      response.type === "opaqueredirect" ||
+      (response.status >= 300 && response.status < 400) ||
+      response.ok
+    ) {
+      return { available: true };
+    }
+    const body = (await response.json().catch(() => null)) as
+      | { code?: unknown; error?: unknown }
+      | null;
+    return {
+      available: false,
+      code: typeof body?.code === "string" ? body.code : "identity_login_unavailable",
+      message:
+        typeof body?.error === "string"
+          ? body.error
+          : "Eveland Identity login is unavailable.",
+    };
+  }
+
   function beginLogin(
     returnPath: string,
     switchRealm = false,
@@ -302,6 +354,7 @@ export function createEvelandIdentityClient(options: IdentityClientOptions) {
     getCatalog,
     getAppToken,
     getCallerToken,
+    getLoginAvailability,
     respondToAuthenticationChallenge,
     login(returnPath: string): never {
       return beginLogin(returnPath);

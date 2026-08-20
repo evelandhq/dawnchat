@@ -7,6 +7,7 @@ import { EvelandIdentityError } from "@/identity/client";
 
 const getSession = vi.fn();
 const getAppToken = vi.fn<() => Promise<string>>();
+const getLoginAvailability = vi.fn();
 const login = vi.fn((returnPath: string): never => {
   throw new EvelandIdentityError(
     "identity_redirecting",
@@ -24,6 +25,7 @@ vi.mock("@/components/identity-provider", () => ({
     session: null,
     getSession,
     getAppToken,
+    getLoginAvailability,
     login,
   }),
 }));
@@ -32,8 +34,10 @@ describe("IdentityGate", () => {
   beforeEach(() => {
     getSession.mockReset();
     getAppToken.mockReset();
+    getLoginAvailability.mockReset();
     login.mockClear();
     getAppToken.mockResolvedValue("app-token");
+    getLoginAvailability.mockResolvedValue({ available: true });
     vi.stubGlobal("fetch", vi.fn(async () => Response.json({ claimed: 0 })));
   });
 
@@ -60,6 +64,51 @@ describe("IdentityGate", () => {
         headers: { authorization: "Bearer app-token" },
       });
     });
+  });
+
+  it("runs anonymously against an open-access Eveland instance", async () => {
+    getSession.mockResolvedValue({ authenticated: false });
+    getLoginAvailability.mockResolvedValue({
+      available: false,
+      code: "identity_login_not_required",
+      message: "This Eveland instance is open to all callers; no identity login is used.",
+    });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <IdentityGate>
+        <div>App content</div>
+      </IdentityGate>,
+    );
+
+    expect(await screen.findByText("App content")).toBeInTheDocument();
+    expect(login).not.toHaveBeenCalled();
+    // No identity, no App Token, no claim.
+    expect(getAppToken).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a login refusal instead of stranding the browser on it", async () => {
+    getSession.mockResolvedValue({ authenticated: false });
+    getLoginAvailability.mockResolvedValue({
+      available: false,
+      code: "identity_return_target_invalid",
+      message: "The Identity return target is not registered.",
+    });
+
+    render(
+      <IdentityGate>
+        <div>App content</div>
+      </IdentityGate>,
+    );
+
+    expect(
+      await screen.findByText("The Identity return target is not registered."),
+    ).toBeInTheDocument();
+    expect(login).not.toHaveBeenCalled();
+    expect(screen.queryByText("App content")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
   });
 
   it("redirects an unauthenticated visitor to Eveland login", async () => {

@@ -2,9 +2,11 @@ import Link from "next/link";
 import type { Route } from "next";
 
 import { AuthenticatedSidebarNav } from "@/components/authenticated-sidebar-nav";
+import { SidebarAccount } from "@/components/sidebar-account";
 import {
   Sidebar,
   SidebarContent,
+  SidebarFooter,
   SidebarHeader,
   SidebarMenu,
   SidebarMenuButton,
@@ -32,6 +34,9 @@ export function AppSidebar(): React.ReactElement {
       <SidebarContent>
         <AuthenticatedSidebarNav />
       </SidebarContent>
+      <SidebarFooter>
+        <SidebarAccount />
+      </SidebarFooter>
     </Sidebar>
   );
 }

@@ -12,6 +12,8 @@ type GateState =
   | { phase: "checking" }
   | { phase: "redirecting" }
   | { phase: "unavailable"; message: string }
+  /** Open-access Eveland: no identity exists; the app runs on its anonymous browser session. */
+  | { phase: "open" }
   | { phase: "authenticated" };
 
 export function IdentityGate({
@@ -20,7 +22,8 @@ export function IdentityGate({
   children: ReactNode;
 }): React.ReactElement {
   const pathname = usePathname();
-  const { getSession, getAppToken, login } = useEvelandIdentity();
+  const { getSession, getAppToken, getLoginAvailability, login } =
+    useEvelandIdentity();
   const [state, setState] = useState<GateState>({ phase: "checking" });
   const [attempt, setAttempt] = useState(0);
 
@@ -31,6 +34,22 @@ export function IdentityGate({
         const session = await getSession();
         if (!active) return;
         if (!session.authenticated) {
+          const availability = await getLoginAvailability(pathname);
+          if (!active) return;
+          if (!availability.available) {
+            if (availability.code === "identity_login_not_required") {
+              // The instance is open to all callers; there is no identity to
+              // establish, so the gate stands aside and anonymous
+              // browser-session ownership carries the app, as before the gate.
+              setState({ phase: "open" });
+              return;
+            }
+            // Login exists in principle but this instance refuses it (target
+            // not registered, provider not configured). Redirecting would
+            // strand the browser on the refusal JSON — surface it instead.
+            setState({ phase: "unavailable", message: availability.message });
+            return;
+          }
           setState({ phase: "redirecting" });
           login(pathname);
           return;
@@ -73,9 +92,9 @@ export function IdentityGate({
     // The gate re-runs only on explicit retry; pathname changes after the
     // first successful check must not re-enter the login redirect.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [attempt, getAppToken, getSession, login]);
+  }, [attempt, getAppToken, getLoginAvailability, getSession, login]);
 
-  if (state.phase === "authenticated") {
+  if (state.phase === "authenticated" || state.phase === "open") {
     return <>{children}</>;
   }
 

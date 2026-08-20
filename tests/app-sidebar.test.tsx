@@ -20,7 +20,18 @@ vi.mock("next-themes", () => ({
 }));
 
 vi.mock("@/components/identity-provider", () => ({
-  useEvelandIdentity: () => ({ getAppToken, getSession }),
+  useEvelandIdentity: () => ({
+    session: {
+      authenticated: true,
+      principal: { id: "iprn_user", name: "Test User", email: null },
+      activeRealm: { id: "irlm_account", name: "Account" },
+    },
+    getAppToken,
+    getSession,
+    login: vi.fn(),
+    logout: vi.fn(),
+    switchRealm: vi.fn(),
+  }),
 }));
 
 describe("AppSidebar", () => {
@@ -56,7 +67,22 @@ describe("AppSidebar", () => {
     const brandLink = within(header as HTMLElement).getByRole("link", { name: "EveChats" });
     expect(brandLink).toHaveClass("h-10");
     expect(within(header as HTMLElement).getByRole("button", { name: "Toggle theme" })).toBeInTheDocument();
-    expect(container.querySelector('[data-sidebar="footer"]')).not.toBeInTheDocument();
+  });
+
+  it("shows the signed-in account in the sidebar footer", () => {
+    const { container } = renderWithChatList(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    );
+    const footer = container.querySelector('[data-sidebar="footer"]');
+
+    expect(footer).not.toBeNull();
+    expect(
+      within(footer as HTMLElement).getByRole("button", { name: "Account" }),
+    ).toBeInTheDocument();
+    expect(within(footer as HTMLElement).getByText("Test User")).toBeInTheDocument();
+    expect(within(footer as HTMLElement).getByText("Account")).toBeInTheDocument();
   });
 
   it("offers New Chat and Agents navigation entries", () => {
