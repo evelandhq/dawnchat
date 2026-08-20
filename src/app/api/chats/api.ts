@@ -18,6 +18,7 @@ import {
   EMPTY_PENDING_INPUT,
   type PendingInputState,
 } from "@/eve/proxy-contract";
+import { collapseStreamedDeltas } from "@/eve/stream-projection";
 import {
   deserializePendingUserContent,
   serializePendingUserContent,
@@ -198,7 +199,7 @@ export async function getChatWithEvents(
           pendingInput,
           agentName: agent.name,
         },
-        events: events.map((event) => event.payload),
+        events: collapseStreamedDeltas(events).map((event) => event.payload),
       }),
       access.session,
     );
