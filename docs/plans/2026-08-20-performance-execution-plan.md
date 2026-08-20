@@ -188,6 +188,26 @@ pnpm typecheck && pnpm db:up && pnpm test && pnpm build
   evelandProjectId、header 修复 B11、`/` 回归客户端跳转、loading.tsx 移除
 - `a34ca13` P3：React Compiler（build ~6s → ~28s）
 
+## 附录 C — UAT 部署与实测（2026-08-20）
+
+- `f972aca` 起已部署 UAT（含全部 P0–P3 + 迁移 0008/0009）；events 表清理
+  303,581 行 / 1.4 GB，`VACUUM FULL` 后 1310 MB → 40 MB。
+- 部署途中修复三项非本计划内的问题：
+  1. `next` "latest" 漂移到 16.3.1，其 standalone 产物缺
+     `@swc/helpers/esm` 无法启动 → 钉死 16.3.0（`f972aca`）；
+  2. Michael 的 IdentityGate（`7e1f937`）与 open 模式的 UAT eveland 冲突 →
+     gate 增加登录可用性探测，open 实例放行匿名（`220ba0d`）；同 commit 恢复
+     被 P2 覆盖的 sidebar 账户 footer；
+  3. 探测被两层网络问题挡住：eveland login 错误响应缺 CORS 头 + UAT 盒子
+     无法回环访问自己的公网 identity 域名（ELB 内网 404）→ 探测改走应用自身
+     `/identity` 同源 rewrite，rewrite 服务端目标以 build-arg
+     `EVELAND_IDENTITY_URL=http://host.docker.internal:4000` 指向盒内
+     eveland API（`f91875b`）；盒子 `.env` 的 JWKS_URL 同步修正。
+- UAT 实测（生产构建）：每路由视图 `GET /api/chats` 恰好 1 次；`/` 自动落到
+  最新会话；`/chats/:id` 头部正确显示 Agent；长会话完整渲染。
+- 上游遗留：eveland login 路由的 JSON 错误响应缺
+  `access-control-allow-origin`（session 路由有）——应在 eveland 仓库修复。
+
 ## 附录 B — 执行后的验证记录（2026-08-20，localhost:3010 dev）
 
 - 每个路由视图 `GET /api/chats` 恰好 **1 次**（修复前 4 次）。dev StrictMode 双重
