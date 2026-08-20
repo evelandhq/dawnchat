@@ -59,6 +59,7 @@
     "@types/pg": "^8.20.0",
     "@types/react": "latest",
     "@types/react-dom": "latest",
+    "babel-plugin-react-compiler": "^1.0.0",
     "drizzle-kit": "latest",
     "jsdom": "latest",
     "tailwindcss": "^4.3.2",

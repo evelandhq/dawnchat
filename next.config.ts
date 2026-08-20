@@ -9,6 +9,7 @@ const identityBaseUrl = (
 const nextConfig: NextConfig = {
   typedRoutes: true,
   output: "standalone",
+  reactCompiler: true,
   async rewrites() {
     return [
       {
