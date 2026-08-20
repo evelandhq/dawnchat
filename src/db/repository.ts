@@ -113,6 +113,12 @@ export type AppendEventInput = {
     | { clear: true }
     | { clearTurn: string }
     | { settle: string[] };
+  /**
+   * Session cursor to persist atomically with the insert, applied only when
+   * the event row is newly inserted — a replayed event recomputes the same
+   * cursor, so skipping it changes nothing and saves the write.
+   */
+  sessionState?: { state: SessionState; status?: ChatStatus };
 } & (
   | {
       eventIndex: number;
@@ -652,6 +658,19 @@ export function createRepository(db: RepositoryDb): Repository {
               .set({ pendingInputJson: serializePendingInput(next), updatedAt: new Date() })
               .where(eq(chats.id, input.chatId));
           }
+        }
+
+        if (input.sessionState) {
+          await tx
+            .update(chats)
+            .set({
+              sessionStateJson: JSON.stringify(input.sessionState.state),
+              ...(input.sessionState.status
+                ? { status: input.sessionState.status }
+                : {}),
+              updatedAt: new Date(),
+            })
+            .where(eq(chats.id, input.chatId));
         }
 
         return mapEvent(created);

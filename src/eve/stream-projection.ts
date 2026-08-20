@@ -1,15 +1,16 @@
 import { turnIdFromEvent } from "@/eve/proxy-contract";
 
 /**
- * Eve streams a message and its reasoning as deltas that each carry the whole
- * text so far, and the proxy persists every one. A run of N deltas therefore
- * stores the same message about N times over, and the completion event that
- * follows carries the final text in full.
+ * Compatibility for chats persisted before the proxy stopped storing deltas:
+ * their streams hold a run of `*.appended` events that each carry the whole
+ * text so far, storing the same message about N times over.
  *
  * The message projection replaces a streaming part with the next value for the
  * same run, so only the last delta of a run can affect the result, and a
  * completed run drops its deltas entirely. Collapsing them here leaves the
- * browser's projection identical while it reads a fraction of the bytes.
+ * browser's projection identical while it reads a fraction of the bytes. New
+ * chats never store deltas (see `persistEvent` in eve-proxy), so this filter
+ * passes their streams through untouched.
  */
 const DELTA_COMPLETIONS: Record<string, string> = {
   "message.appended": "message.completed",

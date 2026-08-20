@@ -74,7 +74,9 @@ describe("AppSidebar", () => {
 
   it("shows the signed-in account in the sidebar footer", async () => {
     const sidebar = await AppSidebar();
-    const { container } = render(<SidebarProvider>{sidebar}</SidebarProvider>);
+    const { container } = renderWithChatList(
+      <SidebarProvider>{sidebar}</SidebarProvider>,
+    );
     const footer = container.querySelector('[data-sidebar="footer"]');
 
     expect(footer).not.toBeNull();

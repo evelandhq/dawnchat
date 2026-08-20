@@ -140,7 +140,9 @@ describe.each(generations)("Eve $generation chat flow smoke", (eve) => {
       streamIndex: 6,
       ...(eve.continuationToken ? { continuationToken: eve.continuationToken } : {}),
     });
-    await expect(createRepository(testDb.db).listEvents(chatId)).resolves.toHaveLength(6);
+    // Each turn streams three events but persists two: the message.appended
+    // delta is forwarded and counted in the cursor, never stored.
+    await expect(createRepository(testDb.db).listEvents(chatId)).resolves.toHaveLength(4);
   });
 });
 

@@ -5,6 +5,8 @@ import { resolveAppBrowserSession } from "@/app-session";
 import { setDbClientForTests } from "@/db/provider";
 import { createRepository } from "@/db/repository";
 import { chats } from "@/db/schema";
+import { defaultMessageReducer, type MessageStreamEvent } from "eve/client";
+
 import { startFakeEveServer, type FakeEveServer } from "@/eve/fake-eve-server.test-helper";
 import { derivePendingInput } from "@/eve/proxy-contract";
 import {
@@ -435,10 +437,15 @@ describe("per-chat Eve protocol proxy", () => {
     );
     expect(forwardedEvents).toEqual(browserEvents);
 
+    // Deltas are forwarded but never persisted; the stored stream keeps each
+    // event's true position so a replay still dedupes by (session, index).
+    const persistedEvents = browserEvents.filter(
+      (event) => event.type !== "reasoning.appended",
+    );
     const stored = await repository.listEvents(chat.id);
-    expect(stored).toHaveLength(streamEvents.length);
-    expect(stored.map((event) => event.payload)).toEqual(browserEvents);
-    expect(stored.map((event) => event.eventIndex)).toEqual([1, 2, 3, 4, 5]);
+    expect(stored).toHaveLength(persistedEvents.length);
+    expect(stored.map((event) => event.payload)).toEqual(persistedEvents);
+    expect(stored.map((event) => event.eventIndex)).toEqual([1, 2, 3, 4]);
     expect(stored).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ sessionId: "ses_1", streamIndex: 0, type: "message.received" }),
@@ -453,7 +460,178 @@ describe("per-chat Eve protocol proxy", () => {
     const replayResponse = await stream();
     expect(replayResponse.status).toBe(200);
     await replayResponse.text();
-    await expect(repository.listEvents(chat.id)).resolves.toHaveLength(streamEvents.length);
+    await expect(repository.listEvents(chat.id)).resolves.toHaveLength(persistedEvents.length);
+  });
+
+  it("persists a projection-equivalent stream without its deltas", async () => {
+    const streamEvents = [
+      { type: "message.received", data: { message: "Hi", sequence: 1, turnId: "turn_1" } },
+      { type: "step.started", data: { sequence: 2, stepIndex: 0, turnId: "turn_1" } },
+      ...["He", "Hell", "Hello"].map((messageSoFar, index) => ({
+        type: "message.appended",
+        data: { messageSoFar, sequence: 3 + index, stepIndex: 0, turnId: "turn_1" },
+      })),
+      {
+        type: "message.completed",
+        data: { message: "Hello", finishReason: "stop", sequence: 6, stepIndex: 0, turnId: "turn_1" },
+      },
+      { type: "turn.completed", data: { sequence: 7, turnId: "turn_1" } },
+      { type: "session.waiting", data: { wait: "next-user-message" } },
+    ] as const;
+    const server = await fakeServer({ generation: "0.31", streamEvents });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Streaming Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Delta persistence",
+      ...chatIdentity,
+    });
+    const routes = await loadProxyRoutes();
+    await routes.createSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ message: "Hi" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id }) },
+    );
+
+    const response = await routes.streamSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1/stream`, {
+        headers: callerHeaders(),
+      }),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+    const forwarded = (await response.text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as MessageStreamEvent);
+
+    // The browser still receives every delta for live rendering.
+    expect(forwarded.map((event) => event.type)).toEqual(
+      streamEvents.map((event) => event.type),
+    );
+
+    const stored = await repository.listEvents(chat.id);
+    expect(stored.map((event) => event.type)).toEqual([
+      "message.received",
+      "step.started",
+      "message.completed",
+      "turn.completed",
+      "session.waiting",
+    ]);
+    // The stored stream projects to exactly what the full stream projects to.
+    const project = (events: readonly unknown[]) => {
+      const reducer = defaultMessageReducer();
+      let data = reducer.initial();
+      for (const event of events) {
+        data = reducer.reduce(data, event as MessageStreamEvent);
+      }
+      return data;
+    };
+    expect(project(stored.map((event) => event.payload))).toEqual(project(forwarded));
+    // Deltas still count toward the cursor: the next stored event carried it.
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      sessionState: { sessionId: "ses_1", streamIndex: streamEvents.length },
+    });
+  });
+
+  it("recovers a cursor left behind by an unfinished delta run", async () => {
+    // The stream dies inside a delta run: nothing after message.received is
+    // persisted, so the stored cursor stays at 1 while Eve's stream is at 3.
+    const streamEvents = [
+      { type: "message.received", data: { message: "Hi", sequence: 1, turnId: "turn_1" } },
+      {
+        type: "message.appended",
+        data: { messageSoFar: "Par", sequence: 2, stepIndex: 0, turnId: "turn_1" },
+      },
+      {
+        type: "message.appended",
+        data: { messageSoFar: "Part", sequence: 3, stepIndex: 0, turnId: "turn_1" },
+      },
+    ] as const;
+    // Held open like a live turn: the disconnect below is the browser's, not
+    // the script running out.
+    const server = await fakeServer({
+      generation: "0.31",
+      streamEvents,
+      holdStreamOpen: true,
+    });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Interrupted Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Cursor lag",
+      ...chatIdentity,
+    });
+    const routes = await loadProxyRoutes();
+    await routes.createSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ message: "Hi" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id }) },
+    );
+    const streamLines = async (lineCount: number): Promise<string[]> => {
+      const abort = new AbortController();
+      const response = await routes.streamSession(
+        new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1/stream`, {
+          headers: callerHeaders(),
+          signal: abort.signal,
+        }),
+        { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+      );
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      let text = "";
+      while ((text.match(/\n/g)?.length ?? 0) < lineCount) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        text += decoder.decode(value, { stream: true });
+      }
+      abort.abort();
+      await reader.cancel().catch(() => undefined);
+      return text.trim().split("\n").slice(0, lineCount);
+    };
+
+    const first = await streamLines(3);
+    expect(first.map((line) => (JSON.parse(line) as MessageStreamEvent).type)).toEqual([
+      "message.received",
+      "message.appended",
+      "message.appended",
+    ]);
+    // Only message.received persisted; the deltas advanced no stored state.
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      sessionState: { sessionId: "ses_1", streamIndex: 1 },
+    });
+    await expect(repository.listEvents(chat.id)).resolves.toHaveLength(1);
+
+    // The reconnect replays the gap from Eve: the browser gets the full run
+    // again, the (session, stream index) key absorbs the row it already has,
+    // and the lagged cursor neither duplicates rows nor rewinds.
+    const replayed = await streamLines(3);
+    expect(replayed.map((line) => (JSON.parse(line) as MessageStreamEvent).type)).toEqual([
+      "message.received",
+      "message.appended",
+      "message.appended",
+    ]);
+    await expect(repository.listEvents(chat.id)).resolves.toHaveLength(1);
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      sessionState: { sessionId: "ses_1", streamIndex: 1 },
+    });
   });
 
   it("stores Eve 0.30 continuation tokens server-side and strips them from the browser stream", async () => {

@@ -1,10 +1,11 @@
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { screen } from "@testing-library/react";
 
 import AgentNewChatPage from "@/app/agents/[agentId]/page";
 import { createRepository } from "@/db/repository";
 import { setDbClientForTests } from "@/db/provider";
+import { renderWithChatList } from "@/test/chat-list";
 import { createTestDbHandle, type TestDbHandle } from "@/test/db";
 
 const getAppToken = vi.fn(async () => "app-token");
@@ -16,6 +17,7 @@ const getSession = vi.fn(async () => ({
 
 vi.mock("next/navigation", () => ({
   notFound: vi.fn(),
+  usePathname: () => "/agents/agent_1",
   useRouter: () => ({ push: vi.fn(), refresh: vi.fn() }),
 }));
 
@@ -62,7 +64,7 @@ describe("AgentNewChatPage presentation", () => {
       vi.fn(async () => Response.json({ chats: [] })),
     );
     const page = await AgentNewChatPage({ params: Promise.resolve({ agentId: agent.id }) });
-    const { container } = render(page);
+    const { container } = renderWithChatList(page);
 
     expect(screen.queryByRole("heading", { name: "Data Bot" })).not.toBeInTheDocument();
     expect(screen.queryByText("healthy")).not.toBeInTheDocument();

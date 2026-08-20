@@ -29,6 +29,9 @@ import {
 
 const NDJSON_CONTENT_TYPE = "application/x-ndjson; charset=utf-8";
 
+/** Forwarded to the browser but never persisted; see `persistEvent`. */
+const STREAM_DELTA_EVENT_TYPES = new Set(["message.appended", "reasoning.appended"]);
+
 type ProxyContext = {
   chat: Chat;
   repository: Repository;
@@ -502,14 +505,7 @@ function createPersistedEventStream(input: {
       ? waitingContinuationToken(event)
       : undefined;
     const browserEvent = redactWaitingContinuationToken(event, input.sessionId);
-    await input.repository.appendEvent({
-      chatId: input.chat.id,
-      sessionId: input.sessionId,
-      streamIndex: nextStreamIndex,
-      type: browserEvent.type,
-      payload: browserEvent,
-      pendingInput: pendingInputTransition(browserEvent),
-    });
+    const eventStreamIndex = nextStreamIndex;
     nextStreamIndex += 1;
     latestCursor = Math.max(latestCursor, nextStreamIndex);
     currentSession = {
@@ -517,8 +513,29 @@ function createPersistedEventStream(input: {
       ...(continuationToken ? { continuationToken } : {}),
       streamIndex: latestCursor,
     };
+
+    // Text and reasoning deltas are renderer traffic, not domain events: each
+    // carries the whole text so far, its completion supersedes the run, and a
+    // resume replays from Eve by cursor rather than from this store. They are
+    // forwarded and counted in the cursor, never persisted — the next stored
+    // event carries the cursor they advanced. A crash inside a delta run
+    // leaves the stored cursor behind the stream; the reconnect replays the
+    // gap from Eve and the (session, stream index) key absorbs the rows it
+    // already has.
+    if (STREAM_DELTA_EVENT_TYPES.has(browserEvent.type)) {
+      return { event: browserEvent, terminal: false };
+    }
+
     const status = chatStatusFromEvent(event);
-    await input.repository.updateChatSessionState(input.chat.id, currentSession, status);
+    await input.repository.appendEvent({
+      chatId: input.chat.id,
+      sessionId: input.sessionId,
+      streamIndex: eventStreamIndex,
+      type: browserEvent.type,
+      payload: browserEvent,
+      pendingInput: pendingInputTransition(browserEvent),
+      sessionState: { state: currentSession, ...(status ? { status } : {}) },
+    });
     return { event: browserEvent, terminal: status !== undefined };
   };
 
