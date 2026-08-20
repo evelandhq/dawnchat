@@ -16,7 +16,8 @@
     "db:up": "docker compose up -d --wait postgres",
     "db:down": "docker compose down",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "drizzle-kit migrate"
+    "db:migrate": "drizzle-kit migrate",
+    "db:cleanup-deltas": "tsx --tsconfig tsconfig.json scripts/cleanup-stream-deltas.ts"
   },
   "dependencies": {
     "@radix-ui/react-use-controllable-state": "^1.2.3",
@@ -63,6 +64,7 @@
     "drizzle-kit": "latest",
     "jsdom": "latest",
     "tailwindcss": "^4.3.2",
+    "tsx": "^4.23.12",
     "typescript": "6.0.3",
     "vitest": "latest"
   }

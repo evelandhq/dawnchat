@@ -207,5 +207,9 @@ pnpm typecheck && pnpm db:up && pnpm test && pnpm build
   仅剩 layout 的 cookies()）。
 - 待办：dev server 需重启以启用 `reactCompiler`（next.config.ts 变更不热载）；
   React DevTools profiler 抽查在重启后进行。
-- 历史数据清理（P1 任务 5，可选）尚未执行；上面 43 MB 会话表明值得做，
-  脚本需先在 UAT 核对行数后再上生产。
+- 历史数据清理（P1 任务 5）：`pnpm db:cleanup-deltas`（dry run）/ `--apply`。
+  本地库已执行：21 个会话、38,580 行、78.8 MB payload 删除，未完成 run 依规则
+  各保留最新一条 delta（剩 6 行）；`VACUUM FULL` 后 events 表 85 MB → 2.9 MB；
+  删除前后 `GET /api/chats/:id` 响应逐字节一致（清理与读路径折叠是同一函数）。
+  UAT/生产：部署新代码后运行同一脚本，生产用普通 `VACUUM ANALYZE`
+  （`VACUUM FULL` 排它锁，仅停机窗口用）。
