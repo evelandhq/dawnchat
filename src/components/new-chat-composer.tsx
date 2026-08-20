@@ -28,7 +28,8 @@ type NewChatComposerProps = {
   agentId: string;
   agentName: string;
   disabled?: boolean;
-  getAccessToken?: () => Promise<string>;
+  /** Resolved at submit time; `null` sends the request unauthenticated. */
+  getAccessToken?: () => Promise<string | null>;
 };
 
 type CreateChatResponse = {

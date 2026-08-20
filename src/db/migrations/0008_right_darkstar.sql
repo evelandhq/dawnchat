@@ -1,0 +1,3 @@
+CREATE INDEX "chats_owner_client_id_created_at_idx" ON "chats" USING btree ("owner_client_id","created_at" DESC NULLS LAST);--> statement-breakpoint
+CREATE INDEX "chats_owner_identity_created_at_idx" ON "chats" USING btree ("owner_identity_principal_id","owner_identity_realm_id","created_at" DESC NULLS LAST);--> statement-breakpoint
+CREATE INDEX "events_chat_id_type_event_index_idx" ON "events" USING btree ("chat_id","type","event_index" DESC NULLS LAST);

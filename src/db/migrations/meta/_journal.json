@@ -57,6 +57,13 @@
       "when": 1786352911951,
       "tag": "0007_aromatic_deathbird",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1787206118707,
+      "tag": "0008_right_darkstar",
+      "breakpoints": true
     }
   ]
 }

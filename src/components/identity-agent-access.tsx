@@ -2,22 +2,17 @@
 
 import Link from "next/link";
 import type { Route } from "next";
-import { useEffect, useState } from "react";
+import { useCallback, useMemo } from "react";
 import { CircleAlert, ShieldCheck } from "lucide-react";
 
 import { NewChatComposer } from "@/components/new-chat-composer";
+import { useChatList } from "@/components/chat-list-provider";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { useEvelandIdentity } from "@/components/identity-provider";
 import { EvelandIdentityError } from "@/identity/client";
-
-type RecentChat = {
-  id: string;
-  title: string;
-  agentConnectionId: string;
-  lastMessage: string | null;
-};
+import { cn } from "@/lib/utils";
 
 export function IdentityAgentAccess({
   agentId,
@@ -28,66 +23,25 @@ export function IdentityAgentAccess({
   agentName: string;
   disabled: boolean;
 }): React.ReactElement {
-  const {
-    getAppToken,
-    getSession,
-    switchRealm,
-  } = useEvelandIdentity();
+  const { getAppToken, getSession, switchRealm } = useEvelandIdentity();
   const returnPath = `/agents/${agentId}`;
-  const [attempt, setAttempt] = useState(0);
-  const [state, setState] = useState<
-    | { kind: "loading" }
-    | { kind: "ready"; chats: RecentChat[]; authenticated: boolean }
-    | { kind: "forbidden"; message: string }
-    | { kind: "error"; message: string }
-  >({ kind: "loading" });
+  const { state, refresh } = useChatList();
+  const agentChats = useMemo(
+    () =>
+      (state.chats ?? []).filter(
+        (chat) => chat.agentConnectionId === agentId,
+      ),
+    [agentId, state.chats],
+  );
+  // Resolved when the user actually sends, so composing never waits on
+  // Identity. Both reads are memoised by the Identity client.
+  const getAccessToken = useCallback(async (): Promise<string | null> => {
+    const session = await getSession();
+    return session.authenticated ? getAppToken(returnPath) : null;
+  }, [getAppToken, getSession, returnPath]);
 
-  useEffect(() => {
-    let active = true;
-    void (async () => {
-      try {
-        const session = await getSession();
-        const token = session.authenticated
-          ? await getAppToken(returnPath)
-          : null;
-        const response = await fetch("/api/chats", {
-          ...(token
-            ? { headers: { authorization: `Bearer ${token}` } }
-            : {}),
-          cache: "no-store",
-        });
-        if (!response.ok) throw await localApiError(response);
-        const body = (await response.json()) as { chats?: RecentChat[] };
-        if (active) {
-          setState({
-            kind: "ready",
-            chats: (body.chats ?? []).filter(
-              (chat) => chat.agentConnectionId === agentId,
-            ),
-            authenticated: session.authenticated,
-          });
-        }
-      } catch (error) {
-        if (!active || isRedirecting(error)) return;
-        if (error instanceof EvelandIdentityError && error.status === 403) {
-          setState({ kind: "forbidden", message: error.message });
-        } else {
-          setState({
-            kind: "error",
-            message:
-              error instanceof Error
-                ? error.message
-                : "Unable to verify your Eveland identity.",
-          });
-        }
-      }
-    })();
-    return () => {
-      active = false;
-    };
-  }, [agentId, attempt, getAppToken, getSession, returnPath]);
-
-  if (state.kind === "loading") {
+  // A login redirect is already navigating away; it is not a failed check.
+  if (state.status === "error" && isRedirecting(state.error)) {
     return (
       <div className="flex min-h-48 items-center justify-center gap-2 text-sm text-muted-foreground">
         <Spinner />
@@ -96,40 +50,36 @@ export function IdentityAgentAccess({
     );
   }
 
-  if (state.kind === "forbidden") {
-    return (
-      <Alert variant="destructive">
-        <CircleAlert />
-        <AlertTitle>Eveland rejected access to {agentName}</AlertTitle>
-        <AlertDescription className="space-y-3">
-          <p>{state.message}</p>
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => switchRealm(returnPath)}
-          >
-            Switch identity scope
-          </Button>
-        </AlertDescription>
-      </Alert>
-    );
-  }
-
-  if (state.kind === "error") {
+  if (state.status === "error") {
+    if (state.error instanceof EvelandIdentityError && state.error.status === 403) {
+      return (
+        <Alert variant="destructive">
+          <CircleAlert />
+          <AlertTitle>Eveland rejected access to {agentName}</AlertTitle>
+          <AlertDescription className="space-y-3">
+            <p>{state.error.message}</p>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => switchRealm(returnPath)}
+            >
+              Switch identity scope
+            </Button>
+          </AlertDescription>
+        </Alert>
+      );
+    }
     return (
       <Alert variant="destructive">
         <CircleAlert />
         <AlertTitle>Identity check failed</AlertTitle>
         <AlertDescription className="space-y-3">
-          <p>{state.message}</p>
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => {
-              setState({ kind: "loading" });
-              setAttempt((current) => current + 1);
-            }}
-          >
+          <p>
+            {state.error instanceof Error
+              ? state.error.message
+              : "Unable to verify your Eveland identity."}
+          </p>
+          <Button type="button" variant="outline" onClick={() => void refresh()}>
             Retry
           </Button>
         </AlertDescription>
@@ -139,37 +89,37 @@ export function IdentityAgentAccess({
 
   return (
     <div className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)] gap-8">
-      {state.authenticated ? (
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b pb-4">
-          <div className="flex min-w-0 items-center gap-2">
-            <ShieldCheck className="size-4 text-primary" />
-            <span className="truncate text-sm font-medium">
-              Eveland identity
-            </span>
-          </div>
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            onClick={() => switchRealm(returnPath)}
-          >
-            Switch scope
-          </Button>
+      {/* Holds its box while the scope resolves so the composer never moves. */}
+      <div
+        className={cn(
+          "flex flex-wrap items-center justify-between gap-3 border-b pb-4",
+          state.status === "loading" && "invisible",
+          state.status !== "loading" && !state.authenticated && "hidden",
+        )}
+      >
+        <div className="flex min-w-0 items-center gap-2">
+          <ShieldCheck className="size-4 text-primary" />
+          <span className="truncate text-sm font-medium">Eveland identity</span>
         </div>
-      ) : null}
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          disabled={state.status === "loading"}
+          onClick={() => switchRealm(returnPath)}
+        >
+          Switch scope
+        </Button>
+      </div>
 
       <NewChatComposer
         agentId={agentId}
         agentName={agentName}
         disabled={disabled}
-        getAccessToken={
-          state.authenticated
-            ? () => getAppToken(returnPath)
-            : undefined
-        }
+        getAccessToken={getAccessToken}
       />
 
-      {state.chats.length > 0 ? (
+      {agentChats.length > 0 ? (
         <section
           className="grid min-w-0 gap-3"
           aria-labelledby="recent-chats-title"
@@ -178,7 +128,7 @@ export function IdentityAgentAccess({
             Recent conversations
           </h2>
           <ul className="grid min-w-0 list-none gap-1 p-0">
-            {[...state.chats].reverse().slice(0, 6).map((chat) => (
+            {[...agentChats].reverse().slice(0, 6).map((chat) => (
               <li key={chat.id} className="min-w-0">
                 <Button
                   asChild
@@ -211,14 +161,5 @@ function isRedirecting(error: unknown): boolean {
   return (
     error instanceof EvelandIdentityError &&
     error.code === "identity_redirecting"
-  );
-}
-
-async function localApiError(response: Response): Promise<Error> {
-  const body = (await response.json().catch(() => null)) as
-    | { error?: unknown }
-    | null;
-  return new Error(
-    typeof body?.error === "string" ? body.error : "Unable to load conversations.",
   );
 }

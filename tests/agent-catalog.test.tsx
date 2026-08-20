@@ -1,8 +1,9 @@
 import React from "react";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AgentCatalog } from "@/components/agent-catalog";
+import { renderWithChatList } from "@/test/chat-list";
 
 const push = vi.fn();
 const getCatalog = vi.fn();
@@ -11,6 +12,7 @@ const getCallerToken = vi.fn();
 const getSession = vi.fn();
 
 vi.mock("next/navigation", () => ({
+  usePathname: () => "/agents",
   useRouter: () => ({ push, refresh: vi.fn() }),
 }));
 
@@ -69,7 +71,7 @@ describe("AgentCatalog", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    render(<AgentCatalog />);
+    renderWithChatList(<AgentCatalog />);
 
     expect(
       await screen.findByRole("button", { name: "Chat with Support" }),
@@ -94,7 +96,7 @@ describe("AgentCatalog", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    render(<AgentCatalog />);
+    renderWithChatList(<AgentCatalog />);
     fireEvent.click(
       await screen.findByRole("button", { name: "Chat with Support" }),
     );
@@ -116,7 +118,7 @@ describe("AgentCatalog", () => {
       vi.fn(async () => Response.json({ chats: [] })),
     );
 
-    render(<AgentCatalog />);
+    renderWithChatList(<AgentCatalog />);
 
     expect(await screen.findByRole("button", { name: "Chat with Support" })).toBeInTheDocument();
     expect(screen.getByText("Answers support questions.")).toBeInTheDocument();
@@ -134,7 +136,7 @@ describe("AgentCatalog", () => {
       );
     vi.stubGlobal("fetch", fetchMock);
 
-    render(<AgentCatalog />);
+    renderWithChatList(<AgentCatalog />);
     fireEvent.click(await screen.findByRole("button", { name: "Chat with Support" }));
 
     expect(await screen.findByText("Opening…")).toBeInTheDocument();
@@ -174,7 +176,7 @@ describe("AgentCatalog", () => {
       ),
     );
 
-    render(<AgentCatalog />);
+    renderWithChatList(<AgentCatalog />);
 
     expect(await screen.findByText("Former Support")).toBeInTheDocument();
     expect(screen.getByText("Unavailable")).toBeInTheDocument();
@@ -209,7 +211,7 @@ describe("AgentCatalog", () => {
       }),
     );
 
-    render(<AgentCatalog />);
+    renderWithChatList(<AgentCatalog />);
 
     expect(
       await screen.findByRole("link", { name: "Chat with Private Eve" }),

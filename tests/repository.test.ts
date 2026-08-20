@@ -398,6 +398,89 @@ describe("repository", () => {
     ).resolves.toEqual([legacy]);
   });
 
+  it("reads a capped text-event tail for many chats in one pass", async () => {
+    const repository = createRepository(db);
+    const agent = await repository.createAgentConnection({
+      name: "Tail Agent",
+      baseUrl: "https://tail.example.com",
+      authType: "none",
+    });
+    const first = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "First",
+    });
+    const second = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Second",
+    });
+    for (const chat of [first, second]) {
+      for (let index = 0; index < 5; index += 1) {
+        await repository.appendEvent({
+          chatId: chat.id,
+          eventIndex: index * 2,
+          type: "message.completed",
+          payload: { type: "message.completed", data: { message: `${chat.title} ${index}` } },
+        });
+        // Interleaved non-text events must not consume the tail budget.
+        await repository.appendEvent({
+          chatId: chat.id,
+          eventIndex: index * 2 + 1,
+          type: "step.started",
+          payload: { type: "step.started", data: { stepIndex: index } },
+        });
+      }
+    }
+
+    const tails = await repository.listMessageTailEvents([first.id, second.id], 2);
+
+    expect([...tails.keys()].sort()).toEqual([first.id, second.id].sort());
+    expect(tails.get(first.id)?.map((event) => event.eventIndex)).toEqual([6, 8]);
+    expect(tails.get(second.id)?.map((event) => event.type)).toEqual([
+      "message.completed",
+      "message.completed",
+    ]);
+    await expect(repository.listMessageTailEvents([], 32)).resolves.toEqual(new Map());
+  });
+
+  it("finds the newest chat a browser session owns", async () => {
+    const repository = createRepository(db);
+    const agent = await repository.createAgentConnection({
+      name: "Session Agent",
+      baseUrl: "https://session.example.com",
+      authType: "none",
+    });
+    const older = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Older",
+      ownerClientId: "client_a",
+    });
+    const newest = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Newest",
+      ownerClientId: "client_a",
+    });
+    await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Another browser",
+      ownerClientId: "client_b",
+    });
+    await db
+      .update(chats)
+      .set({ createdAt: new Date("2026-07-27T00:00:00.000Z") })
+      .where(eq(chats.id, older.id));
+    await db
+      .update(chats)
+      .set({ createdAt: new Date("2026-07-28T00:00:00.000Z") })
+      .where(eq(chats.id, newest.id));
+
+    await expect(
+      repository.findLatestChatIdForClient("client_a"),
+    ).resolves.toBe(newest.id);
+    await expect(
+      repository.findLatestChatIdForClient("client_unknown"),
+    ).resolves.toBeNull();
+  });
+
   it("deduplicates replayed remote events by session cursor", async () => {
     const repository = createRepository(db);
     const agent = await repository.createAgentConnection({

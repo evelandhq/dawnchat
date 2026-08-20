@@ -1,5 +1,6 @@
 import type { Metadata, Route } from "next";
 import { notFound } from "next/navigation";
+import { cache } from "react";
 
 import {
   getAgentConnectionEditDefaults,
@@ -23,13 +24,14 @@ type EditAgentPageProps = {
   params: Promise<{ agentId: string }>;
 };
 
-export async function getAgentForEditPage(
-  agentId: string,
-): Promise<AgentConnectionEditDefaults | null> {
-  const repository = createRepository(getDbClient());
-  const agent = await repository.getAgentConnection(agentId);
-  return agent ? getAgentConnectionEditDefaults(agent) : null;
-}
+// `generateMetadata` and the page body both need the Agent; one read serves both.
+export const getAgentForEditPage = cache(
+  async (agentId: string): Promise<AgentConnectionEditDefaults | null> => {
+    const repository = createRepository(getDbClient());
+    const agent = await repository.getAgentConnection(agentId);
+    return agent ? getAgentConnectionEditDefaults(agent) : null;
+  },
+);
 
 export async function generateMetadata({ params }: EditAgentPageProps): Promise<Metadata> {
   const { agentId } = await params;

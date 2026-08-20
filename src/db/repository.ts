@@ -1,4 +1,4 @@
-import { and, asc, eq, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { DatabaseError } from "pg";
 import { z } from "zod";
@@ -156,6 +156,15 @@ export type Repository = {
   claimChatsForClient(clientId: string, scope: AppIdentityScope): Promise<number>;
   appendEvent(input: AppendEventInput): Promise<EveEvent>;
   listEvents(chatId: string): Promise<EveEvent[]>;
+  /**
+   * The tail of each chat's text-bearing events, newest turns last, capped per
+   * chat. One query for every chat, so a chat list never replays whole streams.
+   */
+  listMessageTailEvents(
+    chatIds: string[],
+    perChatLimit: number,
+  ): Promise<Map<string, EveEvent[]>>;
+  findLatestChatIdForClient(clientId: string): Promise<string | null>;
   clearPendingUserMessage(chatId: string): Promise<Chat>;
   updateChatSessionState(chatId: string, state: SessionState, status?: ChatStatus): Promise<Chat>;
   updateChatStatus(chatId: string, status: ChatStatus): Promise<Chat>;
@@ -198,6 +207,27 @@ function parseEventPayload(payloadJson: string): unknown {
     throw new Error("Stored Eve event payload is invalid");
   }
 }
+
+/**
+ * The event types the message projection turns into message text. A chat
+ * preview only needs these, so a list never reads whole event streams.
+ */
+const MESSAGE_TEXT_EVENT_TYPES = [
+  "message.received",
+  "message.appended",
+  "message.completed",
+] as const;
+
+const eventColumns = {
+  id: events.id,
+  chatId: events.chatId,
+  eventIndex: events.eventIndex,
+  sessionId: events.sessionId,
+  streamIndex: events.streamIndex,
+  type: events.type,
+  payloadJson: events.payloadJson,
+  createdAt: events.createdAt,
+};
 
 function mapEvent(row: typeof events.$inferSelect): EveEvent {
   const { payloadJson, ...rest } = row;
@@ -635,6 +665,60 @@ export function createRepository(db: RepositoryDb): Repository {
         .where(eq(events.chatId, chatId))
         .orderBy(asc(events.eventIndex), asc(events.id));
       return rows.map(mapEvent);
+    },
+
+    async listMessageTailEvents(chatIds, perChatLimit) {
+      const byChat = new Map<string, EveEvent[]>();
+      if (chatIds.length === 0 || perChatLimit <= 0) return byChat;
+
+      const ranked = db
+        .select({
+          ...eventColumns,
+          tailRank:
+            sql<number>`row_number() over (partition by ${events.chatId} order by ${events.eventIndex} desc, ${events.id} desc)`.as(
+              "tail_rank",
+            ),
+        })
+        .from(events)
+        .where(
+          and(
+            inArray(events.chatId, chatIds),
+            inArray(events.type, MESSAGE_TEXT_EVENT_TYPES),
+          ),
+        )
+        .as("ranked");
+
+      const rows = await db
+        .select({
+          id: ranked.id,
+          chatId: ranked.chatId,
+          eventIndex: ranked.eventIndex,
+          sessionId: ranked.sessionId,
+          streamIndex: ranked.streamIndex,
+          type: ranked.type,
+          payloadJson: ranked.payloadJson,
+          createdAt: ranked.createdAt,
+        })
+        .from(ranked)
+        .where(lte(ranked.tailRank, perChatLimit))
+        .orderBy(asc(ranked.chatId), asc(ranked.eventIndex), asc(ranked.id));
+
+      for (const row of rows) {
+        const existing = byChat.get(row.chatId);
+        if (existing) existing.push(mapEvent(row));
+        else byChat.set(row.chatId, [mapEvent(row)]);
+      }
+      return byChat;
+    },
+
+    async findLatestChatIdForClient(clientId) {
+      const [row] = await db
+        .select({ id: chats.id })
+        .from(chats)
+        .where(eq(chats.ownerClientId, clientId))
+        .orderBy(desc(chats.createdAt), desc(chats.id))
+        .limit(1);
+      return row?.id ?? null;
     },
 
     async clearPendingUserMessage(chatId) {

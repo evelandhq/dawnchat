@@ -7,6 +7,7 @@ import "./globals.css";
 
 import { AppHeader } from "@/components/app-header";
 import { AppSidebar, getAppNavigationData } from "@/components/app-sidebar";
+import { ChatListProvider } from "@/components/chat-list-provider";
 import { ThemeProvider } from "@/components/theme-provider";
 import { IdentityGate } from "@/components/identity-gate";
 import { IdentityProvider } from "@/components/identity-provider";
@@ -42,13 +43,17 @@ export default async function RootLayout({ children }: { children: ReactNode }):
             }
           >
             <IdentityGate>
-              <SidebarProvider defaultOpen={defaultOpen}>
-                <AppSidebar data={navigationData} />
-                <SidebarInset className="h-svh overflow-hidden">
-                  <AppHeader {...navigationData} />
-                  <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
-                </SidebarInset>
-              </SidebarProvider>
+              <ChatListProvider>
+                <SidebarProvider defaultOpen={defaultOpen}>
+                  <AppSidebar data={navigationData} />
+                  <SidebarInset className="h-svh overflow-hidden">
+                    <AppHeader {...navigationData} />
+                    <div className="min-h-0 flex-1 overflow-y-auto">
+                      {children}
+                    </div>
+                  </SidebarInset>
+                </SidebarProvider>
+              </ChatListProvider>
             </IdentityGate>
           </IdentityProvider>
         </ThemeProvider>

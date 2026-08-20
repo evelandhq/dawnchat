@@ -13,6 +13,18 @@ export type AppBrowserSession = {
   setCookie?: string;
 };
 
+export const APP_BROWSER_SESSION_COOKIE = COOKIE_NAME;
+
+/**
+ * Verifies an already-established browser session without minting a new one,
+ * for render paths that cannot set a cookie.
+ */
+export function verifyAppBrowserSessionToken(
+  value: string | undefined,
+): string | null {
+  return value ? verifySessionToken(value) : null;
+}
+
 export function resolveAppBrowserSession(request: Request): AppBrowserSession {
   const existing = readSessionCookie(request.headers.get("cookie"));
   if (existing) {
@@ -42,8 +54,10 @@ function readSessionCookie(header: string | null): string | null {
     .map((part) => part.trim())
     .find((part) => part.startsWith(`${COOKIE_NAME}=`))
     ?.slice(COOKIE_NAME.length + 1);
-  if (!value) return null;
+  return value ? verifySessionToken(value) : null;
+}
 
+function verifySessionToken(value: string): string | null {
   const [version, clientId, signature, extra] = value.split(".");
   if (
     version !== TOKEN_VERSION ||

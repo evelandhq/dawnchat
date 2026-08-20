@@ -45,6 +45,12 @@ export type ChatResponse = {
   updatedAt: string;
 };
 
+/**
+ * How many trailing text-bearing events a preview projects per chat. A turn
+ * spans one event per step, so this covers the last message many times over.
+ */
+const CHAT_PREVIEW_EVENT_LIMIT = 32;
+
 export type ChatSummaryResponse = Omit<
   ChatResponse,
   "pendingUserMessage" | "sessionState" | "pendingInput"
@@ -72,7 +78,17 @@ export async function listChats(request: Request): Promise<Response> {
         )
       : [];
     const chats = uniqueChats([...identityChats, ...clientChats]);
-    const summaries = await Promise.all(chats.map((chat) => chatSummaryResponse(repository, chat)));
+    const [agents, messageTails] = await Promise.all([
+      repository.listAgentConnections(),
+      repository.listMessageTailEvents(
+        chats.map((chat) => chat.id),
+        CHAT_PREVIEW_EVENT_LIMIT,
+      ),
+    ]);
+    const agentNames = new Map(agents.map((agent) => [agent.id, agent.name]));
+    const summaries = chats.map((chat) =>
+      chatSummaryResponse(chat, agentNames, messageTails.get(chat.id) ?? []),
+    );
     return applyAppBrowserSession(
       jsonResponse({ chats: summaries }),
       access.session,
@@ -258,16 +274,22 @@ function chatResponse(chat: Chat): ChatResponse {
   };
 }
 
-async function chatSummaryResponse(repository: Repository, chat: Chat): Promise<ChatSummaryResponse> {
-  const reducer = defaultMessageReducer();
-  const [agent, events] = await Promise.all([
-    repository.getAgentConnection(chat.agentConnectionId),
-    repository.listEvents(chat.id),
-  ]);
-  if (!agent) {
+/**
+ * Projects the preview from the tail of a chat's text-bearing events. The
+ * projection creates the message a `turnId` belongs to on demand, so a tail
+ * yields the same last-message text a whole-stream replay would.
+ */
+function chatSummaryResponse(
+  chat: Chat,
+  agentNames: Map<string, string>,
+  messageTail: EveEvent[],
+): ChatSummaryResponse {
+  const agentName = agentNames.get(chat.agentConnectionId);
+  if (agentName === undefined) {
     throw new Error(`Agent connection not found for chat ${chat.id}`);
   }
-  const projection = events.reduce(
+  const reducer = defaultMessageReducer();
+  const projection = messageTail.reduce(
     (data, event) => reducer.reduce(data, event.payload as MessageStreamEvent),
     reducer.initial(),
   );
@@ -287,7 +309,7 @@ async function chatSummaryResponse(repository: Repository, chat: Chat): Promise<
   } = chatResponse(chat);
   return {
     ...summary,
-    agentName: agent.name,
+    agentName,
     evelandProjectId: chat.evelandProjectId,
     lastMessage,
     pendingUserMessage: summary.pendingUserMessage

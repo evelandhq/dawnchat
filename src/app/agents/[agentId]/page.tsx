@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
+import { cache } from "react";
 
 import { createRepository } from "@/db/repository";
 import { getDbClient } from "@/db/provider";
@@ -19,20 +20,23 @@ type AgentNewChatPageData = {
   evelandProjectId: string | null;
 };
 
-export async function getAgentForNewChatPage(agentId: string): Promise<AgentNewChatPageData | null> {
-  const repository = createRepository(getDbClient());
-  const agent = await repository.getAgentConnection(agentId);
-  if (!agent) {
-    return null;
-  }
+// `generateMetadata` and the page body both need the Agent; one read serves both.
+export const getAgentForNewChatPage = cache(
+  async (agentId: string): Promise<AgentNewChatPageData | null> => {
+    const repository = createRepository(getDbClient());
+    const agent = await repository.getAgentConnection(agentId);
+    if (!agent) {
+      return null;
+    }
 
-  return {
-    id: agent.id,
-    name: agent.name,
-    status: agent.status,
-    evelandProjectId: agent.evelandProjectId,
-  };
-}
+    return {
+      id: agent.id,
+      name: agent.name,
+      status: agent.status,
+      evelandProjectId: agent.evelandProjectId,
+    };
+  },
+);
 
 export async function generateMetadata({ params }: AgentNewChatPageProps): Promise<Metadata> {
   const { agentId } = await params;

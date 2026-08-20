@@ -1,9 +1,10 @@
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 
 import { AppSidebar } from "@/components/app-sidebar";
 import { SidebarProvider } from "@/components/ui/sidebar";
+import { renderWithChatList } from "@/test/chat-list";
 import { setDbClientForTests } from "@/db/provider";
 import { createTestDbHandle, type TestDbHandle } from "@/test/db";
 
@@ -58,7 +59,9 @@ describe("AppSidebar", () => {
 
   it("places the theme toggle beside the EveChats title without a header divider", async () => {
     const sidebar = await AppSidebar();
-    const { container } = render(<SidebarProvider>{sidebar}</SidebarProvider>);
+    const { container } = renderWithChatList(
+      <SidebarProvider>{sidebar}</SidebarProvider>,
+    );
     const header = container.querySelector('[data-sidebar="header"]');
 
     expect(header).not.toBeNull();
@@ -84,7 +87,7 @@ describe("AppSidebar", () => {
 
   it("offers New Chat and Agents navigation entries", async () => {
     const sidebar = await AppSidebar();
-    render(<SidebarProvider>{sidebar}</SidebarProvider>);
+    renderWithChatList(<SidebarProvider>{sidebar}</SidebarProvider>);
 
     expect(screen.getByRole("link", { name: "New Chat" })).toHaveAttribute("href", "/chats/new");
     expect(screen.getByRole("link", { name: "Agents" })).toHaveAttribute("href", "/agents");
@@ -106,7 +109,7 @@ describe("AppSidebar", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const sidebar = await AppSidebar();
-    render(<SidebarProvider>{sidebar}</SidebarProvider>);
+    renderWithChatList(<SidebarProvider>{sidebar}</SidebarProvider>);
 
     expect(
       await screen.findByRole("link", { name: "Previous conversation" }),
@@ -135,7 +138,7 @@ describe("AppSidebar", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const sidebar = await AppSidebar();
-    render(<SidebarProvider>{sidebar}</SidebarProvider>);
+    renderWithChatList(<SidebarProvider>{sidebar}</SidebarProvider>);
 
     await waitFor(() => expect(getSession).toHaveBeenCalledOnce());
     expect(getAppToken).not.toHaveBeenCalled();

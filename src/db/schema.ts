@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { integer, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { index, integer, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 
 export const authTypes = ["none", "bearer", "header"] as const;
 export const agentConnectionStatuses = ["unknown", "healthy", "unreachable"] as const;
@@ -41,24 +41,38 @@ export const agentConnections = pgTable(
   ],
 );
 
-export const chats = pgTable("chats", {
-  id: text("id").primaryKey(),
-  agentConnectionId: text("agent_connection_id").notNull().references(() => agentConnections.id, { onDelete: "cascade" }),
+export const chats = pgTable(
+  "chats",
+  {
+    id: text("id").primaryKey(),
+    agentConnectionId: text("agent_connection_id").notNull().references(() => agentConnections.id, { onDelete: "cascade" }),
     title: text("title").notNull(),
     ownerClientId: text("owner_client_id"),
     ownerIdentityIssuer: text("owner_identity_issuer"),
-  ownerIdentityPrincipalId: text("owner_identity_principal_id"),
-  ownerIdentityRealmId: text("owner_identity_realm_id"),
-  evelandProjectId: text("eveland_project_id"),
-  sessionStateJson: text("session_state_json"),
-  // NULL marks a chat from before the pending-input ledger; its open batches
-  // are derived from stored events on first touch and written back.
-  pendingInputJson: text("pending_input_json"),
-  pendingUserMessage: text("pending_user_message"),
-  status: text("status", { enum: chatStatuses }).notNull().default("active"),
-  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
-  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull(),
-});
+    ownerIdentityPrincipalId: text("owner_identity_principal_id"),
+    ownerIdentityRealmId: text("owner_identity_realm_id"),
+    evelandProjectId: text("eveland_project_id"),
+    sessionStateJson: text("session_state_json"),
+    // NULL marks a chat from before the pending-input ledger; its open batches
+    // are derived from stored events on first touch and written back.
+    pendingInputJson: text("pending_input_json"),
+    pendingUserMessage: text("pending_user_message"),
+    status: text("status", { enum: chatStatuses }).notNull().default("active"),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull(),
+  },
+  (table) => [
+    index("chats_owner_client_id_created_at_idx").on(
+      table.ownerClientId,
+      table.createdAt.desc(),
+    ),
+    index("chats_owner_identity_created_at_idx").on(
+      table.ownerIdentityPrincipalId,
+      table.ownerIdentityRealmId,
+      table.createdAt.desc(),
+    ),
+  ],
+);
 
 export const messages = pgTable("messages", {
   id: text("id").primaryKey(),
@@ -87,6 +101,12 @@ export const events = pgTable(
       table.chatId,
       table.sessionId,
       table.streamIndex,
+    ),
+    // Serves the per-chat tail read behind chat previews.
+    index("events_chat_id_type_event_index_idx").on(
+      table.chatId,
+      table.type,
+      table.eventIndex.desc(),
     ),
   ],
 );

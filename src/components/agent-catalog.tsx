@@ -7,22 +7,15 @@ import { Bot, CircleAlert, Plus } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { AgentAvatar } from "@/components/agent-avatar";
+import { useChatList } from "@/components/chat-list-provider";
 import { useEvelandIdentity } from "@/components/identity-provider";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
+import type { ChatListItem } from "@/components/chat-list-provider";
 import type { IdentityCatalog } from "@/identity/client";
 import { cn } from "@/lib/utils";
-
-type HistoricalChat = {
-  id: string;
-  agentConnectionId: string;
-  agentName: string;
-  evelandProjectId: string | null;
-  title: string;
-  lastMessage: string | null;
-};
 
 type ExternalAgent = {
   id: string;
@@ -37,15 +30,15 @@ type CatalogState =
   | {
       kind: "ready";
       catalog: IdentityCatalog;
-      chats: HistoricalChat[];
       externalAgents: ExternalAgent[];
     }
   | { kind: "error"; message: string };
 
 export function AgentCatalog(): React.ReactElement {
   const router = useRouter();
-  const { getAppToken, getCatalog, getSession } = useEvelandIdentity();
+  const { getCatalog } = useEvelandIdentity();
   const returnPath = "/agents";
+  const { state: chatList } = useChatList();
   const [state, setState] = useState<CatalogState>({ kind: "loading" });
   const [openingProjectId, setOpeningProjectId] = useState<string | null>(null);
   const [openError, setOpenError] = useState<string | null>(null);
@@ -54,24 +47,12 @@ export function AgentCatalog(): React.ReactElement {
     let active = true;
     void (async () => {
       try {
-        const [catalog, session] = await Promise.all([
+        // The Catalog and the external Agent list are independent of the
+        // Identity-scoped chat history the shared provider already loads.
+        const [catalog, agentsResponse] = await Promise.all([
           getCatalog(returnPath),
-          getSession(),
-        ]);
-        const appToken = session.authenticated
-          ? await getAppToken(returnPath)
-          : null;
-        const [response, agentsResponse] = await Promise.all([
-          fetch("/api/chats", {
-            ...(appToken
-              ? { headers: { authorization: `Bearer ${appToken}` } }
-              : {}),
-            cache: "no-store",
-          }),
           fetch("/api/agents", { cache: "no-store" }),
         ]);
-        if (!response.ok) throw new Error("Unable to load conversation history.");
-        const body = (await response.json()) as { chats?: HistoricalChat[] };
         if (!agentsResponse.ok) throw new Error("Unable to load external Agents.");
         const agentsBody = (await agentsResponse.json()) as {
           agents?: ExternalAgent[];
@@ -80,7 +61,6 @@ export function AgentCatalog(): React.ReactElement {
           setState({
             kind: "ready",
             catalog,
-            chats: body.chats ?? [],
             externalAgents: (agentsBody.agents ?? []).filter(
               (agent) => !agent.evelandProjectId,
             ),
@@ -99,7 +79,7 @@ export function AgentCatalog(): React.ReactElement {
     return () => {
       active = false;
     };
-  }, [getAppToken, getCatalog, getSession]);
+  }, [getCatalog]);
 
   const unavailableAgents = useMemo(() => {
     if (state.kind !== "ready") return [];
@@ -108,9 +88,9 @@ export function AgentCatalog(): React.ReactElement {
     );
     const byProject = new Map<
       string,
-      { name: string; chats: HistoricalChat[] }
+      { name: string; chats: ChatListItem[] }
     >();
-    for (const chat of state.chats) {
+    for (const chat of chatList.chats ?? []) {
       if (!chat.evelandProjectId || availableProjects.has(chat.evelandProjectId)) {
         continue;
       }
@@ -128,7 +108,7 @@ export function AgentCatalog(): React.ReactElement {
       projectId,
       ...value,
     }));
-  }, [state]);
+  }, [chatList.chats, state]);
 
   async function openAgent(
     catalog: IdentityCatalog,

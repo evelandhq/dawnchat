@@ -286,6 +286,95 @@ describe("Chat API", () => {
     });
   });
 
+  it("previews the newest message text without replaying a long event stream", async () => {
+    const agent = await createAgent();
+    const createdResponse = await postChats({ agentId: agent.id, message: "Start" });
+    const created = (await createdResponse.json()) as { chat: { id: string } };
+    const repository = createRepository(testDb.db);
+    // Far more turns than the preview reads, so a tail-only projection has to
+    // land on the newest text rather than whatever the first events said.
+    for (let turn = 0; turn < 40; turn += 1) {
+      await repository.appendEvent({
+        chatId: created.chat.id,
+        eventIndex: turn * 3 + 1,
+        type: "message.received",
+        payload: {
+          type: "message.received",
+          data: { message: `Question ${turn}`, turnId: `turn_${turn}` },
+        },
+      });
+      await repository.appendEvent({
+        chatId: created.chat.id,
+        eventIndex: turn * 3 + 2,
+        type: "step.started",
+        payload: {
+          type: "step.started",
+          data: { stepIndex: 0, turnId: `turn_${turn}` },
+        },
+      });
+      await repository.appendEvent({
+        chatId: created.chat.id,
+        eventIndex: turn * 3 + 3,
+        type: "message.completed",
+        payload: {
+          type: "message.completed",
+          data: {
+            message: `Answer ${turn}`,
+            finishReason: "stop",
+            stepIndex: 0,
+            turnId: `turn_${turn}`,
+          },
+        },
+      });
+    }
+
+    const response = await GET(
+      new Request("http://localhost/api/chats", {
+        headers: { authorization: "Bearer app-user-1" },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      chats: { lastMessage: string | null }[];
+    };
+    expect(body.chats[0]?.lastMessage).toBe("Answer 39");
+  });
+
+  it("keeps a multi-step answer's text joined in the preview", async () => {
+    const agent = await createAgent();
+    const createdResponse = await postChats({ agentId: agent.id, message: "Start" });
+    const created = (await createdResponse.json()) as { chat: { id: string } };
+    const repository = createRepository(testDb.db);
+    for (const [stepIndex, text] of ["First half. ", "Second half."].entries()) {
+      await repository.appendEvent({
+        chatId: created.chat.id,
+        eventIndex: stepIndex + 1,
+        type: "message.completed",
+        payload: {
+          type: "message.completed",
+          data: {
+            message: text,
+            finishReason: "stop",
+            stepIndex,
+            turnId: "turn_1",
+          },
+        },
+      });
+    }
+
+    const response = await GET(
+      new Request("http://localhost/api/chats", {
+        headers: { authorization: "Bearer app-user-1" },
+      }),
+    );
+
+    const body = (await response.json()) as {
+      chats: { lastMessage: string | null }[];
+    };
+    expect(body.chats[0]?.lastMessage).toBe("First half. Second half.");
+  });
+
   it("does not reveal chats across principals or realms", async () => {
     const agent = await createAgent();
     const createdResponse = await postChats({

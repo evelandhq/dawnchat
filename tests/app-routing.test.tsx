@@ -1,21 +1,27 @@
 import React from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 
 import AgentsPage from "@/app/agents/page";
 import ChatsPage from "@/app/chats/page";
 import HomePage from "@/app/page";
+import { resolveAppBrowserSession } from "@/app-session";
+import { renderWithChatList } from "@/test/chat-list";
 
 const {
+  findLatestChatIdForClientMock,
   getAppTokenMock,
   getSessionMock,
   redirectMock,
   redirectSentinel,
   replaceMock,
+  sessionCookie,
 } = vi.hoisted(() => {
   const sentinel = new Error("TEST_REDIRECT_SENTINEL");
 
   return {
+    sessionCookie: { name: "eve_chats_session", value: "" },
+    findLatestChatIdForClientMock: vi.fn(),
     getAppTokenMock: vi.fn(),
     getSessionMock: vi.fn(),
     redirectSentinel: sentinel,
@@ -28,7 +34,17 @@ const {
 
 vi.mock("next/navigation", () => ({
   redirect: redirectMock,
+  usePathname: () => "/",
   useRouter: () => ({ replace: replaceMock }),
+}));
+
+vi.mock("next/headers", () => ({
+  cookies: async () => ({
+    get: (name: string) =>
+      name === sessionCookie.name && sessionCookie.value
+        ? { name, value: sessionCookie.value }
+        : undefined,
+  }),
 }));
 
 vi.mock("@/components/agent-catalog", () => ({
@@ -45,6 +61,7 @@ vi.mock("@/components/identity-provider", () => ({
 vi.mock("@/db/repository", () => ({
   createRepository: () => ({
     listAgentConnections: async () => [],
+    findLatestChatIdForClient: findLatestChatIdForClientMock,
   }),
 }));
 
@@ -53,12 +70,27 @@ vi.mock("@/db/provider", () => ({
 }));
 
 describe("app routing", () => {
+  beforeEach(() => {
+    sessionCookie.value = "";
+    findLatestChatIdForClientMock.mockReset();
+    findLatestChatIdForClientMock.mockResolvedValue(null);
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
     redirectMock.mockClear();
     replaceMock.mockReset();
     getAppTokenMock.mockReset();
     getSessionMock.mockReset();
+  });
+
+  it("redirects / to the browser session's newest chat while rendering on the server", async () => {
+    sessionCookie.value = browserSessionCookieValue();
+    findLatestChatIdForClientMock.mockResolvedValue("chat_recent");
+
+    await expect(HomePage()).rejects.toThrow(redirectSentinel);
+    expect(redirectMock).toHaveBeenCalledWith("/chats/chat_recent");
+    expect(replaceMock).not.toHaveBeenCalled();
   });
 
   it("redirects / to the most recent accessible chat", async () => {
@@ -75,7 +107,7 @@ describe("app routing", () => {
       ),
     );
 
-    render(<HomePage />);
+    renderWithChatList(await HomePage());
 
     await waitFor(() =>
       expect(replaceMock).toHaveBeenCalledWith("/chats/chat_recent"),
@@ -90,7 +122,7 @@ describe("app routing", () => {
       vi.fn(async () => Response.json({ chats: [] })),
     );
 
-    render(<HomePage />);
+    renderWithChatList(await HomePage());
 
     await waitFor(() => expect(replaceMock).toHaveBeenCalledWith("/agents"));
   });
@@ -107,3 +139,8 @@ describe("app routing", () => {
     expect(redirectMock).toHaveBeenCalledWith("/");
   });
 });
+
+function browserSessionCookieValue(): string {
+  const { setCookie } = resolveAppBrowserSession(new Request("https://app.test/"));
+  return setCookie!.split(";")[0]!.split("=")[1]!;
+}
