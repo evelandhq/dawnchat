@@ -1,5 +1,5 @@
 import React from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 
 import { AppHeader } from "@/components/app-header";
@@ -22,51 +22,65 @@ const agents = [
 ];
 
 const chats = [
-  { id: "chat_a", title: "Data chat", agentConnectionId: "agent_a" },
-  { id: "chat_b", title: "Ops chat", agentConnectionId: "agent_b" },
+  { id: "chat_a", title: "Data chat", agentConnectionId: "agent_a", agentName: "Data Bot", evelandProjectId: null, lastMessage: null },
+  { id: "chat_b", title: "Ops chat", agentConnectionId: "agent_b", agentName: "Ops Bot", evelandProjectId: null, lastMessage: null },
 ];
 
-function renderHeader(pathname: string): void {
+vi.mock("@/components/chat-list-provider", () => ({
+  useChatList: () => ({
+    state: { status: "ready", chats, authenticated: false, error: null },
+    refresh: vi.fn(),
+  }),
+}));
+
+function renderHeader(pathname: string): ReturnType<typeof render> {
   pathnameState.value = pathname;
-  render(
+  return render(
     <SidebarProvider>
-      <AppHeader agents={agents} chats={chats} />
+      <AppHeader />
     </SidebarProvider>,
   );
 }
 
 describe("AppHeader", () => {
-  it("shows the current agent name and health on an agent route", () => {
+  beforeEach(() => {
+    // The header loads the Agent directory itself; pages pass it nothing.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ agents })),
+    );
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("shows the current agent name and health on an agent route", async () => {
     renderHeader("/agents/agent_b");
 
-    expect(screen.getByText("Ops Bot")).toBeInTheDocument();
+    expect(await screen.findByText("Ops Bot")).toBeInTheDocument();
     expect(screen.getByText("unreachable")).toBeInTheDocument();
     expect(screen.queryByText("Eve Chats")).not.toBeInTheDocument();
   });
 
-  it("derives the current agent from an open chat", () => {
+  it("derives the current agent from an open chat", async () => {
     renderHeader("/chats/chat_a");
 
-    expect(screen.getByText("Data Bot")).toBeInTheDocument();
+    expect(await screen.findByText("Data Bot")).toBeInTheDocument();
     expect(screen.getByText("healthy")).toBeInTheDocument();
   });
 
-  it("opens a menu with Agent Info and New Chat next to the agent name", () => {
+  it("offers Agent Info and New Chat from the agent menu", async () => {
     renderHeader("/agents/agent_a");
 
-    fireEvent.keyDown(screen.getByRole("button", { name: /Data Bot/ }), { key: "Enter" });
+    fireEvent.keyDown(await screen.findByRole("button", { name: /Data Bot/ }), { key: "Enter" });
 
     expect(screen.getByRole("menuitem", { name: "Agent Info" })).toHaveAttribute("href", "/agents/agent_a/edit");
     expect(screen.getByRole("menuitem", { name: "New Chat" })).toHaveAttribute("href", "/agents/agent_a");
   });
 
-  it("shows no title outside an explicit agent or chat route", () => {
-    pathnameState.value = "/agents";
-    const { rerender } = render(
-      <SidebarProvider>
-        <AppHeader agents={agents} chats={chats} />
-      </SidebarProvider>,
-    );
+  it("shows no title outside an explicit agent or chat route", async () => {
+    const { rerender } = renderHeader("/agents");
 
     expect(screen.queryByText("Eve Chats")).not.toBeInTheDocument();
     expect(screen.queryByText("healthy")).not.toBeInTheDocument();
@@ -74,10 +88,11 @@ describe("AppHeader", () => {
     pathnameState.value = "/agents/new";
     rerender(
       <SidebarProvider>
-        <AppHeader agents={agents} chats={chats} />
+        <AppHeader />
       </SidebarProvider>,
     );
 
     expect(screen.queryByText("Eve Chats")).not.toBeInTheDocument();
+    expect(screen.queryByText("healthy")).not.toBeInTheDocument();
   });
 });

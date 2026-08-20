@@ -1,13 +1,24 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 
-export function AgentRecheckButton({ agentId }: { agentId: string }): React.ReactElement {
-  const router = useRouter();
+export type CheckedAgent = {
+  id: string;
+  name: string;
+  status: "unknown" | "healthy" | "unreachable";
+};
+
+export function AgentRecheckButton({
+  agentId,
+  onChecked,
+}: {
+  agentId: string;
+  /** Receives the re-checked Agent so the page can re-render without a reload. */
+  onChecked?: (agent: CheckedAgent) => void;
+}): React.ReactElement {
   const isCheckingRef = useRef(false);
   const [isChecking, setIsChecking] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -25,7 +36,10 @@ export function AgentRecheckButton({ agentId }: { agentId: string }): React.Reac
         setError("Health check failed.");
         return;
       }
-      router.refresh();
+      const body = (await response.json().catch(() => null)) as
+        | { agent?: CheckedAgent }
+        | null;
+      if (body?.agent) onChecked?.(body.agent);
     } catch {
       setError("Health check failed.");
     } finally {

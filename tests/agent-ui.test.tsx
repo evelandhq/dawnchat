@@ -5,8 +5,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { AgentConnectionForm } from "@/components/agent-connection-form";
 import { AgentDeleteDialog } from "@/components/agent-delete-dialog";
 import { AgentList, type AgentListItem } from "@/components/agent-list";
-import { getAgentForEditPage } from "@/app/agents/[agentId]/edit/page";
-import { getAgentsForPage } from "@/app/agents/page";
+import { GET as GET_AGENT } from "@/app/api/agents/[agentId]/route";
 import { createRepository } from "@/db/repository";
 import { setDbClientForTests } from "@/db/provider";
 import { encryptAuthConfig } from "@/eve/auth";
@@ -320,32 +319,7 @@ describe("AgentsPage data loading", () => {
     await testDb.close();
   });
 
-  it("loads redacted agents directly from the repository without server-side fetch", async () => {
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
-    const repository = createRepository(testDb.db);
-    await repository.createAgentConnection({
-      name: "Repo Eve",
-      baseUrl: "https://repo-eve.example.com",
-      authType: "bearer",
-      authConfigEncrypted: "encrypted-test-value",
-    });
-
-    const agents = await getAgentsForPage();
-
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(agents).toEqual([
-      expect.objectContaining({
-        name: "Repo Eve",
-        baseUrl: "https://repo-eve.example.com",
-        authType: "bearer",
-        hasAuth: true,
-      }),
-    ]);
-    expect(JSON.stringify(agents)).not.toContain("encrypted-test-value");
-  });
-
-  it("loads only safe edit defaults from storage", async () => {
+  it("serves a redacted agent with safe edit defaults over the API", async () => {
     const repository = createRepository(testDb.db);
     const secret = "header-secret-not-for-client";
     const agent = await repository.createAgentConnection({
@@ -358,18 +332,41 @@ describe("AgentsPage data loading", () => {
       }),
     });
 
-    const defaults = await getAgentForEditPage(agent.id);
+    const response = await GET_AGENT(
+      new Request(`http://localhost/api/agents/${agent.id}`),
+      { params: Promise.resolve({ agentId: agent.id }) },
+    );
 
-    expect(defaults).toEqual({
-      id: agent.id,
-      name: "Header Eve",
-      baseUrl: "https://header.example.com",
-      authType: "header",
-      hasAuth: true,
-      headerName: "X-Agent-Key",
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body).toEqual({
+      agent: expect.objectContaining({
+        id: agent.id,
+        name: "Header Eve",
+        baseUrl: "https://header.example.com",
+        authType: "header",
+        hasAuth: true,
+        status: "unknown",
+      }),
+      editDefaults: {
+        id: agent.id,
+        name: "Header Eve",
+        baseUrl: "https://header.example.com",
+        authType: "header",
+        hasAuth: true,
+        headerName: "X-Agent-Key",
+      },
     });
-    expect(JSON.stringify(defaults)).not.toContain(secret);
-    await expect(getAgentForEditPage("agent_missing")).resolves.toBeNull();
+    expect(JSON.stringify(body)).not.toContain(secret);
+  });
+
+  it("returns 404 for an unknown agent read", async () => {
+    const response = await GET_AGENT(
+      new Request("http://localhost/api/agents/agent_missing"),
+      { params: Promise.resolve({ agentId: "agent_missing" }) },
+    );
+
+    expect(response.status).toBe(404);
   });
 });
 

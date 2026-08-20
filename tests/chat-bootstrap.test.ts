@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { GET as GET_CHAT } from "@/app/api/chats/[chatId]/route";
 import { POST as POST_CHAT } from "@/app/api/chats/route";
-import { getChatAccessHintForPage } from "@/app/chats/[chatId]/page";
 import { setDbClientForTests } from "@/db/provider";
 import { createRepository } from "@/db/repository";
 import { startFakeEveServer, type FakeEveServer } from "@/eve/fake-eve-server.test-helper";
@@ -80,18 +79,21 @@ describe("chat bootstrap", () => {
     });
   });
 
-  it("allows the chat page to bootstrap a browser-session-owned conversation", async () => {
+  it("serves the Eveland Project a chat belongs to, so the browser wires its Caller Token flow", async () => {
     const { id: agentId } = await createAgent();
-    const chat = await createRepository(testDb.db).createChat({
-      agentConnectionId: agentId,
-      title: "Anonymous conversation",
-      ownerClientId: "client_0123456789abcdef0123456789abcdef",
-      evelandProjectId: "project_support",
-    });
+    const response = await createChat(agentId, "Start managed chat");
+    const body = (await response.json()) as { chat: { id: string } };
 
-    await expect(getChatAccessHintForPage(chat.id)).resolves.toEqual({
-      evelandProjectId: "project_support",
-    });
+    const read = await GET_CHAT(
+      new Request(`http://localhost/api/chats/${body.chat.id}`, {
+        headers: { authorization: "Bearer caller-token" },
+      }),
+      { params: Promise.resolve({ chatId: body.chat.id }) },
+    );
+
+    expect(read.status).toBe(200);
+    const payload = (await read.json()) as { chat: { evelandProjectId: string | null } };
+    expect(payload.chat.evelandProjectId).toBe("project_support");
   });
 
   it("loads raw Eve events without exposing the stored continuation token", async () => {

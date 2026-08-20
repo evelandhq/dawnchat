@@ -22,6 +22,7 @@ import { EvelandIdentityError } from "@/identity/client";
 
 type ChatPayload = {
   chat: ChatThreadSummary & {
+    evelandProjectId: string | null;
     pendingUserMessage: UserContent | null;
     pendingInput?: PendingInputState;
   };
@@ -30,10 +31,8 @@ type ChatPayload = {
 
 export function AuthenticatedChatThread({
   chatId,
-  evelandProjectId,
 }: {
   chatId: string;
-  evelandProjectId?: string;
 }): React.ReactElement {
   const {
     getAppToken,
@@ -67,9 +66,6 @@ export function AuthenticatedChatThread({
         const token = session.authenticated
           ? await getAppToken(returnPath)
           : null;
-        const catalog = evelandProjectId
-          ? await getCatalog(returnPath)
-          : null;
         const response = await fetch(`/api/chats/${encodeURIComponent(chatId)}`, {
           ...(token
             ? { headers: { authorization: `Bearer ${token}` } }
@@ -82,6 +78,10 @@ export function AuthenticatedChatThread({
         }
         if (!response.ok) throw await apiError(response);
         const data = (await response.json()) as ChatPayload;
+        // Only a managed chat consults the Catalog — getCatalog starts login
+        // on 401, which an anonymous chat must never do.
+        const evelandProjectId = data.chat.evelandProjectId;
+        const catalog = evelandProjectId ? await getCatalog(returnPath) : null;
         if (active) {
           setState({
             kind: "ready",
@@ -121,7 +121,6 @@ export function AuthenticatedChatThread({
   }, [
     attempt,
     chatId,
-    evelandProjectId,
     getAppToken,
     getCatalog,
     getSession,
@@ -212,16 +211,19 @@ export function AuthenticatedChatThread({
               : undefined
           }
           getCallerToken={
-            evelandProjectId
-              ? () => getCallerToken(evelandProjectId, returnPath)
+            state.data.chat.evelandProjectId
+              ? () => {
+                  const projectId = state.data.chat.evelandProjectId!;
+                  return getCallerToken(projectId, returnPath);
+                }
               : undefined
           }
           respondToAuthenticationChallenge={
-            evelandProjectId
+            state.data.chat.evelandProjectId
               ? (header) =>
                   respondToAuthenticationChallenge(
                     header,
-                    evelandProjectId,
+                    state.data.chat.evelandProjectId!,
                     returnPath,
                   )
               : undefined

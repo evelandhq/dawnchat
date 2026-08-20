@@ -285,6 +285,22 @@ export async function listAgentConnections(): Promise<Response> {
   }
 }
 
+export async function getAgentConnectionById(agentId: string): Promise<Response> {
+  try {
+    const repository = createRepository(getDbClient());
+    const agent = await repository.getAgentConnection(agentId);
+    if (!agent) {
+      return jsonResponse({ error: "Agent connection not found" }, { status: 404 });
+    }
+    return jsonResponse({
+      agent: redactAgentConnection(agent),
+      editDefaults: getAgentConnectionEditDefaults(agent),
+    });
+  } catch {
+    return unknownErrorResponse();
+  }
+}
+
 export async function checkAgentConnection(agentId: string): Promise<Response> {
   try {
     const repository = createRepository(getDbClient());

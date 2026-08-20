@@ -5,8 +5,6 @@ import { screen, waitFor, within } from "@testing-library/react";
 import { AppSidebar } from "@/components/app-sidebar";
 import { SidebarProvider } from "@/components/ui/sidebar";
 import { renderWithChatList } from "@/test/chat-list";
-import { setDbClientForTests } from "@/db/provider";
-import { createTestDbHandle, type TestDbHandle } from "@/test/db";
 
 const { getAppToken, getSession } = vi.hoisted(() => ({
   getAppToken: vi.fn<() => Promise<string>>(),
@@ -22,26 +20,11 @@ vi.mock("next-themes", () => ({
 }));
 
 vi.mock("@/components/identity-provider", () => ({
-  useEvelandIdentity: () => ({
-    session: {
-      authenticated: true,
-      principal: { id: "iprn_user", name: "Test User", email: null },
-      activeRealm: { id: "irlm_account", name: "Account" },
-    },
-    getAppToken,
-    getSession,
-    login: vi.fn(),
-    logout: vi.fn(),
-    switchRealm: vi.fn(),
-  }),
+  useEvelandIdentity: () => ({ getAppToken, getSession }),
 }));
 
 describe("AppSidebar", () => {
-  let testDb: TestDbHandle;
-
-  beforeEach(async () => {
-    testDb = await createTestDbHandle();
-    setDbClientForTests(testDb.db);
+  beforeEach(() => {
     getAppToken.mockReset();
     getSession.mockReset();
     getSession.mockResolvedValue({
@@ -49,18 +32,21 @@ describe("AppSidebar", () => {
       principal: { id: "iprn_user", name: "Test User", email: null },
       activeRealm: { id: "irlm_account", name: "Account" },
     });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ chats: [] })),
+    );
   });
 
-  afterEach(async () => {
+  afterEach(() => {
     vi.unstubAllGlobals();
-    setDbClientForTests(null);
-    await testDb.close();
   });
 
-  it("places the theme toggle beside the EveChats title without a header divider", async () => {
-    const sidebar = await AppSidebar();
+  it("places the theme toggle beside the EveChats title without a header divider", () => {
     const { container } = renderWithChatList(
-      <SidebarProvider>{sidebar}</SidebarProvider>,
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
     );
     const header = container.querySelector('[data-sidebar="header"]');
 
@@ -70,26 +56,15 @@ describe("AppSidebar", () => {
     const brandLink = within(header as HTMLElement).getByRole("link", { name: "EveChats" });
     expect(brandLink).toHaveClass("h-10");
     expect(within(header as HTMLElement).getByRole("button", { name: "Toggle theme" })).toBeInTheDocument();
+    expect(container.querySelector('[data-sidebar="footer"]')).not.toBeInTheDocument();
   });
 
-  it("shows the signed-in account in the sidebar footer", async () => {
-    const sidebar = await AppSidebar();
-    const { container } = renderWithChatList(
-      <SidebarProvider>{sidebar}</SidebarProvider>,
+  it("offers New Chat and Agents navigation entries", () => {
+    renderWithChatList(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
     );
-    const footer = container.querySelector('[data-sidebar="footer"]');
-
-    expect(footer).not.toBeNull();
-    expect(
-      within(footer as HTMLElement).getByRole("button", { name: "Account" }),
-    ).toBeInTheDocument();
-    expect(within(footer as HTMLElement).getByText("Test User")).toBeInTheDocument();
-    expect(within(footer as HTMLElement).getByText("Account")).toBeInTheDocument();
-  });
-
-  it("offers New Chat and Agents navigation entries", async () => {
-    const sidebar = await AppSidebar();
-    renderWithChatList(<SidebarProvider>{sidebar}</SidebarProvider>);
 
     expect(screen.getByRole("link", { name: "New Chat" })).toHaveAttribute("href", "/chats/new");
     expect(screen.getByRole("link", { name: "Agents" })).toHaveAttribute("href", "/agents");
@@ -110,8 +85,11 @@ describe("AppSidebar", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    const sidebar = await AppSidebar();
-    renderWithChatList(<SidebarProvider>{sidebar}</SidebarProvider>);
+    renderWithChatList(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    );
 
     expect(
       await screen.findByRole("link", { name: "Previous conversation" }),
@@ -139,8 +117,11 @@ describe("AppSidebar", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    const sidebar = await AppSidebar();
-    renderWithChatList(<SidebarProvider>{sidebar}</SidebarProvider>);
+    renderWithChatList(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    );
 
     await waitFor(() => expect(getSession).toHaveBeenCalledOnce());
     expect(getAppToken).not.toHaveBeenCalled();

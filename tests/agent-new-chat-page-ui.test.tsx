@@ -3,10 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { screen } from "@testing-library/react";
 
 import AgentNewChatPage from "@/app/agents/[agentId]/page";
-import { createRepository } from "@/db/repository";
-import { setDbClientForTests } from "@/db/provider";
 import { renderWithChatList } from "@/test/chat-list";
-import { createTestDbHandle, type TestDbHandle } from "@/test/db";
 
 const getAppToken = vi.fn(async () => "app-token");
 const getSession = vi.fn(async () => ({
@@ -16,7 +13,6 @@ const getSession = vi.fn(async () => ({
 }));
 
 vi.mock("next/navigation", () => ({
-  notFound: vi.fn(),
   usePathname: () => "/agents/agent_1",
   useRouter: () => ({ push: vi.fn(), refresh: vi.fn() }),
 }));
@@ -36,39 +32,74 @@ vi.mock("@/components/identity-provider", () => ({
 }));
 
 describe("AgentNewChatPage presentation", () => {
-  let testDb: TestDbHandle;
-
-  beforeEach(async () => {
-    testDb = await createTestDbHandle();
-    setDbClientForTests(testDb.db);
+  beforeEach(() => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) =>
+        String(input).startsWith("/api/agents/")
+          ? Response.json({
+              agent: { id: "agent_1", name: "Data Bot", status: "healthy" },
+            })
+          : Response.json({ chats: [] }),
+      ),
+    );
   });
 
-  afterEach(async () => {
+  afterEach(() => {
     vi.unstubAllGlobals();
-    setDbClientForTests(null);
-    await testDb.close();
   });
 
   it("leaves agent identity and health to the shared app header", async () => {
-    const repository = createRepository(testDb.db);
-    const agent = await repository.createAgentConnection({
-      name: "Data Bot",
-      baseUrl: "https://data-bot.example.com",
-      authType: "none",
-      evelandProjectId: "project_support",
+    const page = await AgentNewChatPage({
+      params: Promise.resolve({ agentId: "agent_1" }),
     });
-    await repository.updateAgentHealth(agent.id, { status: "healthy" });
-
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => Response.json({ chats: [] })),
-    );
-    const page = await AgentNewChatPage({ params: Promise.resolve({ agentId: agent.id }) });
     const { container } = renderWithChatList(page);
 
+    expect(await screen.findByLabelText("First message")).toBeEnabled();
     expect(screen.queryByRole("heading", { name: "Data Bot" })).not.toBeInTheDocument();
     expect(screen.queryByText("healthy")).not.toBeInTheDocument();
     expect(container.querySelector('[data-slot="avatar"]')).not.toBeInTheDocument();
-    expect(await screen.findByLabelText("First message")).toBeEnabled();
+  });
+
+  it("offers a health re-check instead of the composer for an unreachable agent", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) =>
+        String(input).startsWith("/api/agents/")
+          ? Response.json({
+              agent: { id: "agent_1", name: "Data Bot", status: "unreachable" },
+            })
+          : Response.json({ chats: [] }),
+      ),
+    );
+
+    const page = await AgentNewChatPage({
+      params: Promise.resolve({ agentId: "agent_1" }),
+    });
+    renderWithChatList(page);
+
+    expect(
+      await screen.findByRole("button", { name: "Check again" }),
+    ).toBeEnabled();
+    expect(await screen.findByLabelText("First message")).toBeDisabled();
+  });
+
+  it("reports a missing agent without a composer", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) =>
+        String(input).startsWith("/api/agents/")
+          ? Response.json({ error: "Agent connection not found" }, { status: 404 })
+          : Response.json({ chats: [] }),
+      ),
+    );
+
+    const page = await AgentNewChatPage({
+      params: Promise.resolve({ agentId: "agent_missing" }),
+    });
+    renderWithChatList(page);
+
+    expect(await screen.findByText("Agent not found")).toBeInTheDocument();
+    expect(screen.queryByLabelText("First message")).not.toBeInTheDocument();
   });
 });

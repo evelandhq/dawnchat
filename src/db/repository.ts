@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { DatabaseError } from "pg";
 import { z } from "zod";
@@ -170,7 +170,6 @@ export type Repository = {
     chatIds: string[],
     perChatLimit: number,
   ): Promise<Map<string, EveEvent[]>>;
-  findLatestChatIdForClient(clientId: string): Promise<string | null>;
   clearPendingUserMessage(chatId: string): Promise<Chat>;
   updateChatSessionState(chatId: string, state: SessionState, status?: ChatStatus): Promise<Chat>;
   updateChatStatus(chatId: string, status: ChatStatus): Promise<Chat>;
@@ -728,16 +727,6 @@ export function createRepository(db: RepositoryDb): Repository {
         else byChat.set(row.chatId, [mapEvent(row)]);
       }
       return byChat;
-    },
-
-    async findLatestChatIdForClient(clientId) {
-      const [row] = await db
-        .select({ id: chats.id })
-        .from(chats)
-        .where(eq(chats.ownerClientId, clientId))
-        .orderBy(desc(chats.createdAt), desc(chats.id))
-        .limit(1);
-      return row?.id ?? null;
     },
 
     async clearPendingUserMessage(chatId) {

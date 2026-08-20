@@ -2,52 +2,18 @@ import Link from "next/link";
 import type { Route } from "next";
 
 import { AuthenticatedSidebarNav } from "@/components/authenticated-sidebar-nav";
-import { SidebarAccount } from "@/components/sidebar-account";
-import { createRepository } from "@/db/repository";
-import { getDbClient } from "@/db/provider";
 import {
   Sidebar,
   SidebarContent,
-  SidebarFooter,
   SidebarHeader,
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarTrigger,
 } from "@/components/ui/sidebar";
-import type {
-  SidebarAgentItem,
-  SidebarChatItem,
-} from "@/components/sidebar-nav";
 import { ThemeToggle } from "@/components/theme-toggle";
 
-export type AppNavigationData = {
-  agents: SidebarAgentItem[];
-  chats: SidebarChatItem[];
-};
-
-type AppSidebarProps = {
-  data?: AppNavigationData;
-};
-
-export async function getAppNavigationData(): Promise<AppNavigationData> {
-  const repository = createRepository(getDbClient());
-  const agents = await repository.listAgentConnections();
-
-  return {
-    agents: agents.map((agent) => ({
-      id: agent.id,
-      name: agent.name,
-      status: agent.status,
-    })),
-    // Identity-scoped chat history is loaded in the browser with an App Token.
-    chats: [],
-  };
-}
-
-export async function AppSidebar({ data }: AppSidebarProps = {}): Promise<React.ReactElement> {
-  const navigationData = data ?? (await getAppNavigationData());
-
+export function AppSidebar(): React.ReactElement {
   return (
     <Sidebar>
       <SidebarHeader className="h-14 flex-row items-center gap-1">
@@ -64,11 +30,8 @@ export async function AppSidebar({ data }: AppSidebarProps = {}): Promise<React.
         <SidebarTrigger />
       </SidebarHeader>
       <SidebarContent>
-        <AuthenticatedSidebarNav initialChats={navigationData.chats} />
+        <AuthenticatedSidebarNav />
       </SidebarContent>
-      <SidebarFooter>
-        <SidebarAccount />
-      </SidebarFooter>
     </Sidebar>
   );
 }

@@ -37,6 +37,8 @@ export type ChatResponse = {
   agentConnectionId: string;
   title: string;
   status: Chat["status"];
+  /** The Eveland Project behind a managed chat; the browser derives its Caller Token flow from it. */
+  evelandProjectId: string | null;
   /** The ID-addressed cursor only; a 0.29/0.30 token never leaves the server. */
   sessionState: ClientSessionState | null;
   /** The proxy's pending-input ledger: batches Eve is still parked on. */
@@ -57,7 +59,6 @@ export type ChatSummaryResponse = Omit<
   "pendingUserMessage" | "sessionState" | "pendingInput"
 > & {
   agentName: string;
-  evelandProjectId: string | null;
   lastMessage: string | null;
   pendingUserMessage: string | null;
 };
@@ -262,6 +263,7 @@ function chatResponse(chat: Chat): ChatResponse {
     agentConnectionId: chat.agentConnectionId,
     title: chat.title,
     status: chat.status,
+    evelandProjectId: chat.evelandProjectId,
     sessionState: chat.sessionState
       ? {
           sessionId: chat.sessionState.sessionId,
@@ -311,7 +313,6 @@ function chatSummaryResponse(
   return {
     ...summary,
     agentName,
-    evelandProjectId: chat.evelandProjectId,
     lastMessage,
     pendingUserMessage: summary.pendingUserMessage
       ? userContentText(summary.pendingUserMessage).trim() || null

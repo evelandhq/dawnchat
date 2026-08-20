@@ -6,7 +6,7 @@ import { Inter } from "next/font/google";
 import "./globals.css";
 
 import { AppHeader } from "@/components/app-header";
-import { AppSidebar, getAppNavigationData } from "@/components/app-sidebar";
+import { AppSidebar } from "@/components/app-sidebar";
 import { ChatListProvider } from "@/components/chat-list-provider";
 import { ThemeProvider } from "@/components/theme-provider";
 import { IdentityGate } from "@/components/identity-gate";
@@ -25,7 +25,7 @@ export const metadata: Metadata = {
 };
 
 export default async function RootLayout({ children }: { children: ReactNode }): Promise<React.ReactElement> {
-  const [cookieStore, navigationData] = await Promise.all([cookies(), getAppNavigationData()]);
+  const cookieStore = await cookies();
   const defaultOpen = cookieStore.get("sidebar_state")?.value !== "false";
 
   return (
@@ -45,9 +45,9 @@ export default async function RootLayout({ children }: { children: ReactNode }):
             <IdentityGate>
               <ChatListProvider>
                 <SidebarProvider defaultOpen={defaultOpen}>
-                  <AppSidebar data={navigationData} />
+                  <AppSidebar />
                   <SidebarInset className="h-svh overflow-hidden">
-                    <AppHeader {...navigationData} />
+                    <AppHeader />
                     <div className="min-h-0 flex-1 overflow-y-auto">
                       {children}
                     </div>

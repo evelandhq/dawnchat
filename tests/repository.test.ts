@@ -432,45 +432,6 @@ describe("repository", () => {
     await expect(repository.listMessageTailEvents([], 32)).resolves.toEqual(new Map());
   });
 
-  it("finds the newest chat a browser session owns", async () => {
-    const repository = createRepository(db);
-    const agent = await repository.createAgentConnection({
-      name: "Session Agent",
-      baseUrl: "https://session.example.com",
-      authType: "none",
-    });
-    const older = await repository.createChat({
-      agentConnectionId: agent.id,
-      title: "Older",
-      ownerClientId: "client_a",
-    });
-    const newest = await repository.createChat({
-      agentConnectionId: agent.id,
-      title: "Newest",
-      ownerClientId: "client_a",
-    });
-    await repository.createChat({
-      agentConnectionId: agent.id,
-      title: "Another browser",
-      ownerClientId: "client_b",
-    });
-    await db
-      .update(chats)
-      .set({ createdAt: new Date("2026-07-27T00:00:00.000Z") })
-      .where(eq(chats.id, older.id));
-    await db
-      .update(chats)
-      .set({ createdAt: new Date("2026-07-28T00:00:00.000Z") })
-      .where(eq(chats.id, newest.id));
-
-    await expect(
-      repository.findLatestChatIdForClient("client_a"),
-    ).resolves.toBe(newest.id);
-    await expect(
-      repository.findLatestChatIdForClient("client_unknown"),
-    ).resolves.toBeNull();
-  });
-
   it("deduplicates replayed remote events by session cursor", async () => {
     const repository = createRepository(db);
     const agent = await repository.createAgentConnection({

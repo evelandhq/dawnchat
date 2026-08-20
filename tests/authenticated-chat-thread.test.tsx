@@ -63,6 +63,7 @@ describe("AuthenticatedChatThread", () => {
             agentConnectionId: "agent_1",
             title: "Hello",
             status: "active",
+            evelandProjectId: "project_support",
             eveSessionId: null,
             continuationToken: null,
             streamIndex: 0,
@@ -87,6 +88,7 @@ describe("AuthenticatedChatThread", () => {
           agentConnectionId: "agent_1",
           title: "Hello",
           status: "active",
+          evelandProjectId: null,
           sessionState: null,
           pendingUserMessage: null,
           createdAt: new Date().toISOString(),
@@ -97,15 +99,12 @@ describe("AuthenticatedChatThread", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    render(
-      <AuthenticatedChatThread
-        chatId="chat_guest"
-        evelandProjectId="project_support"
-      />,
-    );
+    render(<AuthenticatedChatThread chatId="chat_guest" />);
 
     expect(await screen.findByText("Conversation ready")).toBeInTheDocument();
     expect(getAppToken).not.toHaveBeenCalled();
+    // An anonymous chat never consults the Catalog — that would start login.
+    expect(getCatalog).not.toHaveBeenCalled();
     expect(fetchMock).toHaveBeenCalledWith("/api/chats/chat_guest", {
       cache: "no-store",
     });
@@ -116,12 +115,7 @@ describe("AuthenticatedChatThread", () => {
       .mockRejectedValueOnce(new Error("Identity temporarily unavailable"))
       .mockResolvedValueOnce("app-token");
 
-    render(
-      <AuthenticatedChatThread
-        chatId="chat_1"
-        evelandProjectId="project_support"
-      />,
-    );
+    render(<AuthenticatedChatThread chatId="chat_1" />);
 
     expect(await screen.findByText("Unable to load chat")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
@@ -137,12 +131,7 @@ describe("AuthenticatedChatThread", () => {
       agents: [],
     });
 
-    render(
-      <AuthenticatedChatThread
-        chatId="chat_1"
-        evelandProjectId="project_support"
-      />,
-    );
+    render(<AuthenticatedChatThread chatId="chat_1" />);
 
     expect(
       await screen.findByText("This Agent is currently unavailable"),

@@ -3,8 +3,10 @@
 import Link from "next/link";
 import type { Route } from "next";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 import { ChevronDown, Info, MessageSquarePlus } from "lucide-react";
 
+import { useChatList } from "@/components/chat-list-provider";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -15,18 +17,34 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { SidebarTrigger, useSidebar } from "@/components/ui/sidebar";
-import type { SidebarAgentItem, SidebarChatItem } from "@/components/sidebar-nav";
+import type { SidebarAgentItem } from "@/components/sidebar-nav";
 import { deriveCurrentAgentId } from "@/lib/current-agent";
 
-type AppHeaderProps = {
-  agents: SidebarAgentItem[];
-  chats: SidebarChatItem[];
-};
-
-export function AppHeader({ agents, chats }: AppHeaderProps): React.ReactElement {
+export function AppHeader(): React.ReactElement {
   const pathname = usePathname();
   const { state, isMobile } = useSidebar();
+  const { state: chatList } = useChatList();
+  const [agents, setAgents] = useState<SidebarAgentItem[]>([]);
   const showSidebarTrigger = isMobile || state === "collapsed";
+
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        const response = await fetch("/api/agents", { cache: "no-store" });
+        if (!response.ok) return;
+        const body = (await response.json()) as { agents?: SidebarAgentItem[] };
+        if (active && body.agents) setAgents(body.agents);
+      } catch {
+        // The header falls back to showing nothing; the next route change retries.
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [pathname]);
+
+  const chats = chatList.chats ?? [];
   const currentAgentId = deriveCurrentAgentId(
     pathname,
     chats,

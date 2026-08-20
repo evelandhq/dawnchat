@@ -4,32 +4,35 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { AgentRecheckButton } from "@/components/agent-recheck-button";
 
-const refreshMock = vi.fn();
+const onChecked = vi.fn();
 
-vi.mock("next/navigation", () => ({
-  useRouter: () => ({
-    push: vi.fn(),
-    refresh: refreshMock,
-  }),
-}));
+function checkResponse(status: "healthy" | "unreachable" = "healthy"): Response {
+  return Response.json({ agent: { id: "agent_a", name: "Data Bot", status } });
+}
 
 describe("AgentRecheckButton", () => {
   afterEach(() => {
     vi.restoreAllMocks();
-    refreshMock.mockReset();
+    onChecked.mockReset();
   });
 
-  it("posts to the health check endpoint and refreshes on success", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+  it("posts to the health check endpoint and reports the checked agent", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(checkResponse());
     vi.stubGlobal("fetch", fetchMock);
 
-    render(React.createElement(AgentRecheckButton, { agentId: "agent_a" }));
+    render(<AgentRecheckButton agentId="agent_a" onChecked={onChecked} />);
 
     fireEvent.click(screen.getByRole("button", { name: "Check again" }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     expect(fetchMock).toHaveBeenCalledWith("/api/agents/agent_a/check", { method: "POST" });
-    await waitFor(() => expect(refreshMock).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(onChecked).toHaveBeenCalledWith({
+        id: "agent_a",
+        name: "Data Bot",
+        status: "healthy",
+      }),
+    );
   });
 
   it("ignores a duplicate same-turn activation while a check is pending", async () => {
@@ -40,7 +43,7 @@ describe("AgentRecheckButton", () => {
     const fetchMock = vi.fn().mockReturnValue(request);
     vi.stubGlobal("fetch", fetchMock);
 
-    render(React.createElement(AgentRecheckButton, { agentId: "agent_a" }));
+    render(<AgentRecheckButton agentId="agent_a" onChecked={onChecked} />);
 
     const button = screen.getByRole("button", { name: "Check again" });
     React.act(() => {
@@ -52,29 +55,29 @@ describe("AgentRecheckButton", () => {
     expect(screen.getByRole("button", { name: "Checking…" })).toBeDisabled();
 
     await React.act(async () => {
-      resolveRequest(new Response("{}", { status: 200 }));
+      resolveRequest(checkResponse());
       await request;
     });
-    await waitFor(() => expect(refreshMock).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onChecked).toHaveBeenCalledTimes(1));
   });
 
   it("shows an error and allows retry after the health check request fails", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(new Response("{}", { status: 500 }))
-      .mockResolvedValueOnce(new Response("{}", { status: 200 }));
+      .mockResolvedValueOnce(checkResponse());
     vi.stubGlobal("fetch", fetchMock);
 
-    render(React.createElement(AgentRecheckButton, { agentId: "agent_a" }));
+    render(<AgentRecheckButton agentId="agent_a" onChecked={onChecked} />);
 
     fireEvent.click(screen.getByRole("button", { name: "Check again" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Health check failed.");
-    expect(refreshMock).not.toHaveBeenCalled();
+    expect(onChecked).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "Check again" }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(refreshMock).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onChecked).toHaveBeenCalledTimes(1));
   });
 });
