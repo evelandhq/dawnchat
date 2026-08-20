@@ -278,13 +278,18 @@ export function createEvelandIdentityClient(options: IdentityClientOptions) {
   async function getLoginAvailability(
     returnPath = "/",
   ): Promise<IdentityLoginAvailability> {
-    const login = new URL(`${baseUrl}/identity/login`);
-    login.searchParams.set("target", options.returnTarget);
-    login.searchParams.set("returnPath", safeReturnPath(returnPath));
+    const query = new URLSearchParams({
+      target: options.returnTarget,
+      returnPath: safeReturnPath(returnPath),
+    });
+    // The probe carries no identity cookie, so it goes through the app's
+    // same-origin /identity rewrite: the refusal JSON it must read is not
+    // CORS-readable cross-origin, and the redirect it detects needs no body.
+    const probeBase =
+      requestBaseUrl ?? (typeof window === "undefined" ? baseUrl : "");
     let response: Response;
     try {
-      response = await fetchIdentity(login.toString(), {
-        credentials: "include",
+      response = await fetchIdentity(`${probeBase}/identity/login?${query.toString()}`, {
         headers: { accept: "application/json" },
         redirect: "manual",
       });

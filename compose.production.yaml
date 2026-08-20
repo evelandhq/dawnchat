@@ -49,6 +49,11 @@ services:
         NEXT_PUBLIC_EVELAND_IDENTITY_URL: ${EVELAND_IDENTITY_URL:?EVELAND_IDENTITY_URL is required}
         NEXT_PUBLIC_EVELAND_IDENTITY_RETURN_TARGET: ${EVELAND_IDENTITY_RETURN_TARGET:-eve-chats}
     restart: unless-stopped
+    # Lets a build-arg EVELAND_IDENTITY_URL of http://host.docker.internal:<port>
+    # reach an identity service on the host when the public identity host is
+    # not routable from inside the box (hairpin).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       DATABASE_URL: postgresql://eve_chats:${POSTGRES_PASSWORD:-eve_chats}@postgres:5432/eve_chats
       AUTH_SECRET: ${AUTH_SECRET:?AUTH_SECRET is required — put it in .env next to this compose file}

@@ -17,9 +17,11 @@ describe("Eveland browser identity client", () => {
     await expect(client.getLoginAvailability("/chats/chat_1")).resolves.toEqual({
       available: true,
     });
+    // Same-origin via the app's /identity rewrite — the refusal JSON is not
+    // CORS-readable from the identity host directly.
     expect(fetch).toHaveBeenCalledWith(
-      "http://localhost:4000/identity/login?target=eve-chats&returnPath=%2Fchats%2Fchat_1",
-      expect.objectContaining({ credentials: "include", redirect: "manual" }),
+      "/identity/login?target=eve-chats&returnPath=%2Fchats%2Fchat_1",
+      expect.objectContaining({ redirect: "manual" }),
     );
   });
 

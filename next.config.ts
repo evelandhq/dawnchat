@@ -1,8 +1,8 @@
 import type { NextConfig } from "next";
 
 const identityBaseUrl = (
-  process.env.EVELAND_IDENTITY_URL ??
-  process.env.NEXT_PUBLIC_EVELAND_IDENTITY_URL ??
+  process.env.EVELAND_IDENTITY_URL ||
+  process.env.NEXT_PUBLIC_EVELAND_IDENTITY_URL ||
   "http://localhost:4000"
 ).replace(/\/$/, "");
 
