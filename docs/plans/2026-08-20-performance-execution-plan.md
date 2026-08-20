@@ -1,7 +1,7 @@
 # eve-chats 性能优化执行计划
 
 日期：2026-08-20
-状态：待执行（P0–P4）。前置的三个止血 commit 已落在本地 `main`（未 push）。
+状态：P0–P3 已完成（见附录 B）；P4 待单独设计评审。
 
 ## 1. 背景与测量基线
 
@@ -17,11 +17,11 @@
 | B5 | 聊天路由静态打包 mermaid + KaTeX + Shiki（同一 chunk 836 KB） | `.next` 产物分析 | ✅ 已修（按内容懒加载） |
 | B6 | 每个 turn 结束 `router.refresh()` 重拉整棵 RSC 树 | `chat-thread.tsx` | ✅ 已修（改为通知 chat list 重读） |
 | B7 | 全部页面 `force-dynamic` 且无 `loading.tsx` | Next 文档明确列为慢导航原因 | ✅ 已加 loading 边界（**P2 静态化后移除**） |
-| B8 | **stream delta 平方级落库**：`message.appended` 每条带累计全文并全部持久化。4000 字回复 / 400 delta ≈ 830 KB 存 4 KB 的信息（206×）；20 条消息的会话冷打开约 16 MB | `eve-proxy.ts` `persistEvent` | 🟡 读路径已折叠（`collapseStreamedDeltas`），**写路径未动 → P1** |
-| B9 | 每个流式事件 **2 个事务**：`appendEvent` + `updateChatSessionState`（每 token UPDATE `chats` 一行，MVCC 膨胀） | `repository.ts:555` / `eve-proxy.ts:493` | ❌ → P1 |
-| B10 | 流式期间所有消息重渲染：`EveMessageView` 无 memo，且 `inputRequests` 每次渲染都是新对象 | `eve-message.tsx:69` / `chat-thread.tsx:543` | ❌ → P3 |
-| B11 | 根 layout 每请求查库（含 RSC prefetch），且 `AppHeader` 收到的 `chats` 恒为 `[]` → **`/chats/:id` 头部恒空**（功能 bug） | `app-sidebar.tsx:42` | ❌ → P2 |
-| B12 | `messages` 表是死表：生产代码零读写，仅测试插入过 | 全仓 grep | ❌ → P0 |
+| B8 | **stream delta 平方级落库**：`message.appended` 每条带累计全文并全部持久化。实测一条真实会话存了 14,726 行 / 43 MB，折叠后仅 236 KB（186×） | `eve-proxy.ts` `persistEvent` | ✅ 读路径折叠 + **写路径已停写 delta（P1）** |
+| B9 | 每个流式事件 **2 个事务**：`appendEvent` + `updateChatSessionState`（每 token UPDATE `chats` 一行，MVCC 膨胀） | `repository.ts` / `eve-proxy.ts` | ✅ 已修（P1：cursor 并入 appendEvent 事务）|
+| B10 | 流式期间所有消息重渲染：`EveMessageView` 无 memo，且 `inputRequests` 每次渲染都是新对象 | `eve-message.tsx` / `chat-thread.tsx` | ✅ 已修（P3：React Compiler）|
+| B11 | 根 layout 每请求查库（含 RSC prefetch），且 `AppHeader` 收到的 `chats` 恒为 `[]` → **`/chats/:id` 头部恒空**（功能 bug） | `app-sidebar.tsx` | ✅ 已修（P2：header 读共享数据，实测聊天页头部正确显示）|
+| B12 | `messages` 表是死表：生产代码零读写，仅测试插入过 | 全仓 grep | ✅ 已修（P0：migration 0009 DROP）|
 
 ## 2. 决策记录
 
@@ -171,8 +171,41 @@ pnpm typecheck && pnpm db:up && pnpm test && pnpm build
 3. 复测脚本：DevTools trace 记录 `/`、`/agents/:id`、`/chats/:id`（长会话）的
    请求瀑布与 transfer 体积，追加到本文档附录，与 §1 基线对照。
 
-## 附录 A — 已落地的三个 commit（本地 main，未 push）
+## 附录 A — 已落地的 commit（本地 main，未 push）
 
-- `110c1de` perf: collapse the chat-list waterfall and stop replaying event streams（B1–B4）
-- `2628e92` perf: add loading boundaries and defer the heavy render libraries（B5–B7）
-- `2f6252a` perf: collapse superseded stream deltas out of the chat payload（B8 读侧）
+前置止血（rebase 后哈希）：
+
+- chat-list 瀑布合一 + 批量预览查询 + 索引（B1–B4）
+- loading 边界 + 重库懒加载（B5–B7）
+- `b5895f1` 读路径 delta 折叠（B8 读侧）
+
+计划执行：
+
+- `b63ee59` docs: 本计划
+- `72c24ed` P0：DROP messages 死表（migration 0009）
+- `1470e7c` P1：写路径停写 delta、cursor 并入 appendEvent 单事务
+- `c4d57e0` P2：CSR 化 —— 页面零查询、GET /api/agents/[agentId]、chat 响应带
+  evelandProjectId、header 修复 B11、`/` 回归客户端跳转、loading.tsx 移除
+- `a34ca13` P3：React Compiler（build ~6s → ~28s）
+
+## 附录 B — 执行后的验证记录（2026-08-20，localhost:3010 dev）
+
+- 每个路由视图 `GET /api/chats` 恰好 **1 次**（修复前 4 次）。dev StrictMode 双重
+  effect 下 provider 的 in-flight 去重仍保持 1 次；`/api/agents`、
+  `/api/chats/:id` 在 dev 下出现 ×2 属 StrictMode 伪影，生产不发生。
+- `/chats/:id` 头部正确显示所属 Agent 名与 healthy 徽章（B11 修复实测）。
+- 真实长会话 `chat_47c2dfe44ff0459e`：库存 14,726 行 / 43 MB
+  （`reasoning.appended` 13,199 行 / 42 MB），折叠后下发 182 事件 / 236 KB，
+  **186× 放大已消除**；P1 后新会话不再写入 delta 行。
+- 289 个测试全绿（含 DB 测试）；`pnpm build` 通过。
+- 与本计划并行，另一会话落地了 `7e1f937`（强制 Eveland Identity 的
+  IdentityGate + `/api/chats/claim`），与 CSR 化兼容：gate 是客户端组件，
+  数据请求仍全部由客户端发起。
+- P2 验收偏差：路由仍为 ƒ（layout 读 sidebar 状态 cookie 以避免展开态闪烁，
+  且动态段路由本就无法 ○ 静态）。验收改为达成的实质目标：页面与 layout
+  零数据库查询（`grep getDbClient|createRepository` 于 `app/**/{page,layout}`
+  仅剩 layout 的 cookies()）。
+- 待办：dev server 需重启以启用 `reactCompiler`（next.config.ts 变更不热载）；
+  React DevTools profiler 抽查在重启后进行。
+- 历史数据清理（P1 任务 5，可选）尚未执行；上面 43 MB 会话表明值得做，
+  脚本需先在 UAT 核对行数后再上生产。
