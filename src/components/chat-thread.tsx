@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
 import type { UserContent } from "ai";
 import {
   ClientError,
@@ -111,6 +110,8 @@ type ChatThreadProps = {
     header: string | null,
   ) => Promise<string | null>;
   readOnly?: boolean;
+  /** Called when a turn completes, so the app can re-read what it changed. */
+  onTurnFinished?: () => void;
 };
 
 export function ChatThread({
@@ -122,6 +123,7 @@ export function ChatThread({
   getCallerToken,
   respondToAuthenticationChallenge,
   readOnly = false,
+  onTurnFinished,
 }: ChatThreadProps): React.ReactElement {
   const pendingSentRef = useRef(false);
   const challengeInFlightRef = useRef(false);
@@ -192,6 +194,7 @@ export function ChatThread({
       }
       getCallerToken={getCallerToken}
       onAuthenticationError={handleAuthenticationError}
+      onTurnFinished={onTurnFinished}
       readOnly={readOnly}
       retryInput={authentication.retryInput}
     />
@@ -208,6 +211,7 @@ function ChatThreadSession({
   getAccessToken,
   getCallerToken,
   onAuthenticationError,
+  onTurnFinished,
   readOnly,
   retryInput,
 }: ChatThreadProps & {
@@ -223,7 +227,6 @@ function ChatThreadSession({
   ): Promise<void>;
   retryInput?: TurnPayload;
 }): React.ReactElement {
-  const router = useRouter();
   const agentRef = useRef<ReturnType<typeof useEveAgent> | null>(null);
   const latestInputRef = useRef<TurnPayload | null>(null);
   const retrySentRef = useRef(false);
@@ -365,7 +368,7 @@ function ChatThreadSession({
       // else, so every finish reconciles.
       void refetchPendingInput();
       if (snapshot.status === "ready") {
-        router.refresh();
+        onTurnFinished?.();
       }
     },
   });

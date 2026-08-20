@@ -8,6 +8,7 @@ import {
   ChatThread,
   type ChatThreadSummary,
 } from "@/components/chat-thread";
+import { useChatList } from "@/components/chat-list-provider";
 import { useEvelandIdentity } from "@/components/identity-provider";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -43,6 +44,7 @@ export function AuthenticatedChatThread({
     switchRealm,
   } = useEvelandIdentity();
   const returnPath = `/chats/${chatId}`;
+  const { refresh: refreshChatList } = useChatList();
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<
     | { kind: "loading" }
@@ -224,6 +226,9 @@ export function AuthenticatedChatThread({
                   )
               : undefined
           }
+          // A finished turn changes the chat's title and preview, nothing the
+          // server render owns.
+          onTurnFinished={() => void refreshChatList()}
         />
       </div>
     </div>

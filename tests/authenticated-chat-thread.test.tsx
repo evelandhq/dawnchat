@@ -4,10 +4,21 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AuthenticatedChatThread } from "@/components/authenticated-chat-thread";
 
+const refreshChatList = vi.fn<() => Promise<void>>();
+const chatListState = {
+  status: "ready" as const,
+  chats: [],
+  authenticated: true,
+  error: null,
+};
 const getCallerToken = vi.fn<() => Promise<string>>();
 const getAppToken = vi.fn<() => Promise<string>>();
 const getCatalog = vi.fn();
 const getSession = vi.fn();
+
+vi.mock("@/components/chat-list-provider", () => ({
+  useChatList: () => ({ state: chatListState, refresh: refreshChatList }),
+}));
 
 vi.mock("@/components/identity-provider", () => ({
   useEvelandIdentity: () => ({

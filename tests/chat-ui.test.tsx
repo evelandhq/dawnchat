@@ -6,10 +6,10 @@ import type { ClientSessionState, MessageStreamEvent } from "eve/client";
 import { ChatThread, type ChatThreadSummary } from "@/components/chat-thread";
 import type { ChatEvent, PendingInputState } from "@/eve/proxy-contract";
 
-const refreshMock = vi.fn();
+const onTurnFinished = vi.fn();
 
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ refresh: refreshMock }),
+  useRouter: () => ({ refresh: vi.fn() }),
 }));
 
 /** One stream event as an Agent emits it, before Eve stamps `meta` onto it. */
@@ -84,7 +84,7 @@ const isPendingInputCall = (call: readonly unknown[]): boolean =>
 describe("ChatThread with Eve and AI Elements", () => {
   afterEach(() => {
     vi.restoreAllMocks();
-    refreshMock.mockReset();
+    onTurnFinished.mockReset();
   });
 
   it("renders Eve text, files, reasoning, and completed tool calls from raw events", async () => {
@@ -849,13 +849,14 @@ describe("ChatThread with Eve and AI Elements", () => {
         events={[]}
         pendingInput={EMPTY_PENDING}
         pendingUserMessage="Hello Eve"
+        onTurnFinished={onTurnFinished}
       />,
     );
 
     expect(await screen.findByText("Hello from Eve.")).toBeInTheDocument();
     expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/chats/chat_pending/agent/eve/v1/session");
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({ message: "Hello Eve" });
-    await waitFor(() => expect(refreshMock).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onTurnFinished).toHaveBeenCalledTimes(1));
   });
 
   it("sends persisted first-message attachments after the chat route mounts", async () => {
@@ -1225,6 +1226,7 @@ describe("ChatThread with Eve and AI Elements", () => {
         getAccessToken={getAccessToken}
         getCallerToken={getCallerToken}
         respondToAuthenticationChallenge={respondToAuthenticationChallenge}
+        onTurnFinished={onTurnFinished}
       />,
     );
 
@@ -1288,7 +1290,7 @@ describe("ChatThread with Eve and AI Elements", () => {
       "Bearer caller-token",
     ]);
     expect(respondToAuthenticationChallenge).toHaveBeenCalledTimes(1);
-    expect(refreshMock).not.toHaveBeenCalled();
+    expect(onTurnFinished).not.toHaveBeenCalled();
   });
 
   it("renders connection authorization challenges without exposing credentials", () => {
