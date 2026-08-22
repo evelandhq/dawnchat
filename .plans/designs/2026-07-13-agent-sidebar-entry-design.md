@@ -1,7 +1,8 @@
 # Agent Sidebar Entry Design
 
 Date: 2026-07-13
-Status: Confirmed with user (v2, revised to the agent-first chat layout)
+Status: **Implemented** (v2, revised to the agent-first chat layout).
+Status checked: 2026-08-22.
 
 ## Background and Goal
 

@@ -2,6 +2,10 @@
 
 日期：2026-07-24
 
+> 状态：**部分完成。** Phase 0–7 已于 2026-07-27 收口；Phase 8–9（通用
+> OIDC Adapter 与金数据 OIDC）未纳入已完成里程碑。
+> 状态核对：2026-08-22。
+
 主要平台：`/Users/michael/work/eveland`
 
 聊天 UI：`/Users/michael/work/eve-chats`
@@ -1458,7 +1462,7 @@ git status --short
 ```text
 /Users/michael/work/eve-chats
   branch: main
-  docs/plans 尚未跟踪
+  .plans 尚未跟踪
 
 /Users/michael/work/eve-wecom-greeter
   branch: main
@@ -1477,7 +1481,7 @@ git status --short
 ## 20. 新会话启动语
 
 > 请打开并执行
-> `/Users/michael/work/eve-chats/docs/plans/2026-07-24-jinshuju-oidc-authenticated-web-chat-handoff.md`。
+> `/Users/michael/work/eve-chats/.plans/2026-07-24-jinshuju-oidc-authenticated-web-chat-handoff.md`。
 > 开始前完整阅读 Eveland 的 `AGENTS.md`、`docs/spec.md`、`README.md`、Linux deployment 文档和
 > Agent Auth/Gateway handoff；检查 Eveland、eve-chats、greeter 三个仓库的 git status，
 > 保留所有已有改动。从 Phase 0 开始，严格测试先行。先完成 Phase 0–7，以

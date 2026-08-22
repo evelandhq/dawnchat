@@ -1,4 +1,7 @@
-# Eve Chats MVP Implementation Plan
+# Eve Chats Initial Implementation Plan
+
+> Status: **Completed — historical; later work supersedes parts of this plan.**
+> Status checked: 2026-08-22.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -6,7 +9,7 @@
 
 **Architecture:** Create a single Next.js application with server-side Eve connectivity. The browser talks only to the `eve-chats` backend; the backend uses official `eve/client` against each remote Eve agent's default `eveChannel` API, persists `AgentConnection -> Chat -> Message/Event`, and streams normalized updates to the UI. Each chat is strongly bound to exactly one `AgentConnection` and stores Eve `SessionState` (`sessionId`, `continuationToken`, `streamIndex`) separately from display history.
 
-**Tech Stack:** Node >= 24, pnpm via Corepack, Next.js App Router, React, TypeScript, assistant-ui React components, `eve/client`, Drizzle ORM, SQLite for local MVP, Vitest, Testing Library, Playwright optional for browser smoke.
+**Tech Stack:** Node >= 24, pnpm via Corepack, Next.js App Router, React, TypeScript, assistant-ui React components, `eve/client`, Drizzle ORM, SQLite for the initial local release, Vitest, Testing Library, Playwright optional for browser smoke.
 
 ## Global Constraints
 
@@ -16,7 +19,7 @@
 - Do not print or commit secrets. Auth tokens are stored encrypted or redacted; `.env.local` stays gitignored.
 - Browser must not call remote Eve agents directly; all Eve calls go through the local server-side connector.
 - Use official `eve/client` for Eve session lifecycle where possible; raw fetch is only acceptable for tests/fake server support or endpoints not covered by the SDK.
-- MVP supports `authType: none | bearer | header` but only `none` and `bearer` need end-to-end UI in the first pass; `header` can be modelled and covered by unit tests.
+- The initial release supports `authType: none | bearer | header` but only `none` and `bearer` need end-to-end UI in the first pass; `header` can be modelled and covered by unit tests.
 - Eve routes expected on remote agents: `GET /eve/v1/health`, `GET /eve/v1/info`, `POST /eve/v1/session`, `POST /eve/v1/session/:sessionId`, `GET /eve/v1/session/:sessionId/stream`.
 - Persist Eve `SessionState` as a cursor; persist UI messages/events separately because `SessionState` is not a transcript.
 
@@ -26,7 +29,7 @@
 
 ```text
 /Users/batigol/Projects/eve-chats/
-├── docs/superpowers/plans/2026-07-09-eve-chats-mvp.md
+├── .plans/2026-07-09-eve-chats-initial-implementation.md
 ├── package.json
 ├── pnpm-lock.yaml
 ├── tsconfig.json
@@ -944,7 +947,7 @@ git commit -m "feat: add agent connection ui"
 **Interfaces:**
 - Produces: `/chats` showing chat summaries and start-chat entrypoint.
 - Produces: `/chats/:chatId` showing a thread bound to one agent.
-- Uses assistant-ui React components where they fit; if assistant-ui custom runtime integration is too large for MVP, use a local wrapper component and keep the data contract compatible with assistant-ui thread messages.
+- Uses assistant-ui React components where they fit; if assistant-ui custom runtime integration is too large for the initial release, use a local wrapper component and keep the data contract compatible with assistant-ui thread messages.
 
 - [ ] **Step 1: Write failing UI tests**
 
@@ -1007,7 +1010,7 @@ git commit -m "feat: add unified eve chat ui"
 **Files:**
 - Create: `/Users/batigol/Projects/eve-chats/tests/chat-flow.test.ts`
 - Modify: `/Users/batigol/Projects/eve-chats/src/eve/fake-eve-server.test-helper.ts`
-- Create: `/Users/batigol/Projects/eve-chats/docs/local-development.md`
+- Create: `/Users/batigol/Projects/eve-chats/docs/development.md`
 
 **Interfaces:**
 - Produces: a repeatable fake Eve server smoke proving register-agent -> create-chat -> send-follow-up.
@@ -1042,7 +1045,7 @@ Fix only the missing pieces discovered by the smoke test. Do not add new feature
 
 - [ ] **Step 4: Write local docs**
 
-Create `/Users/batigol/Projects/eve-chats/docs/local-development.md`:
+Create `/Users/batigol/Projects/eve-chats/docs/development.md`:
 
 ```md
 # Local Development
@@ -1095,7 +1098,7 @@ Expected: all pass.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add tests/chat-flow.test.ts src/eve/fake-eve-server.test-helper.ts docs/local-development.md
+git add tests/chat-flow.test.ts src/eve/fake-eve-server.test-helper.ts docs/development.md
 git commit -m "test: add eve chat smoke flow"
 ```
 
@@ -1149,7 +1152,7 @@ The browser talks to eve-chats. eve-chats talks server-side to remote Eve agents
 
 ## Development
 
-See `docs/local-development.md`.
+See `docs/development.md`.
 ```
 
 - [ ] **Step 3: Commit README and cleanup**
@@ -1167,19 +1170,19 @@ Do not create the GitHub repo or push until Oscar explicitly approves the local 
 
 ## Risks and Tradeoffs
 
-- **assistant-ui integration depth:** assistant-ui has Eve runtime support, but a remote multi-agent registry still needs our server-side proxy and persistence. MVP may use assistant-ui components without adopting its whole runtime until the connector contract is stable.
+- **assistant-ui integration depth:** assistant-ui has Eve runtime support, but a remote multi-agent registry still needs our server-side proxy and persistence. The initial release may use assistant-ui components without adopting its whole runtime until the connector contract is stable.
 - **Eve preview API changes:** Eve is preview; pinning `eve` to a tested version after the initial install may be safer than `latest` before publishing.
-- **Auth design:** Bearer/custom header support is enough for MVP, but real multi-user sharing will require per-user secrets, encryption key rotation, and access control.
-- **Streaming UX:** Full token-level streaming through our backend to assistant-ui may require an additional custom runtime adapter. MVP can persist and render final assistant messages first, then enhance to live deltas.
-- **SQLite local persistence:** Good for local MVP; production needs Postgres or another durable DB.
+- **Auth design:** Bearer/custom header support is enough for the initial release, but real multi-user sharing will require per-user secrets, encryption key rotation, and access control.
+- **Streaming UX:** Full token-level streaming through our backend to assistant-ui may require an additional custom runtime adapter. The initial release can persist and render final assistant messages first, then enhance to live deltas.
+- **SQLite local persistence:** Suitable for the initial local release; production needs Postgres or another durable DB.
 
 ## Open Questions for Review
 
-1. Should the first version require live token streaming in UI, or is final-message streaming/persistence acceptable for MVP?
+1. Should the first version require live token streaming in UI, or is final-message streaming/persistence acceptable for the initial release?
 2. Should we pin `eve` to the current verified version (`0.22.1`) instead of `latest`?
 3. Should `eve-chats` be purely local-first SQLite initially, or should we start with Postgres to match future hosted deployment?
-4. Should we include an optional `/.well-known/eve-agent.json` discovery attempt in MVP, or defer until direct base URL works end-to-end?
-5. Should the GitHub remote be `evelandhq/eve-chats`, and should it be created only after the local MVP passes?
+4. Should we include an optional `/.well-known/eve-agent.json` discovery attempt in the initial release, or defer until direct base URL works end-to-end?
+5. Should the GitHub remote be `evelandhq/eve-chats`, and should it be created only after the initial local release passes?
 
 ## Execution Options After Review
 

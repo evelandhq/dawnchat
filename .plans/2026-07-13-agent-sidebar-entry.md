@@ -1,5 +1,9 @@
 # Agent Sidebar Entry Implementation Plan
 
+> Status: **Completed.** The planned routes, components, and test coverage are
+> present in the current repository.
+> Status checked: 2026-08-22.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the agent dropdown in the new-chat form with agent-first sidebar avatar entries: clicking an avatar starts a new conversation with that agent, and the sidebar chat list scopes to the current agent.
@@ -8,7 +12,7 @@
 
 **Tech Stack:** Next.js App Router (typedRoutes), React 19 RSC, Tailwind v4, shadcn/ui (radix-nova), drizzle, vitest + @testing-library/react.
 
-**Spec:** `docs/superpowers/specs/2026-07-13-agent-sidebar-entry-design.md`
+**Spec:** `.plans/designs/2026-07-13-agent-sidebar-entry-design.md`
 
 ## Global Constraints
 

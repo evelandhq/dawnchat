@@ -1,5 +1,8 @@
 # PostgreSQL Storage Migration Implementation Plan
 
+> Status: **Completed.** Shipped in commit `f1ab07e`.
+> Status checked: 2026-08-22.
+
 > **For Hermes:** Use subagent-driven-development to implement this plan with strict RED-GREEN-REFACTOR and parent verification.
 
 **Goal:** Remove SQLite/better-sqlite3 completely and run eve-chats on PostgreSQL 16 in development, tests, and production runtime.
@@ -71,7 +74,7 @@
 - Create: `compose.yaml`
 - Modify: `.env.example`
 - Modify: `.gitignore`
-- Modify: `docs/local-development.md`
+- Modify: `docs/development.md`
 - Modify: `README.md` if SQLite is mentioned
 - Modify: local ignored `.env.local`
 

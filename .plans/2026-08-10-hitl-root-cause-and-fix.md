@@ -1,5 +1,9 @@
 # HITL: root cause and fix
 
+> Status: **Completed.** The proxy ledger, API, client behavior, migrations,
+> and tests shipped in commit `8040f2e`; later addenda cover Eve 0.42–0.44.
+> Status checked: 2026-08-22.
+
 Supersedes `2026-08-10-hitl-pending-batch-model.md`. That design tried to
 reconstruct Eve's pending-input state inside the browser; its review showed the
 reconstruction is impossible in principle (its central invariant F1 is false).

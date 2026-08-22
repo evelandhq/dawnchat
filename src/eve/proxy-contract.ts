@@ -24,7 +24,7 @@ export function readInputResponses(body: Record<string, unknown>): InputResponse
 /**
  * The pending-input ledger: which `input.requested` batches Eve is still
  * parked on, recorded by the proxy because Eve exposes that state through no
- * event and no query (design: docs/plans/2026-08-10-hitl-root-cause-and-fix.md).
+ * event and no query (design: .plans/2026-08-10-hitl-root-cause-and-fix.md).
  *
  * A batch opens when its `input.requested` event is first persisted, collects
  * `answered` request IDs from turn bodies Eve accepted, and closes under Eve's
