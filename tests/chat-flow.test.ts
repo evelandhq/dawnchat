@@ -20,23 +20,9 @@ import {
   type CallerTokenVerifier,
 } from "@/identity/server";
 
-/**
- * The Eve session protocol split at 0.31: 0.29 and 0.30 address a follow-up
- * turn by continuation token and answer it with 200, while 0.31 addresses it
- * by session ID alone and answers 202. EveChats supports the whole window, so
- * the smoke test runs once per generation.
- */
-const generations: readonly {
-  generation: FakeEveGeneration;
-  continuationToken: string | undefined;
-  followUpStatus: number;
-}[] = [
-  { generation: "0.29", continuationToken: "eve:1", followUpStatus: 200 },
-  { generation: "0.30", continuationToken: "eve:1", followUpStatus: 200 },
-  { generation: "0.31", continuationToken: undefined, followUpStatus: 202 },
-];
+const generations: readonly FakeEveGeneration[] = ["0.42", "0.43", "0.44"];
 
-describe.each(generations)("Eve $generation chat flow smoke", (eve) => {
+describe.each(generations)("Eve %s chat flow smoke", (generation) => {
   let server: FakeEveServer;
   let testDb: TestDbHandle;
 
@@ -44,7 +30,7 @@ describe.each(generations)("Eve $generation chat flow smoke", (eve) => {
     testDb = await createTestDbHandle();
     setDbClientForTests(testDb.db);
     setCallerTokenVerifierForTests(testVerifier);
-    server = await startFakeEveServer({ generation: eve.generation });
+    server = await startFakeEveServer({ generation });
   });
 
   afterEach(async () => {
@@ -102,7 +88,7 @@ describe.each(generations)("Eve $generation chat flow smoke", (eve) => {
       }),
       { params: Promise.resolve({ chatId, sessionPath: ["ses_1"] }) },
     );
-    expect(followUp.status).toBe(eve.followUpStatus);
+    expect(followUp.status).toBe(202);
     const secondStream = await GET_SESSION_OPERATION(
       new Request(
         `http://localhost/api/chats/${chatId}/agent/eve/v1/session/ses_1/stream?startIndex=3`,
@@ -121,11 +107,7 @@ describe.each(generations)("Eve $generation chat flow smoke", (eve) => {
       "POST /eve/v1/session/ses_1",
       "GET /eve/v1/session/ses_1/stream?startIndex=3",
     ]);
-    expect(server.requests[4].body).toEqual(
-      eve.continuationToken
-        ? { message: "Can you continue?", continuationToken: eve.continuationToken }
-        : { message: "Can you continue?" },
-    );
+    expect(server.requests[4].body).toEqual({ message: "Can you continue?" });
     for (const request of server.requests.slice(2)) {
       expect(request.headers.authorization).toBeUndefined();
     }
@@ -138,7 +120,6 @@ describe.each(generations)("Eve $generation chat flow smoke", (eve) => {
     expect(stored?.sessionState).toEqual({
       sessionId: "ses_1",
       streamIndex: 6,
-      ...(eve.continuationToken ? { continuationToken: eve.continuationToken } : {}),
     });
     // Each turn streams three events but persists two: the message.appended
     // delta is forwarded and counted in the cursor, never stored.

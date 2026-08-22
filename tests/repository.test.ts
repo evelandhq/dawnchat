@@ -234,13 +234,14 @@ describe("repository", () => {
       payload: { type: "message.completed", data: { message: "Hi there" } },
     });
 
-    const state = { sessionId: "session-123", continuationToken: "continue-456", streamIndex: 2 };
+    const state = { sessionId: "session-123", continuationToken: "obsolete", streamIndex: 2 };
     const updatedChat = await repository.updateChatSessionState(chat.id, state);
+    const normalizedState = { sessionId: "session-123", streamIndex: 2 };
 
-    expect(updatedChat.sessionState).toEqual(state);
+    expect(updatedChat.sessionState).toEqual(normalizedState);
     await expect(repository.getChat(chat.id)).resolves.toMatchObject({
       id: chat.id,
-      sessionState: state,
+      sessionState: normalizedState,
     });
     await expect(repository.listEvents(chat.id)).resolves.toEqual([firstEvent, secondEvent]);
   });
@@ -466,7 +467,7 @@ describe("repository", () => {
 
     await db
       .update(chats)
-      .set({ sessionStateJson: JSON.stringify({ continuationToken: "missing-session-id" }) })
+      .set({ sessionStateJson: JSON.stringify({ streamIndex: 1 }) })
       .where(eq(chats.id, chat.id));
 
     await expect(repository.getChat(chat.id)).rejects.toThrow("Stored chat session state is invalid");

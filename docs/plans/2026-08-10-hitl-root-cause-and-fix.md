@@ -474,3 +474,19 @@ again the part found only by reading: `approval.settled`'s
 authenticated-responder precondition, and the re-park's duplicate
 `input.requested`. Both are now pinned by scripted streams in
 `tests/eve-proxy.test.ts` and `tests/pending-input.test.ts`.
+
+### 2.13 Addendum — re-audited against Eve 0.42 through 0.44
+
+Eveland's support window is now 0.42.x–0.44.x. These releases share stream
+version 23, the same routes, ID-addressed sessions, the `"steer"` default, and
+the resolution rules above. The material protocol change arrived in 0.39.1:
+`input.resolved` now records every server-accepted terminal HITL outcome and
+includes the response when one exists.
+
+EveChats consumes that event in all three places that need it: the proxy's live
+pending-input transition, the one-shot derivation for chats predating the
+ledger, and the browser's live pending controls. `client.input.responded` still
+records acceptance before the matching stream event is necessarily read. The
+fake Agent models only 0.42, 0.43, and 0.44 as stream version 23; old
+continuation-token sessions and pre-v23 settlement events are no longer
+supported.

@@ -39,7 +39,7 @@ export type ChatResponse = {
   status: Chat["status"];
   /** The Eveland Project behind a managed chat; the browser derives its Caller Token flow from it. */
   evelandProjectId: string | null;
-  /** The ID-addressed cursor only; a 0.29/0.30 token never leaves the server. */
+  /** The browser-safe, ID-addressed Eve session cursor. */
   sessionState: ClientSessionState | null;
   /** The proxy's pending-input ledger: batches Eve is still parked on. */
   pendingInput: PendingInputState;

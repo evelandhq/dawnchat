@@ -9,30 +9,8 @@ export interface CapturedEveRequest {
   body: unknown;
 }
 
-/**
- * Session-protocol generation of the fake Agent. Eve 0.29 and 0.30 address a
- * follow-up turn by continuation token and refuse a request without one; Eve
- * 0.31 and later address it by session ID and refuse a request that carries
- * one.
- *
- * 0.38 and 0.39 are the window Eveland hosts and are identical on the wire —
- * stream version 22 (bumped in 0.35 alongside the `approval.candidate` and
- * `approval.settled` events), same routes, same session addressing. They
- * differ from 0.31–0.33 only in runtime behaviour this fake does not simulate
- * (0.32+ runs a message beside an open request instead of holding it; 0.33+
- * steers by default; 0.35+ emits `approval.settled` for authenticated
- * responders), which tests drive through scripted `streamEvents` instead. The
- * older generations remain because sessions this proxy opened against them
- * are still continued — by continuation token for 0.29/0.30, by ID above.
- */
-export type FakeEveGeneration =
-  | "0.29"
-  | "0.30"
-  | "0.31"
-  | "0.32"
-  | "0.33"
-  | "0.38"
-  | "0.39";
+/** Eve versions currently hosted by Eveland and supported by EveChats. */
+export type FakeEveGeneration = "0.42" | "0.43" | "0.44";
 
 export interface FakeEveServerOptions {
   readonly authenticationChallenge?: {
@@ -46,22 +24,13 @@ export interface FakeEveServerOptions {
   readonly redirectHealthTo?: string;
   readonly failCreateSession?: boolean;
   readonly streamEvents?: readonly unknown[];
-  /** Emit stream events without ending the response, like eve 0.18.x agents. */
+  /** Emit stream events without ending the response, like a live Agent. */
   readonly holdStreamOpen?: boolean;
   /** Eve answers `no_active_turn` when a cancel arrives between turns. */
   readonly cancelStatus?: "accepted" | "no_active_turn";
 }
 
-/** Eve stamped stream events with `meta` from stream version 20 (Eve 0.29) on. */
-const streamVersionByGeneration: Record<FakeEveGeneration, number> = {
-  "0.29": 20,
-  "0.30": 21,
-  "0.31": 21,
-  "0.32": 21,
-  "0.33": 21,
-  "0.38": 22,
-  "0.39": 22,
-};
+const SUPPORTED_STREAM_VERSION = 23;
 
 export interface FakeEveServer {
   readonly baseUrl: string;
@@ -106,8 +75,6 @@ function writeNdjson(
 
 export async function startFakeEveServer(options: FakeEveServerOptions = {}): Promise<FakeEveServer> {
   const requests: CapturedEveRequest[] = [];
-  const generation = options.generation ?? "0.39";
-  const fixedSessions = generation !== "0.29" && generation !== "0.30";
   let nextSessionId = 1;
 
   const server = createServer(async (request, response) => {
@@ -158,13 +125,11 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
         }
 
         const id = nextSessionId++;
-        writeJson(
-          response,
-          202,
-          fixedSessions
-            ? { ok: true, sessionId: `ses_${id}`, status: "accepted" }
-            : { ok: true, sessionId: `ses_${id}`, continuationToken: `eve:${id}` },
-        );
+        writeJson(response, 202, {
+          ok: true,
+          sessionId: `ses_${id}`,
+          status: "accepted",
+        });
         return;
       }
 
@@ -172,29 +137,14 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
       if (request.method === "POST" && continueMatch) {
         const sessionId = continueMatch[1];
         const suppliedToken = (body as { continuationToken?: unknown } | null)?.continuationToken;
-        if (fixedSessions) {
-          if (suppliedToken !== undefined) {
-            writeJson(response, 400, {
-              ok: false,
-              error: "Session-ID routes do not accept 'continuationToken'.",
-            });
-            return;
-          }
-          writeJson(response, 202, { ok: true, sessionId, status: "accepted" });
-          return;
-        }
-        if (typeof suppliedToken !== "string" || suppliedToken.length === 0) {
+        if (suppliedToken !== undefined) {
           writeJson(response, 400, {
             ok: false,
-            error: "Missing or empty 'continuationToken' field.",
+            error: "Session-ID routes do not accept 'continuationToken'.",
           });
           return;
         }
-        writeJson(response, 200, {
-          ok: true,
-          sessionId,
-          continuationToken: `eve:${sessionId.replace("ses_", "")}`,
-        });
+        writeJson(response, 202, { ok: true, sessionId, status: "accepted" });
         return;
       }
 
@@ -214,7 +164,7 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
             { type: "session.waiting", data: { wait: "next-user-message" } },
           ],
           options.holdStreamOpen ?? false,
-          streamVersionByGeneration[generation],
+          SUPPORTED_STREAM_VERSION,
         );
         return;
       }

@@ -96,7 +96,7 @@ describe("chat bootstrap", () => {
     expect(payload.chat.evelandProjectId).toBe("project_support");
   });
 
-  it("loads raw Eve events without exposing the stored continuation token", async () => {
+  it("loads raw Eve events with the browser-safe session cursor", async () => {
     const { id: agentId } = await createAgent();
     const response = await createChat(agentId, "Start from the saved draft");
     const body = (await response.json()) as { chat: { id: string } };
@@ -118,7 +118,6 @@ describe("chat bootstrap", () => {
     });
     await repository.updateChatSessionState(body.chat.id, {
       sessionId: "ses_private",
-      continuationToken: "server-only-token",
       streamIndex: 5,
     });
 
@@ -140,7 +139,6 @@ describe("chat bootstrap", () => {
     });
     expect(pageData?.chat.sessionState).toEqual({ sessionId: "ses_private", streamIndex: 5 });
     expect(pageData).not.toHaveProperty("messages");
-    expect(JSON.stringify(pageData)).not.toContain("server-only-token");
   });
 });
 
