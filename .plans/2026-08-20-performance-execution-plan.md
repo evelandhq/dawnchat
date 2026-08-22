@@ -1,7 +1,8 @@
 # eve-chats 性能优化执行计划
 
 日期：2026-08-20
-状态：P0–P3 已完成（见附录 B）；P4 待单独设计评审。
+状态：**部分完成。** P0–P3 已完成（见附录 B）；P4 待单独设计评审。
+状态核对：2026-08-22。
 
 ## 1. 背景与测量基线
 
@@ -148,7 +149,7 @@ pnpm typecheck && pnpm db:up && pnpm test && pnpm build
 
 ### P4 — 投影物化（B8 读侧的架构终点；依赖 P1）
 
-方向（实施前按仓库惯例先出设计文档到 `docs/plans/` 评审）：
+方向（实施前按仓库惯例先出设计文档到 `.plans/` 评审）：
 
 - `chats` 增加 `projection_json` + `projection_stream_index`；tap 在**落库事件**时
   于同一 advisory lock 事务内增量跑 reducer 更新投影；

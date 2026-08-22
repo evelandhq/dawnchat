@@ -1,5 +1,8 @@
 # Agent URL Uniqueness Design
 
+Status: **Implemented.**
+Status checked: 2026-08-22.
+
 ## Goal
 
 Prevent more than one agent connection from being registered for the same normalized agent URL.

@@ -7,7 +7,7 @@ export type DbClient = NodePgDatabase<typeof schema> & { readonly $client: Pool 
 
 export function createDbClient(databaseUrl = process.env.DATABASE_URL): DbClient {
   if (!databaseUrl) {
-    throw new Error("DATABASE_URL is required (see docs/local-development.md)");
+    throw new Error("DATABASE_URL is required (see docs/development.md)");
   }
 
   const pool = new Pool({

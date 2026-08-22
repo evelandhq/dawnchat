@@ -1,6 +1,7 @@
 # Agent Edit and Delete Design
 
-Status: Confirmed with user
+Status: **Implemented.**
+Status checked: 2026-08-22.
 
 ## Goal
 
