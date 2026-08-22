@@ -23,7 +23,7 @@ export function AppSidebar(): React.ReactElement {
           <SidebarMenuItem>
             <SidebarMenuButton asChild className="h-10">
               <Link href={"/" as Route}>
-                <span className="text-base font-semibold">EveChats</span>
+                <span className="text-base font-semibold">Dawn</span>
               </Link>
             </SidebarMenuButton>
           </SidebarMenuItem>

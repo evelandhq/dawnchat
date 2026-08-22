@@ -2,7 +2,7 @@
 
 Eve can park a session on one or more batches of input requests, but it does
 not expose a query for the complete set of batches on which a session is
-currently parked. EveChats therefore maintains a proxy-side pending-input
+currently parked. Dawn therefore maintains a proxy-side pending-input
 ledger in `chats.pending_input_json`.
 
 ## Why the proxy owns the ledger

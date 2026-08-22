@@ -1,12 +1,12 @@
 # Architecture
 
-EveChats is a Next.js application that sits between the browser, Eveland, Eve
+Dawn is a Next.js application that sits between the browser, Eveland, Eve
 Agents, and PostgreSQL.
 
 ```text
 Browser
   ├── Eveland Identity: login, Realm selection, App and Caller Tokens
-  └── EveChats
+  └── Dawn
         ├── Eveland Agent Catalog
         ├── per-chat Eve protocol proxy ──> Eve Agent
         └── PostgreSQL
@@ -16,10 +16,10 @@ Browser
 
 - **Eveland** owns provider login, the Identity Session, Realm membership, the
   Agent Catalog, and short-lived App and Caller Tokens.
-- **EveChats** owns Agent connections, chat ownership, event persistence,
+- **Dawn** owns Agent connections, chat ownership, event persistence,
   browser rendering, and the same-origin Eve proxy.
 - **Eve Agents** own model context, durable Eve sessions, tools, and input
-  requests. EveChats does not recreate an Agent session from display history.
+  requests. Dawn does not recreate an Agent session from display history.
 - **PostgreSQL** stores Agent connections, chats, canonical protocol events,
   the Eve session cursor, and the pending-input ledger.
 

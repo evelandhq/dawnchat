@@ -18,10 +18,10 @@ const inter = Inter({ subsets: ["latin"], variable: "--font-sans" });
 
 export const metadata: Metadata = {
   title: {
-    default: "EveChats",
-    template: "%s · EveChats",
+    default: "Dawn",
+    template: "%s · Dawn",
   },
-  description: "Connect Eve agents and start chats.",
+  description: "A place to talk with your Eve agents.",
 };
 
 export default async function RootLayout({ children }: { children: ReactNode }): Promise<React.ReactElement> {

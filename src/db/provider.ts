@@ -1,10 +1,10 @@
 import { createDbClient, type DbClient } from "@/db/client";
 
 const globalForDb = globalThis as typeof globalThis & {
-  __eveChatsDbClient?: DbClient;
+  __dawnDbClient?: DbClient;
 };
 
-let dbClient: DbClient | null = globalForDb.__eveChatsDbClient ?? null;
+let dbClient: DbClient | null = globalForDb.__dawnDbClient ?? null;
 let testDbClient: DbClient | null = null;
 
 export function getDbClient(): DbClient {
@@ -15,7 +15,7 @@ export function getDbClient(): DbClient {
   if (!dbClient) {
     dbClient = createDbClient();
     if (process.env.NODE_ENV !== "production") {
-      globalForDb.__eveChatsDbClient = dbClient;
+      globalForDb.__dawnDbClient = dbClient;
     }
   }
   return dbClient;

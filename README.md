@@ -1,8 +1,8 @@
-# EveChats
+# Dawn
 
-EveChats is a standalone web chat interface for Eve Agents. It discovers
-chat-enabled Agents from the Eveland Agent Catalog, supports manually registered
-external Agents, and keeps identity- or browser-scoped conversation history in
+Dawn is Eveland's standalone web chat for Eve Agents. It discovers chat-enabled
+Agents from the Eveland Agent Catalog, supports manually registered external
+Agents, and keeps identity- or browser-scoped conversation history in
 PostgreSQL.
 
 The UI renders Eve event streams, including text, reasoning, tool activity,

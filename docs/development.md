@@ -28,12 +28,13 @@ secret. Update the Eveland Identity URLs if Eveland is not running at
 For a login-enabled Eveland instance, configure Eveland System > Identity:
 
 1. enable an Identity Provider and its exact Realm;
-2. register `http://localhost:3010` as the `eve-chats` return target; and
+2. register `http://localhost:3010` as the `eve-chats` return target (the
+   compatibility key retained after the Dawn rename); and
 3. deploy a chat-enabled Project with the standard Eve channel on its Stable
    route.
 
 The Project then appears automatically on `/agents`. An Eveland instance that
-explicitly uses open access has no login session; EveChats falls back to its
+explicitly uses open access has no login session; Dawn falls back to its
 signed browser session for chat ownership.
 
 ## Verification
@@ -75,7 +76,7 @@ historical stream-delta cleanup procedure, see
 
 Use **Add external Agent** on `/agents` for an Agent outside the Eveland
 Catalog. Configure its base URL and, if required, bearer or custom-header
-authentication. EveChats normalizes external base URLs and permits only one
+authentication. Dawn normalizes external base URLs and permits only one
 active connection for each normalized URL.
 
 The Agent must implement the routes described in

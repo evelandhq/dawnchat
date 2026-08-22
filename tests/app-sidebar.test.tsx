@@ -53,7 +53,7 @@ describe("AppSidebar", () => {
     vi.unstubAllGlobals();
   });
 
-  it("places the theme toggle beside the EveChats title without a header divider", () => {
+  it("places the theme toggle beside the Dawn title without a header divider", () => {
     const { container } = renderWithChatList(
       <SidebarProvider>
         <AppSidebar />
@@ -64,7 +64,7 @@ describe("AppSidebar", () => {
     expect(header).not.toBeNull();
     expect(header).toHaveClass("h-14", "flex-row", "items-center");
     expect(header).not.toHaveClass("border-b");
-    const brandLink = within(header as HTMLElement).getByRole("link", { name: "EveChats" });
+    const brandLink = within(header as HTMLElement).getByRole("link", { name: "Dawn" });
     expect(brandLink).toHaveClass("h-10");
     expect(within(header as HTMLElement).getByRole("button", { name: "Toggle theme" })).toBeInTheDocument();
   });

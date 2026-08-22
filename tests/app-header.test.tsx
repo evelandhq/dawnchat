@@ -60,7 +60,7 @@ describe("AppHeader", () => {
 
     expect(await screen.findByText("Ops Bot")).toBeInTheDocument();
     expect(screen.getByText("unreachable")).toBeInTheDocument();
-    expect(screen.queryByText("Eve Chats")).not.toBeInTheDocument();
+    expect(screen.queryByText("Dawn")).not.toBeInTheDocument();
   });
 
   it("derives the current agent from an open chat", async () => {
@@ -82,7 +82,7 @@ describe("AppHeader", () => {
   it("shows no title outside an explicit agent or chat route", async () => {
     const { rerender } = renderHeader("/agents");
 
-    expect(screen.queryByText("Eve Chats")).not.toBeInTheDocument();
+    expect(screen.queryByText("Dawn")).not.toBeInTheDocument();
     expect(screen.queryByText("healthy")).not.toBeInTheDocument();
 
     pathnameState.value = "/agents/new";
@@ -92,7 +92,7 @@ describe("AppHeader", () => {
       </SidebarProvider>,
     );
 
-    expect(screen.queryByText("Eve Chats")).not.toBeInTheDocument();
+    expect(screen.queryByText("Dawn")).not.toBeInTheDocument();
     expect(screen.queryByText("healthy")).not.toBeInTheDocument();
   });
 });

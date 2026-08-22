@@ -6,7 +6,7 @@ import {
 } from "eve/client";
 
 /**
- * One event as EveChats stores it and replays it into the browser.
+ * One event as Dawn stores it and replays it into the browser.
  *
  * Supported Eve streams emit a durable `input.resolved` for every terminal
  * HITL outcome. The proxy still records answers it forwards as

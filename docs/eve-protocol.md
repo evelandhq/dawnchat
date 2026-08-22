@@ -1,6 +1,6 @@
 # Eve protocol integration
 
-EveChats supports Eve Agents running versions 0.42.x through 0.44.x. This
+Dawn supports Eve Agents running versions 0.42.x through 0.44.x. This
 window uses stream version 23, the same HTTP route family, and durable sessions
 addressed by ID.
 
@@ -34,7 +34,7 @@ reconstruct its model context.
 
 Every message is sent with `turnPolicy: "queue"`. This avoids Eve's supported
 window default of steering, where a message arriving during a turn cancels and
-replaces that turn. Stop is the deliberate interruption mechanism: EveChats
+replaces that turn. Stop is the deliberate interruption mechanism: Dawn
 waits for the target `turn.started`, calls Eve's durable cancellation route,
 and stays attached until the turn settles.
 

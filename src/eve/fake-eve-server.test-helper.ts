@@ -9,7 +9,7 @@ export interface CapturedEveRequest {
   body: unknown;
 }
 
-/** Eve versions currently hosted by Eveland and supported by EveChats. */
+/** Eve versions currently hosted by Eveland and supported by Dawn. */
 export type FakeEveGeneration = "0.42" | "0.43" | "0.44";
 
 export interface FakeEveServerOptions {

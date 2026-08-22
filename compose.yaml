@@ -13,6 +13,8 @@ services:
       timeout: 5s
       retries: 15
     volumes:
+      # Keep the legacy volume name so existing local conversations survive
+      # the Dawn rename.
       - eve-chats-postgres-data:/var/lib/postgresql/data
 
 volumes:

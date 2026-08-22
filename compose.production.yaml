@@ -9,6 +9,8 @@
 # POSTGRES_PASSWORD, APP_PORT, NPM_REGISTRY (npm mirror used at build time),
 # EVELAND_IDENTITY_URL, and EVELAND_IDENTITY_ISSUER.
 
+# Keep the legacy Compose project name so upgrades continue to attach the
+# existing production volume after the Dawn rename.
 name: eve-chats-prod
 
 services:

@@ -72,7 +72,7 @@ function signClientId(clientId: string): string {
 function signatureFor(clientId: string): string {
   const secret = process.env.AUTH_SECRET?.trim();
   if (!secret) {
-    throw new Error("AUTH_SECRET is required for EveChats browser sessions");
+    throw new Error("AUTH_SECRET is required for Dawn browser sessions");
   }
   return createHmac("sha256", secret)
     .update(`${TOKEN_VERSION}.${clientId}`)

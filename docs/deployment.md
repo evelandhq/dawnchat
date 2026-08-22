@@ -28,10 +28,10 @@ port is 3010.
 docker compose -f compose.production.yaml up -d --build
 ```
 
-Compose waits for PostgreSQL, applies pending migrations, and starts EveChats
+Compose waits for PostgreSQL, applies pending migrations, and starts Dawn
 only after the migration service succeeds.
 
-Register the exact public EveChats origin under Eveland System > Identity and
+Register the exact public Dawn origin under Eveland System > Identity and
 add it to Eveland's allowed Identity origins. The public Identity URL is baked
 into the browser bundle at image-build time. `EVELAND_IDENTITY_URL` may point to
 `host.docker.internal` when the container needs a different server-reachable
@@ -39,7 +39,7 @@ route to the same Identity service.
 
 ## Network and cookie requirements
 
-Serve EveChats over HTTPS. Eveland Identity and EveChats should share one
+Serve Dawn over HTTPS. Eveland Identity and Dawn should share one
 schemeful site, for example `identity.example.com` and `chat.example.com`, so
 the Identity cookie works with the same-origin rewrite and provider login
 flow. Keep PostgreSQL private; the production Compose file does not publish its
