@@ -15,7 +15,7 @@ import {
   inputRespondedEvent,
   pendingRequestsFromEvent,
   readInputResponses,
-  settledApprovalRequestId,
+  resolvedInputRequestIds,
   settlePendingInput,
   turnIdFromEvent,
   withoutContinuationToken,
@@ -205,22 +205,10 @@ async function proxyTurnRequest(
 
   const body = withoutContinuationToken({ ...input });
   const currentSession = context.chat.sessionState;
-  // Eve 0.29/0.30 address a follow-up turn by continuation token; Eve 0.31
-  // addresses it by session ID and rejects the field outright. A stored token
-  // is therefore both the token to send and the signal that this session was
-  // opened by an older Agent.
-  let continuationToken = sessionId ? currentSession?.continuationToken : undefined;
 
   let remote: Response;
   try {
-    remote = await postTurn(context, sessionId, body, continuationToken, request.signal);
-    if (continuationToken && remote.status === 400 && (await rejectsContinuationToken(remote))) {
-      // The Agent upgraded to Eve 0.31 while this session was open. Eve keeps
-      // such a session resumable, so retry once addressing it by ID alone and
-      // stop sending the stale token.
-      continuationToken = undefined;
-      remote = await postTurn(context, sessionId, body, undefined, request.signal);
-    }
+    remote = await postTurn(context, sessionId, body, request.signal);
   } catch {
     await context.repository.updateChatStatus(context.chat.id, "failed");
     return errorResponse("Unable to reach Eve agent", 502);
@@ -249,10 +237,6 @@ async function proxyTurnRequest(
   const isContinuing = currentSession?.sessionId === resolvedSessionId;
   const nextSession: SessionState = {
     sessionId: resolvedSessionId,
-    // An Eve 0.31 Agent answers without a token; keeping the field unset marks
-    // the session as ID-addressed for every later turn.
-    continuationToken:
-      stringValue(payload.continuationToken) ?? (isContinuing ? continuationToken : undefined),
     streamIndex: isContinuing ? (currentSession?.streamIndex ?? 0) : 0,
   };
   if (!isContinuing) {
@@ -319,7 +303,6 @@ async function postTurn(
   context: ProxyContext,
   sessionId: string | undefined,
   body: Record<string, unknown>,
-  continuationToken: string | undefined,
   signal: AbortSignal,
 ): Promise<Response> {
   const path = sessionId
@@ -328,18 +311,9 @@ async function postTurn(
   return context.client.fetch(path, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(continuationToken ? { ...body, continuationToken } : body),
+    body: JSON.stringify(body),
     signal,
   });
-}
-
-/** True when an Agent refused the turn because it no longer accepts a token. */
-async function rejectsContinuationToken(response: Response): Promise<boolean> {
-  try {
-    return (await response.clone().text()).includes("continuationToken");
-  } catch {
-    return false;
-  }
 }
 
 async function resolveProxyContext(
@@ -492,25 +466,17 @@ function createPersistedEventStream(input: {
   let buffered: IteratorResult<MessageStreamEvent> | null = input.first;
   let nextStreamIndex = input.startIndex;
   let latestCursor = input.session.streamIndex ?? 0;
-  let currentSession = input.session;
+  let currentSession: SessionState = input.session;
 
   const persistEvent = async (
     event: MessageStreamEvent,
   ): Promise<{ event: MessageStreamEvent; terminal: boolean }> => {
-    // Eve 0.29/0.30 rotate the session's continuation token on every park; Eve
-    // 0.31 parks an ID-addressed session and reports its session ID in the same
-    // field. Only a session that already carries a token is token-addressed, so
-    // only that session adopts the parked value.
-    const continuationToken = currentSession.continuationToken
-      ? waitingContinuationToken(event)
-      : undefined;
     const browserEvent = redactWaitingContinuationToken(event, input.sessionId);
     const eventStreamIndex = nextStreamIndex;
     nextStreamIndex += 1;
     latestCursor = Math.max(latestCursor, nextStreamIndex);
     currentSession = {
       ...currentSession,
-      ...(continuationToken ? { continuationToken } : {}),
       streamIndex: latestCursor,
     };
 
@@ -573,13 +539,13 @@ function createPersistedEventStream(input: {
 
 /**
  * The ledger transition an event carries. An `input.requested` opens its batch
- * under the turn that raised it; an `approval.settled` (Eve ≥ 0.35) marks the
- * one approval an authenticated responder resolved through any channel; a
- * terminal session closes every park; a cancelled turn closes only the parks
- * that turn owns, because from Eve 0.33 a steered message cancels the running
- * turn while older batches stay parked and answerable. Turn boundaries
- * deliberately map to nothing — Eve emits them without resolving anything (a
- * re-parked required batch), so only real teardown events clear.
+ * under the turn that raised it; `input.resolved` marks every terminal HITL
+ * outcome from any channel. A terminal session closes every park; a cancelled
+ * turn closes only the parks that turn owns, while other batches stay parked
+ * and answerable.
+ * Turn boundaries deliberately map to nothing — Eve emits them without
+ * resolving anything (a re-parked required batch), so only real teardown
+ * events clear.
  */
 function pendingInputTransition(
   event: MessageStreamEvent,
@@ -595,9 +561,9 @@ function pendingInputTransition(
     const turnId = turnIdFromEvent(event);
     return { open: requests, ...(turnId ? { turnId } : {}) };
   }
-  if (event.type === "approval.settled") {
-    const requestId = settledApprovalRequestId(event);
-    return requestId ? { settle: [requestId] } : undefined;
+  if (event.type === "input.resolved") {
+    const requestIds = resolvedInputRequestIds(event);
+    return requestIds.length > 0 ? { settle: requestIds } : undefined;
   }
   if (event.type === "turn.cancelled") {
     const turnId = turnIdFromEvent(event);
@@ -611,18 +577,10 @@ function pendingInputTransition(
   return undefined;
 }
 
-function waitingContinuationToken(event: MessageStreamEvent): string | undefined {
-  if (event.type !== "session.waiting") return undefined;
-  const data = event.data as unknown;
-  if (!data || typeof data !== "object" || Array.isArray(data)) return undefined;
-  return stringValue((data as Record<string, unknown>).continuationToken);
-}
-
 /**
- * Eve 0.29/0.30 park a session by handing the caller a fresh continuation
- * token, which is the capability to continue that conversation. It stays
- * server-side: the browser and the durable history see the session ID here
- * instead — exactly what an ID-addressed Eve 0.31 session already reports.
+ * Eve's `session.waiting` continuation token is a channel-local capability.
+ * It stays server-side; the browser and durable history receive the public
+ * session ID in its place.
  */
 function redactWaitingContinuationToken(
   event: MessageStreamEvent,

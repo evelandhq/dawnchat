@@ -30,7 +30,6 @@ export type SessionState = z.infer<typeof sessionStateSchema>;
 
 const sessionStateSchema = z.object({
   sessionId: z.string().min(1),
-  continuationToken: z.string().optional(),
   streamIndex: z.number().int().nonnegative().optional(),
 });
 

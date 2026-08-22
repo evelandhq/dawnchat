@@ -37,10 +37,9 @@ import {
 import { EveMessageView, type InputRequestBatch } from "@/components/eve-message";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import {
-  agentEveVersion,
-  holdsMessagesForPendingInput,
   isRequiredKind,
   pendingRequestsFromEvent,
+  resolvedInputRequestIds,
   type ChatEvent,
   type PendingInputRequest,
   type PendingInputState,
@@ -55,13 +54,11 @@ import {
 type TurnPayload = Parameters<PrepareSend>[0];
 
 /**
- * Eve sends messages with `turnPolicy: "steer"` by default (0.33 through
- * 0.39): a message that arrives while a turn is running cancels that turn and
- * replaces it, keeping its partial output. This chat offers Stop as the
- * deliberate way to interrupt, so every message asks for the queue policy Eve
- * applied before 0.33 — a racing second tab then waits for the running turn
- * instead of destroying it. Agents before 0.33 parse request fields one by
- * one and ignore the key.
+ * Eve 0.42–0.44 send messages with `turnPolicy: "steer"` by default: a message
+ * that arrives while a turn is running cancels that turn and replaces it,
+ * keeping its partial output. This chat offers Stop as the deliberate way to
+ * interrupt, so every message asks for the queue policy; a racing second tab
+ * then waits for the running turn instead of destroying it.
  */
 const TURN_POLICY = "queue" as const;
 
@@ -284,6 +281,48 @@ function ChatThreadSession({
     );
   };
 
+  /** Applies one authoritative live settlement without waiting for stream end. */
+  const settleLiveInput = (requestIds: readonly string[]): void => {
+    if (requestIds.length === 0) return;
+    const resolved = new Set(requestIds);
+    const batches: ClientPendingBatch[] = [];
+    for (const batch of pendingBatchesRef.current) {
+      const addressed = batch.requests.some((request) =>
+        resolved.has(request.requestId),
+      );
+      if (!addressed) {
+        batches.push(batch);
+        continue;
+      }
+      const answered = new Set([
+        ...batch.answered,
+        ...batch.requests
+          .map((request) => request.requestId)
+          .filter((requestId) => resolved.has(requestId)),
+      ]);
+      const requiredOpen = batch.requests.some(
+        (request) =>
+          isRequiredKind(request.kind) && !answered.has(request.requestId),
+      );
+      if (requiredOpen) {
+        batches.push({ ...batch, answered });
+      }
+    }
+    setPendingBatches(batches);
+    const open = new Set(
+      batches.flatMap((batch) =>
+        batch.requests
+          .filter((request) => !batch.answered.has(request.requestId))
+          .map((request) => request.requestId),
+      ),
+    );
+    setDrafts(
+      new Map(
+        [...draftResponsesRef.current].filter(([requestId]) => open.has(requestId)),
+      ),
+    );
+  };
+
   const refetchPendingInput = async (): Promise<void> => {
     const generation = pendingGenerationRef.current;
     try {
@@ -354,6 +393,9 @@ function ChatThreadSession({
           ]);
         }
       }
+      if (event.type === "input.resolved") {
+        settleLiveInput(resolvedInputRequestIds(event));
+      }
       // A turn boundary while batches look open is the signature of another
       // actor (a second tab, an external cancel) having settled one.
       if (
@@ -385,28 +427,7 @@ function ChatThreadSession({
     }
     return ids;
   }, [pendingBatches]);
-  // The lock exists only for Agents that would hold the message: through Eve
-  // 0.31 an unrelated message sent while a tool approval or an authorization
-  // challenge was open never ran, so the composer had to say so. From 0.32 the
-  // message runs beside the open request and the controls stay answerable,
-  // which leaves nothing to lock. A dismissable-only park never locked either
-  // way: a plain message is Eve's own dismiss gesture for such a batch.
-  const holdsMessages = holdsMessagesForPendingInput(agentEveVersion(agent.events));
-  const hasPendingInteraction =
-    holdsMessages &&
-    (pendingBatches.some((batch) =>
-      batch.requests.some(
-        (request) =>
-          isRequiredKind(request.kind) && !batch.answered.has(request.requestId),
-      ),
-    ) ||
-      agent.data.messages.some((message) =>
-        message.parts.some(
-          (part) => part.type === "authorization" && part.state === "required",
-        ),
-      ));
-  const composerDisabled =
-    readOnly || chat.status === "completed" || hasPendingInteraction;
+  const composerDisabled = readOnly || chat.status === "completed";
   const visibleMessages =
     showPendingUserMessage && pendingUserMessage
       ? [
@@ -544,8 +565,7 @@ function ChatThreadSession({
   };
 
   /**
-   * Eve 0.38 replaced the binding's local-abort `stop()` with a durable
-   * `cancel()`: the store waits for the in-flight turn's `turn.started`, POSTs
+   * Eve's durable `cancel()` waits for the in-flight turn's `turn.started`, POSTs
    * `{ turnId }` to the session cancel route — this chat's per-chat proxy,
    * which scopes its ledger clear to exactly that turn — and keeps the stream
    * attached until the turn settles, so `turn.cancelled` still reaches the
@@ -615,7 +635,7 @@ function ChatThreadSession({
               placeholder={
                 readOnly
                   ? "This Agent is currently unavailable"
-                  : composerPlaceholder(chat.status, hasPendingInteraction)
+                  : composerPlaceholder(chat.status)
               }
             />
             <PromptInputFooter>
@@ -637,9 +657,8 @@ function ChatThreadSession({
 }
 
 /**
- * Replays one captured turn. Eve 0.31 split the single continuation-token send
- * into `send(message)` and `respond(inputResponses)`, so the payload the hook
- * handed to `prepareSend` decides which command re-issues it.
+ * Replays one captured turn. The payload the hook handed to `prepareSend`
+ * decides whether `send(message)` or `respond(inputResponses)` re-issues it.
  */
 async function sendTurn(
   agent: ReturnType<typeof useEveAgent>,
@@ -684,18 +703,12 @@ function pendingUserContentMessage(
   };
 }
 
-function composerPlaceholder(
-  status: ChatThreadSummary["status"],
-  hasPendingInteraction: boolean,
-): string {
+function composerPlaceholder(status: ChatThreadSummary["status"]): string {
   if (status === "completed") {
     return "This chat is completed";
   }
   if (status === "failed") {
     return "Try sending your message again";
-  }
-  if (hasPendingInteraction) {
-    return "Respond to the request above to continue";
   }
   return "Message this agent…";
 }

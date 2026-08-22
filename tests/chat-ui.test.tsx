@@ -18,9 +18,8 @@ type UnstampedEvent<TEvent = MessageStreamEvent> = TEvent extends unknown
   : never;
 
 /**
- * Eve stamps every stream event with an emission time and a sortable id from
- * stream version 20 (Eve 0.29) on. Fixtures spell the payload; this adds the
- * envelope the reducer deduplicates on.
+ * Supported v23 events carry an emission time and sortable id. Fixtures spell
+ * the payload; this adds the envelope the reducer deduplicates on.
  */
 function stampEvents(events: readonly UnstampedEvent[]): MessageStreamEvent[] {
   return events.map(
@@ -218,7 +217,7 @@ describe("ChatThread with Eve and AI Elements", () => {
               display: "confirmation",
               options: [
                 { id: "approve", label: "Allow", style: "primary" },
-                { id: "deny", label: "Deny", style: "danger" },
+                { id: "cancel", label: "Cancel", style: "danger" },
               ],
               action: { kind: "tool-call", callId: "call_1", toolName: "delete_record", input: { id: 7 } },
             },
@@ -519,7 +518,7 @@ describe("ChatThread with Eve and AI Elements", () => {
     expect(screen.getByLabelText("Message")).toBeEnabled();
   });
 
-  it("keeps a partly answered approval batch answerable across the deferred turn", () => {
+  it("keeps a partly answered approval batch answerable across another turn", () => {
     const events = stampEvents([
       { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
       { type: "step.started", data: { modelId: "fake/model", sequence: 1, stepIndex: 0, turnId: "turn_1" } },
@@ -534,7 +533,7 @@ describe("ChatThread with Eve and AI Elements", () => {
               display: "confirmation",
               options: [
                 { id: "approve", label: "Allow", style: "primary" },
-                { id: "deny", label: "Deny", style: "danger" },
+                { id: "cancel", label: "Cancel", style: "danger" },
               ],
               action: {
                 kind: "tool-call",
@@ -574,8 +573,8 @@ describe("ChatThread with Eve and AI Elements", () => {
     );
 
     expect(screen.getByRole("button", { name: "Allow" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "Deny" })).toBeEnabled();
-    expect(screen.getByLabelText("Message")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
+    expect(screen.getByLabelText("Message")).toBeEnabled();
   });
 
   it("reopens the composer for a replayed batch Eve is no longer parked on", () => {
@@ -817,7 +816,7 @@ describe("ChatThread with Eve and AI Elements", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
-        new Response(JSON.stringify({ sessionId: "ses_1", continuationToken: "eve:1" }), {
+        new Response(JSON.stringify({ sessionId: "ses_1" }), {
           status: 200,
           headers: { "content-type": "application/json", "x-eve-session-id": "ses_1" },
         }),
@@ -872,7 +871,7 @@ describe("ChatThread with Eve and AI Elements", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
-        new Response(JSON.stringify({ sessionId: "ses_1", continuationToken: "eve:1" }), {
+        new Response(JSON.stringify({ sessionId: "ses_1" }), {
           status: 200,
           headers: { "content-type": "application/json", "x-eve-session-id": "ses_1" },
         }),
@@ -958,7 +957,7 @@ describe("ChatThread with Eve and AI Elements", () => {
     expect(screen.getByRole("img", { name: "diagram.png" })).toBeInTheDocument();
 
     resolveSession(
-      new Response(JSON.stringify({ sessionId: "ses_1", continuationToken: "eve:1" }), {
+      new Response(JSON.stringify({ sessionId: "ses_1" }), {
         status: 200,
         headers: { "content-type": "application/json", "x-eve-session-id": "ses_1" },
       }),
@@ -978,7 +977,7 @@ describe("ChatThread with Eve and AI Elements", () => {
         return new Response("hello", { headers: { "content-type": "text/plain" } });
       }
       if (init?.method === "POST") {
-        return new Response(JSON.stringify({ sessionId: "ses_1", continuationToken: "eve:1" }), {
+        return new Response(JSON.stringify({ sessionId: "ses_1" }), {
           status: 200,
           headers: { "content-type": "application/json", "x-eve-session-id": "ses_1" },
         });
@@ -1023,8 +1022,8 @@ describe("ChatThread with Eve and AI Elements", () => {
   });
 
   it("cancels the exact durable turn, authenticated like every other request", async () => {
-    // Eve 0.38 replaced the binding's local-abort stop() with cancel(): the
-    // store waits for the turn's `turn.started`, POSTs `{ turnId }` to the
+    // The binding's durable cancel waits for the turn's `turn.started`, POSTs
+    // `{ turnId }` to the
     // session cancel route under the same auth as sends, and keeps the stream
     // attached — an unattributed cancel body is no longer possible.
     const getAccessToken = vi.fn(async () => "app-token");
@@ -1489,12 +1488,12 @@ describe("ChatThread with Eve and AI Elements", () => {
     expect(screen.getByRole("button", { name: "Subscribers" })).toBeEnabled();
   });
 
-  it("locks the composer behind an open approval only for an Agent that would hold the message", () => {
-    const parkedApproval = (eveVersion: string) =>
+  it("keeps the composer available beside an open approval", () => {
+    const parkedApproval =
       stampEvents([
         {
           type: "session.started",
-          data: { runtime: { agentId: "agt_1", eveVersion } },
+          data: { runtime: { agentId: "agt_1", eveVersion: "0.44.0" } },
         },
         { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
         {
@@ -1532,25 +1531,10 @@ describe("ChatThread with Eve and AI Elements", () => {
       requests: [{ requestId: "req_1", kind: "tool-approval" }],
     });
 
-    // Through 0.31 Eve held an unrelated message until the approval was
-    // answered, so the composer had to say the chat was blocked.
-    const held = render(
-      <ChatThread
-        chat={chat({ sessionState: { sessionId: "ses_1", streamIndex: 4 } })}
-        events={parkedApproval("0.31.1")}
-        pendingInput={parked}
-      />,
-    );
-    expect(screen.getByLabelText("Message")).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Allow" })).toBeEnabled();
-    held.unmount();
-
-    // From 0.32 the message runs as its own turn beside the open approval,
-    // which stays answerable, so there is nothing left to lock.
     render(
       <ChatThread
         chat={chat({ sessionState: { sessionId: "ses_1", streamIndex: 4 } })}
-        events={parkedApproval("0.33.2")}
+        events={parkedApproval}
         pendingInput={parked}
       />,
     );
@@ -1583,7 +1567,7 @@ describe("ChatThread with Eve and AI Elements", () => {
     const turnCalls = () =>
       fetchMock.mock.calls.filter((call) => !isPendingInputCall(call));
     await waitFor(() => expect(turnCalls().length).toBeGreaterThan(0));
-    // Eve 0.33 would otherwise cancel whatever turn is running and replace it.
+    // The default steer policy would otherwise replace the running turn.
     expect(JSON.parse(String(turnCalls()[0]?.[1]?.body))).toMatchObject({
       turnPolicy: "queue",
     });
@@ -1660,6 +1644,116 @@ describe("ChatThread with Eve and AI Elements", () => {
     await waitFor(() =>
       expect(screen.queryByRole("button", { name: "Subscribers" })).not.toBeInTheDocument(),
     );
+  });
+
+  it("applies input.resolved while the current stream remains parked", async () => {
+    const events = stampEvents([
+      {
+        type: "session.started",
+        data: { runtime: { agentId: "agt_1", eveVersion: "0.44.0" } },
+      },
+      { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
+      {
+        type: "step.started",
+        data: {
+          modelId: "fake/model",
+          sequence: 1,
+          stepIndex: 0,
+          turnId: "turn_1",
+        },
+      },
+      {
+        type: "input.requested",
+        data: {
+          requests: [
+            {
+              requestId: "call_metric",
+              kind: "question",
+              prompt: "Which paid-user metric?",
+              display: "select",
+              options: [{ id: "subscription", label: "Subscribers" }],
+              action: {
+                kind: "tool-call",
+                callId: "call_metric",
+                toolName: "ask_question",
+                input: {},
+              },
+            },
+          ],
+          sequence: 2,
+          stepIndex: 0,
+          turnId: "turn_1",
+        },
+      },
+      {
+        type: "session.waiting",
+        data: { wait: "next-user-message", continuationToken: "ses_1" },
+      },
+    ]);
+    const encoder = new TextEncoder();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (isPendingInputCall([input])) {
+        return pendingInputResponse();
+      }
+      if (init?.method === "POST") {
+        return new Response(JSON.stringify({ sessionId: "ses_1" }), {
+          status: 202,
+          headers: {
+            "content-type": "application/json",
+            "x-eve-session-id": "ses_1",
+          },
+        });
+      }
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              encoder.encode(
+                `${JSON.stringify({
+                  type: "input.resolved",
+                  data: {
+                    resolutions: [
+                      {
+                        kind: "question",
+                        outcome: "answered",
+                        requestId: "call_metric",
+                        response: {
+                          requestId: "call_metric",
+                          optionId: "subscription",
+                        },
+                      },
+                    ],
+                    sequence: 3,
+                    stepIndex: 0,
+                    turnId: "turn_1",
+                  },
+                })}\n`,
+              ),
+            );
+          },
+        }),
+        { headers: { "content-type": "application/x-ndjson; charset=utf-8" } },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({ sessionState: { sessionId: "ses_1", streamIndex: 5 } })}
+        events={events}
+        pendingInput={pendingBatches({
+          requests: [{ requestId: "call_metric", kind: "question" }],
+        })}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "Continue with the selected metric" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    expect(await screen.findByText("Responded: Subscribers")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Subscribers" })).not.toBeInTheDocument();
   });
 
   it("ignores a stale ledger response that raced a newer live batch", async () => {

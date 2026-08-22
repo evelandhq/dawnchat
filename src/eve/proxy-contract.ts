@@ -8,14 +8,10 @@ import {
 /**
  * One event as EveChats stores it and replays it into the browser.
  *
- * Eve emits no stream event when a question batch is answered, or when an
- * unauthenticated responder answers an approval — an answered `ask_question`
- * part stays `approval-requested` in the stored stream forever — so the proxy
- * records the answers it forwards as `client.input.responded`, the reducer
- * event Eve's own client uses for them. From 0.35 an *authenticated*
- * responder's approval answer does emit a durable `approval.settled`, which
- * the ledger consumes; everything else is still upstream gap
- * https://github.com/vercel/eve/issues/1095.
+ * Supported Eve streams emit a durable `input.resolved` for every terminal
+ * HITL outcome. The proxy still records answers it forwards as
+ * `client.input.responded`: that captures acceptance before the corresponding
+ * stream event is read.
  */
 export type ChatEvent = MessageStreamEvent | ClientInputRespondedEvent;
 
@@ -63,53 +59,6 @@ export const EMPTY_PENDING_INPUT: PendingInputState = { batches: [] };
 /** Mirrors Eve's `classifyInputRequest`: only these two kinds park a turn hard. */
 export function isRequiredKind(kind: string): boolean {
   return kind === "tool-approval" || kind === "session-limit";
-}
-
-/**
- * The Eve version serving this chat, as `session.started` reports it. The last
- * one wins: a replaced session reports the version the Agent runs now, and a
- * child session's events arrive wrapped in `subagent.event` rather than as a
- * bare `session.started`.
- */
-export function agentEveVersion(events: readonly unknown[]): string | undefined {
-  let version: string | undefined;
-  for (const event of events) {
-    if (!event || typeof event !== "object") continue;
-    if ((event as { type?: unknown }).type !== "session.started") continue;
-    const data = (event as { data?: unknown }).data;
-    if (!data || typeof data !== "object") continue;
-    const runtime = (data as { runtime?: unknown }).runtime;
-    if (!runtime || typeof runtime !== "object") continue;
-    const candidate = (runtime as { eveVersion?: unknown }).eveVersion;
-    if (typeof candidate === "string" && candidate.length > 0) {
-      version = candidate;
-    }
-  }
-  return version;
-}
-
-/**
- * Whether an unrelated message sent while a request is open would be held
- * rather than run.
- *
- * Up to Eve 0.31 an ordinary message stalled behind an open tool approval or
- * an interactive authorization challenge: Eve kept it until the request was
- * answered, so a UI that let it through looked wedged. Eve 0.32 stopped
- * deferring behind authorization challenges and 0.33.1 behind tool approvals —
- * the message runs as its own turn, the request stays open, and a later
- * structured answer still resolves the original tool call.
- *
- * An unreadable or missing version answers `true`: locking the composer is
- * visible and recoverable, while a silently deferred message is neither.
- */
-export function holdsMessagesForPendingInput(version: string | undefined): boolean {
-  if (version === undefined) return true;
-  const match = /^(\d+)\.(\d+)\./.exec(version.trim());
-  if (!match) return true;
-  const major = Number(match[1]);
-  const minor = Number(match[2]);
-  if (major > 0) return false;
-  return minor < 32;
 }
 
 export function hasUnansweredRequiredRequest(state: PendingInputState): boolean {
@@ -183,19 +132,26 @@ export function pendingRequestsFromEvent(payload: unknown): PendingInputRequest[
 }
 
 /**
- * The approval request an `approval.settled` event resolves. Emitted from Eve
- * 0.35 (stream version 22) when an authenticated responder answers a tool
- * approval, whichever channel carried the answer; either outcome — approved
- * or cancelled — settles the request. Unauthenticated answers emit nothing,
- * so this narrows the foreign-answer gap rather than closing it.
+ * Request IDs covered by Eve's authoritative `input.resolved` event.
+ * Every listed outcome is terminal, including denied, ignored, and invalid.
  */
-export function settledApprovalRequestId(payload: unknown): string | undefined {
-  if (!payload || typeof payload !== "object") return undefined;
-  if ((payload as { type?: unknown }).type !== "approval.settled") return undefined;
+export function resolvedInputRequestIds(payload: unknown): string[] {
+  if (!payload || typeof payload !== "object") return [];
+  if ((payload as { type?: unknown }).type !== "input.resolved") return [];
   const data = (payload as { data?: unknown }).data;
-  if (!data || typeof data !== "object") return undefined;
-  const requestId = (data as { requestId?: unknown }).requestId;
-  return typeof requestId === "string" && requestId.length > 0 ? requestId : undefined;
+  if (!data || typeof data !== "object") return [];
+  const resolutions = (data as { resolutions?: unknown }).resolutions;
+  if (!Array.isArray(resolutions)) return [];
+  return resolutions
+    .map((resolution) =>
+      resolution && typeof resolution === "object"
+        ? (resolution as { requestId?: unknown }).requestId
+        : undefined,
+    )
+    .filter(
+      (requestId): requestId is string =>
+        typeof requestId === "string" && requestId.length > 0,
+    );
 }
 
 /** The turn a stream event belongs to, for events that name one. */
@@ -228,9 +184,9 @@ export function openPendingBatch(
 /**
  * Drops the parks one cancelled turn owned.
  *
- * From Eve 0.33 a plain message sent while a turn runs *steers* by default:
- * Eve cancels that turn and starts the replacement under a new turn ID, while
- * every batch parked by an earlier turn stays open and answerable. A blanket
+ * A plain message sent with the steer policy cancels that turn and starts the
+ * replacement under a new turn ID, while every batch parked by an earlier
+ * turn stays open and answerable. A blanket
  * clear on `turn.cancelled` would therefore hide live approval controls, and
  * the tool call behind them can only come back if the model asks again. Only
  * the cancelled turn's own parks are gone.
@@ -249,9 +205,8 @@ export function clearPendingBatchesForTurn(
 
 /**
  * Applies the answers of one turn Eve accepted — a mirror of Eve's own batch
- * resolution (`resolveApprovalInputBatches`/`resolveQuestionOnlyInputBatches`,
- * unchanged through eve@0.39.0; `resolvePendingInput` before 0.33 restructured
- * it into an ordered collection of batches, with the same two rules). A batch closes once
+ * resolution (`resolveApprovalInputBatches`/`resolveQuestionOnlyInputBatches`
+ * in eve@0.42–0.44). A batch closes once
  * it has been addressed and no required request is unanswered: Eve resolves a
  * question batch on any one answer and an approval batch only once every
  * approval in it has one, carrying the leftovers forward. An
@@ -273,11 +228,9 @@ export function settlePendingInput(
 
 /**
  * Marks request IDs answered, whatever carried the answer. Turn bodies this
- * proxy forwarded arrive via `settlePendingInput`; an `approval.settled`
- * stream event (Eve ≥ 0.35) reports an approval an authenticated responder
- * resolved through *any* surface — another channel, another tab — and is the
- * one durable settlement signal Eve emits, so the tap feeds it through here
- * too. Batch closure follows Eve's own rule either way.
+ * proxy forwarded arrive via `settlePendingInput`; `input.resolved` stream
+ * events report every terminal outcome from any surface. Batch closure follows
+ * Eve's own rule either way.
  */
 export function settleAnsweredRequests(
   state: PendingInputState,
@@ -343,9 +296,10 @@ export function derivePendingInput(input: {
         answeredIds.add(requestId);
       }
     }
-    if (event.type === "approval.settled") {
-      const requestId = settledApprovalRequestId(event.payload);
-      if (requestId) answeredIds.add(requestId);
+    if (event.type === "input.resolved") {
+      for (const requestId of resolvedInputRequestIds(event.payload)) {
+        answeredIds.add(requestId);
+      }
     }
     if (event.type === "action.result") {
       for (const id of actionResultIds(event.payload)) {
@@ -470,55 +424,18 @@ function derivedRequestsFromEvent(payload: unknown): DerivedRequest[] | null {
     if (!request || typeof request !== "object") continue;
     const fields = request as Record<string, unknown>;
     const { requestId, kind, action } = fields;
-    if (typeof requestId !== "string") continue;
+    if (typeof requestId !== "string" || typeof kind !== "string") continue;
     const callId =
       action && typeof action === "object"
         ? (action as { callId?: unknown }).callId
         : undefined;
     parsed.push({
       requestId,
-      kind: typeof kind === "string" ? kind : fallbackRequestKind(fields),
+      kind,
       ...(typeof callId === "string" ? { callId } : {}),
     });
   }
   return parsed.length > 0 ? parsed : null;
-}
-
-/**
- * Requests predating `kind` (Eve < 0.28) are told apart by shape, the way
- * their emitters built them: approvals render a confirmation with
- * approve/deny options, questions a select/text prompt. (Eve 0.32 renamed the
- * negative option to `cancel`; no request this path sees is that new.) Both
- * carry an `action.callId`, so the action's presence distinguishes nothing. The
- * unrecognisable rest defaults to required — a wrongly locked composer is
- * answerable on screen, a wrongly dismissed approval silently defers every
- * later message.
- */
-function fallbackRequestKind(request: Record<string, unknown>): string {
-  const display = typeof request.display === "string" ? request.display : undefined;
-  if (display === "confirmation") return "tool-approval";
-  const options = Array.isArray(request.options) ? request.options : [];
-  const optionIds = new Set(
-    options.map((option) =>
-      option && typeof option === "object"
-        ? (option as { id?: unknown }).id
-        : undefined,
-    ),
-  );
-  if (optionIds.has("approve") || optionIds.has("deny")) return "tool-approval";
-  if (
-    display === "select" ||
-    display === "text" ||
-    request.allowFreeform === true ||
-    options.length > 0
-  ) {
-    return "question";
-  }
-  const toolName =
-    request.action && typeof request.action === "object"
-      ? (request.action as { toolName?: unknown }).toolName
-      : undefined;
-  return toolName === "ask_question" ? "question" : "tool-approval";
 }
 
 export function inputRespondedEvent(
@@ -529,10 +446,8 @@ export function inputRespondedEvent(
 }
 
 /**
- * Eve 0.29/0.30 agents address a session by continuation token; Eve 0.31
- * addresses it by session ID alone. EveChats keeps the real token server-side
- * for both generations, so it is dropped from every browser-facing payload
- * before it leaves the per-chat proxy.
+ * Drops Eve's channel-local continuation capability before a payload leaves
+ * the per-chat proxy for the browser.
  */
 export function withoutContinuationToken<T extends Record<string, unknown>>(
   payload: T,

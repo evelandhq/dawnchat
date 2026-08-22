@@ -8,7 +8,6 @@ import { chats } from "@/db/schema";
 import { defaultMessageReducer, type MessageStreamEvent } from "eve/client";
 
 import { startFakeEveServer, type FakeEveServer } from "@/eve/fake-eve-server.test-helper";
-import { derivePendingInput } from "@/eve/proxy-contract";
 import {
   CallerTokenError,
   setCallerTokenVerifierForTests,
@@ -215,8 +214,7 @@ describe("per-chat Eve protocol proxy", () => {
     expect(server.requests[0].headers.authorization).toBeUndefined();
     const stored = await repository.getChat(chat.id);
     expect(stored).toMatchObject({ status: "active", pendingUserMessage: null });
-    // Eve 0.31 answers without a token; the absent field marks the session
-    // ID-addressed for every later turn.
+    // Supported sessions are ID-addressed and persist only their stream cursor.
     expect(stored?.sessionState).toEqual({ sessionId: "ses_1", streamIndex: 0 });
   });
 
@@ -333,7 +331,7 @@ describe("per-chat Eve protocol proxy", () => {
     );
   });
 
-  it("keeps Eve 0.29 v20 sessions resumable without exposing a continuation token", async () => {
+  it("forwards a structured v23 stream without exposing its waiting capability", async () => {
     const streamEvents = [
       {
         type: "message.received",
@@ -372,11 +370,12 @@ describe("per-chat Eve protocol proxy", () => {
           requests: [
             {
               requestId: "req_1",
+              kind: "tool-approval",
               prompt: "Allow reading the report?",
               display: "confirmation",
               options: [
                 { id: "approve", label: "Allow", style: "primary" },
-                { id: "deny", label: "Deny", style: "danger" },
+                { id: "cancel", label: "Cancel", style: "danger" },
               ],
               action: { kind: "tool-call", callId: "call_1", toolName: "read_report", input: { page: 1 } },
             },
@@ -388,7 +387,7 @@ describe("per-chat Eve protocol proxy", () => {
       },
       { type: "session.waiting", data: { wait: "next-user-message" } },
     ] as const;
-    const server = await fakeServer({ generation: "0.29", streamEvents });
+    const server = await fakeServer({ generation: "0.44", streamEvents });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
       name: "Structured Eve",
@@ -428,8 +427,8 @@ describe("per-chat Eve protocol proxy", () => {
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as unknown);
-    // The parked session is reported to the browser by ID, never by the token
-    // that would let it continue the conversation directly.
+    // The parked session is reported to the browser by ID, never by the
+    // channel-local capability that could answer it directly.
     const browserEvents = streamEvents.map((event) =>
       event.type === "session.waiting"
         ? { ...event, data: { ...event.data, continuationToken: "ses_1" } }
@@ -454,7 +453,7 @@ describe("per-chat Eve protocol proxy", () => {
     );
     await expect(repository.getChat(chat.id)).resolves.toMatchObject({
       status: "active",
-      sessionState: { sessionId: "ses_1", continuationToken: "eve:1", streamIndex: 5 },
+      sessionState: { sessionId: "ses_1", streamIndex: 5 },
     });
 
     const replayResponse = await stream();
@@ -478,7 +477,7 @@ describe("per-chat Eve protocol proxy", () => {
       { type: "turn.completed", data: { sequence: 7, turnId: "turn_1" } },
       { type: "session.waiting", data: { wait: "next-user-message" } },
     ] as const;
-    const server = await fakeServer({ generation: "0.31", streamEvents });
+    const server = await fakeServer({ generation: "0.44", streamEvents });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
       name: "Streaming Eve",
@@ -559,7 +558,7 @@ describe("per-chat Eve protocol proxy", () => {
     // Held open like a live turn: the disconnect below is the browser's, not
     // the script running out.
     const server = await fakeServer({
-      generation: "0.31",
+      generation: "0.44",
       streamEvents,
       holdStreamOpen: true,
     });
@@ -634,7 +633,7 @@ describe("per-chat Eve protocol proxy", () => {
     });
   });
 
-  it("stores Eve 0.30 continuation tokens server-side and strips them from the browser stream", async () => {
+  it("redacts the supported stream's waiting capability without persisting it", async () => {
     const streamEvents = [
       {
         type: "message.completed",
@@ -651,10 +650,10 @@ describe("per-chat Eve protocol proxy", () => {
         data: { wait: "next-user-message", continuationToken: "eve:rotated" },
       },
     ] as const;
-    const server = await fakeServer({ generation: "0.30", streamEvents });
+    const server = await fakeServer({ generation: "0.44", streamEvents });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
-      name: "Eve 0.30",
+      name: "Waiting Eve",
       baseUrl: server.baseUrl,
       authType: "none",
       evelandProjectId: "project_support",
@@ -667,7 +666,6 @@ describe("per-chat Eve protocol proxy", () => {
     });
     await repository.updateChatSessionState(chat.id, {
       sessionId: "ses_1",
-      continuationToken: "eve:1",
       streamIndex: 0,
     });
     const routes = await loadProxyRoutes();
@@ -694,7 +692,6 @@ describe("per-chat Eve protocol proxy", () => {
     await expect(repository.getChat(chat.id)).resolves.toMatchObject({
       sessionState: {
         sessionId: "ses_1",
-        continuationToken: "eve:rotated",
         streamIndex: 2,
       },
     });
@@ -708,18 +705,18 @@ describe("per-chat Eve protocol proxy", () => {
       { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
     );
 
-    expect(continued.status).toBe(200);
+    expect(continued.status).toBe(202);
     expect(server.requests.at(-1)).toMatchObject({
       path: "/eve/v1/session/ses_1",
-      body: { message: "And again", continuationToken: "eve:rotated" },
+      body: { message: "And again" },
     });
   });
 
-  it("addresses an Eve 0.31 follow-up by session id alone", async () => {
-    const server = await fakeServer({ generation: "0.31" });
+  it("addresses a supported follow-up by session id alone", async () => {
+    const server = await fakeServer({ generation: "0.44" });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
-      name: "Eve 0.31",
+      name: "Current Eve",
       baseUrl: server.baseUrl,
       authType: "none",
       evelandProjectId: "project_support",
@@ -757,7 +754,7 @@ describe("per-chat Eve protocol proxy", () => {
   });
 
   it("records forwarded HITL answers so a replay can show what was picked", async () => {
-    const server = await fakeServer({ generation: "0.31" });
+    const server = await fakeServer({ generation: "0.44" });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
       name: "Answering Eve",
@@ -833,7 +830,7 @@ describe("per-chat Eve protocol proxy", () => {
   });
 
   it("stores no response event for a turn that only carries a message", async () => {
-    const server = await fakeServer({ generation: "0.31" });
+    const server = await fakeServer({ generation: "0.44" });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
       name: "Chatting Eve",
@@ -862,11 +859,11 @@ describe("per-chat Eve protocol proxy", () => {
     await expect(repository.listEvents(chat.id)).resolves.toEqual([]);
   });
 
-  it("drops a stale continuation token when the Agent upgrades to Eve 0.31", async () => {
-    const server = await fakeServer({ generation: "0.31" });
+  it("continues an older chat by session id after its Agent upgrades", async () => {
+    const server = await fakeServer({ generation: "0.44" });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
-      name: "Upgraded Eve",
+      name: "Current Eve",
       baseUrl: server.baseUrl,
       authType: "none",
       evelandProjectId: "project_support",
@@ -874,15 +871,19 @@ describe("per-chat Eve protocol proxy", () => {
     await repository.updateAgentHealth(agent.id, { status: "healthy" });
     const chat = await repository.createChat({
       agentConnectionId: agent.id,
-      title: "Upgraded mid-session",
+      title: "Old stored state",
       ...chatIdentity,
     });
-    // Opened while the Agent still ran Eve 0.30.
-    await repository.updateChatSessionState(chat.id, {
-      sessionId: "ses_1",
-      continuationToken: "eve:1",
-      streamIndex: 2,
-    });
+    await testDb.db
+      .update(chats)
+      .set({
+        sessionStateJson: JSON.stringify({
+          sessionId: "ses_1",
+          continuationToken: "obsolete",
+          streamIndex: 2,
+        }),
+      })
+      .where(eq(chats.id, chat.id));
     const routes = await loadProxyRoutes();
 
     const response = await routes.continueSession(
@@ -895,16 +896,13 @@ describe("per-chat Eve protocol proxy", () => {
     );
 
     expect(response.status).toBe(202);
-    expect(server.requests.map((entry) => entry.body)).toEqual([
-      { message: "Still there?", continuationToken: "eve:1" },
-      { message: "Still there?" },
-    ]);
+    expect(server.requests.map((entry) => entry.body)).toEqual([{ message: "Still there?" }]);
     const stored = await repository.getChat(chat.id);
     expect(stored?.sessionState).toEqual({ sessionId: "ses_1", streamIndex: 2 });
   });
 
-  it("injects the stored continuation token for HITL responses and rejects another session id", async () => {
-    const server = await fakeServer({ generation: "0.30" });
+  it("strips untrusted tokens from HITL responses and rejects another session id", async () => {
+    const server = await fakeServer({ generation: "0.44" });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
       name: "Approval Eve",
@@ -920,7 +918,6 @@ describe("per-chat Eve protocol proxy", () => {
     });
     await repository.updateChatSessionState(chat.id, {
       sessionId: "ses_1",
-      continuationToken: "eve:1",
       streamIndex: 7,
     });
     const routes = await loadProxyRoutes();
@@ -937,9 +934,8 @@ describe("per-chat Eve protocol proxy", () => {
       { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
     );
 
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(202);
     expect(server.requests[0].body).toEqual({
-      continuationToken: "eve:1",
       inputResponses: [{ requestId: "req_1", optionId: "approve" }],
     });
 
@@ -974,7 +970,6 @@ describe("per-chat Eve protocol proxy", () => {
     });
     await repository.updateChatSessionState(chat.id, {
       sessionId: "ses_1",
-      continuationToken: "eve:1",
       streamIndex: 3,
     });
     const routes = await loadProxyRoutes();
@@ -1027,7 +1022,7 @@ describe("per-chat Eve protocol proxy", () => {
       },
       { type: "session.waiting", data: { wait: "next-user-message" } },
     ] as const;
-    const server = await fakeServer({ generation: "0.31", streamEvents });
+    const server = await fakeServer({ generation: "0.44", streamEvents });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
       name: "Parked Eve",
@@ -1086,27 +1081,33 @@ describe("per-chat Eve protocol proxy", () => {
     });
   });
 
-  it("settles an approval another responder answered when approval.settled streams through", async () => {
-    // From Eve 0.35 (stream version 22) an authenticated responder's answer —
-    // whichever channel carried it — emits a durable `approval.settled`. The
-    // tap is the only place this proxy observes it, and it is the one
-    // settlement signal that does not pass through a turn POST.
+  it("settles every terminal outcome carried by Eve 0.42 input.resolved", async () => {
     const streamEvents = [
       {
         type: "input.requested",
         data: {
           requests: [
             {
-              requestId: "req_a",
-              kind: "tool-approval",
-              prompt: "Allow?",
-              action: { kind: "tool-call", callId: "call_a", toolName: "delete_record", input: {} },
+              requestId: "req_question",
+              kind: "question",
+              prompt: "Continue?",
+              action: {
+                kind: "tool-call",
+                callId: "call_question",
+                toolName: "ask_question",
+                input: {},
+              },
             },
             {
-              requestId: "req_b",
+              requestId: "req_approval",
               kind: "tool-approval",
-              prompt: "Allow more?",
-              action: { kind: "tool-call", callId: "call_b", toolName: "drop_table", input: {} },
+              prompt: "Allow?",
+              action: {
+                kind: "tool-call",
+                callId: "call_approval",
+                toolName: "delete_record",
+                input: {},
+              },
             },
           ],
           sequence: 1,
@@ -1115,11 +1116,22 @@ describe("per-chat Eve protocol proxy", () => {
         },
       },
       {
-        type: "approval.settled",
+        type: "input.resolved",
         data: {
-          outcome: "approved",
-          requestId: "req_a",
-          responderPrincipalId: "prn_slack",
+          resolutions: [
+            {
+              kind: "question",
+              outcome: "answered",
+              requestId: "req_question",
+              response: { requestId: "req_question", optionId: "yes" },
+            },
+            {
+              kind: "tool-approval",
+              outcome: "denied",
+              requestId: "req_approval",
+              response: { requestId: "req_approval", optionId: "cancel" },
+            },
+          ],
           sequence: 2,
           stepIndex: 0,
           turnId: "turn_1",
@@ -1127,10 +1139,10 @@ describe("per-chat Eve protocol proxy", () => {
       },
       { type: "session.waiting", data: { wait: "next-user-message" } },
     ] as const;
-    const server = await fakeServer({ generation: "0.39", streamEvents });
+    const server = await fakeServer({ generation: "0.42", streamEvents });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
-      name: "Settling Eve",
+      name: "Resolving Eve",
       baseUrl: server.baseUrl,
       authType: "none",
       evelandProjectId: "project_support",
@@ -1138,115 +1150,31 @@ describe("per-chat Eve protocol proxy", () => {
     await repository.updateAgentHealth(agent.id, { status: "healthy" });
     const chat = await repository.createChat({
       agentConnectionId: agent.id,
-      title: "Settled elsewhere",
+      title: "Resolved elsewhere",
       ...chatIdentity,
     });
-    await repository.updateChatSessionState(chat.id, { sessionId: "ses_1", streamIndex: 0 });
-    const routes = await loadProxyRoutes();
-
-    const response = await routes.streamSession(
-      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1/stream`, {
-        headers: callerHeaders(),
-      }),
-      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
-    );
-    await response.text();
-
-    // The approval batch stays parked on the still-open req_b; req_a is
-    // answered without any turn POST having passed through this proxy.
-    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
-      pendingInput: {
-        batches: [expect.objectContaining({ answered: ["req_a"] })],
-      },
-    });
-  });
-
-  it("keeps a legacy chat's NULL marker when approval.settled streams through", async () => {
-    // Promoting the legacy marker on a settle would declare the ledger empty
-    // and skip the one-shot derivation; the stored event feeds that
-    // derivation instead.
-    const streamEvents = [
-      {
-        type: "approval.settled",
-        data: {
-          outcome: "cancelled",
-          requestId: "req_1",
-          responderPrincipalId: "prn_other",
-          sequence: 3,
-          stepIndex: 0,
-          turnId: "turn_1",
-        },
-      },
-      { type: "session.waiting", data: { wait: "next-user-message" } },
-    ] as const;
-    const server = await fakeServer({ generation: "0.39", streamEvents });
-    const repository = createRepository(testDb.db);
-    const agent = await repository.createAgentConnection({
-      name: "Legacy settling Eve",
-      baseUrl: server.baseUrl,
-      authType: "none",
-      evelandProjectId: "project_support",
-    });
-    await repository.updateAgentHealth(agent.id, { status: "healthy" });
-    const chat = await repository.createChat({
-      agentConnectionId: agent.id,
-      title: "Legacy settled",
-      ...chatIdentity,
-    });
-    await repository.updateChatSessionState(chat.id, { sessionId: "ses_1", streamIndex: 2 });
-    await repository.appendEvent({
-      chatId: chat.id,
+    await repository.updateChatSessionState(chat.id, {
       sessionId: "ses_1",
       streamIndex: 0,
-      type: "input.requested",
-      payload: {
-        type: "input.requested",
-        data: {
-          turnId: "turn_1",
-          requests: [
-            {
-              requestId: "req_1",
-              kind: "tool-approval",
-              prompt: "Allow?",
-              action: { kind: "tool-call", callId: "call_1", toolName: "delete_record", input: {} },
-            },
-          ],
-        },
-      },
     });
-    await testDb.db
-      .update(chats)
-      .set({ pendingInputJson: null })
-      .where(eq(chats.id, chat.id));
     const routes = await loadProxyRoutes();
 
     const response = await routes.streamSession(
       new Request(
-        `http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1/stream?startIndex=2`,
+        `http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1/stream`,
         { headers: callerHeaders() },
       ),
       { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
     );
     await response.text();
 
-    // Still the legacy marker — and the derivation it feeds reads the batch
-    // as settled by the stored approval.settled event.
-    await expect(repository.getChat(chat.id)).resolves.toMatchObject({ pendingInput: null });
-    const derived = derivePendingInput({
-      events: (await repository.listEvents(chat.id)).map((event) => ({
-        eventIndex: event.eventIndex,
-        sessionId: event.sessionId,
-        type: event.type,
-        payload: event.payload,
-      })),
-      sessionId: "ses_1",
-      active: true,
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      pendingInput: { batches: [] },
     });
-    expect(derived.batches).toEqual([]);
   });
 
   it("keeps a required batch open across partial answers and dedupes repeats", async () => {
-    const server = await fakeServer({ generation: "0.31" });
+    const server = await fakeServer({ generation: "0.44" });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
       name: "Deferred Eve",
@@ -1292,14 +1220,14 @@ describe("per-chat Eve protocol proxy", () => {
       },
     });
 
-    await respond([{ requestId: "req_b", optionId: "deny" }]);
+    await respond([{ requestId: "req_b", optionId: "cancel" }]);
     await expect(repository.getChat(chat.id)).resolves.toMatchObject({
       pendingInput: { batches: [] },
     });
   });
 
   it("leaves every park open for a message-only turn", async () => {
-    const server = await fakeServer({ generation: "0.31" });
+    const server = await fakeServer({ generation: "0.44" });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
       name: "Buffering Eve",
@@ -1356,7 +1284,7 @@ describe("per-chat Eve protocol proxy", () => {
       ],
     };
     const setUpChat = async (cancelStatus: "accepted" | "no_active_turn") => {
-      const server = await fakeServer({ generation: "0.31", cancelStatus });
+      const server = await fakeServer({ generation: "0.44", cancelStatus });
       const agent = await repository.createAgentConnection({
         name: `Cancel ${cancelStatus}`,
         baseUrl: server.baseUrl,
@@ -1418,7 +1346,7 @@ describe("per-chat Eve protocol proxy", () => {
       },
       { type: "session.completed", data: { reason: "done" } },
     ] as const;
-    const server = await fakeServer({ generation: "0.31", streamEvents });
+    const server = await fakeServer({ generation: "0.44", streamEvents });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
       name: "Finishing Eve",
@@ -1480,7 +1408,7 @@ describe("per-chat Eve protocol proxy", () => {
 
     const drain = async (cancelledTurnId: string): Promise<string> => {
       const server = await fakeServer({
-        generation: "0.33",
+        generation: "0.44",
         streamEvents: parkThenCancel(cancelledTurnId),
       });
       const agent = await repository.createAgentConnection({
@@ -1509,8 +1437,8 @@ describe("per-chat Eve protocol proxy", () => {
       return chat.id;
     };
 
-    // Eve 0.33 steers a message that arrives mid-turn: it cancels the running
-    // turn and replaces it, while every batch an earlier turn parked stays
+    // Eve's steer policy cancels the running turn and replaces it, while every
+    // batch an earlier turn parked stays
     // open and answerable. Clearing those would strand the tool call behind
     // controls the browser stopped rendering.
     const steered = await drain("turn_2");
@@ -1546,7 +1474,7 @@ describe("per-chat Eve protocol proxy", () => {
       ],
     };
     const setUpChat = async (title: string) => {
-      const server = await fakeServer({ generation: "0.33", cancelStatus: "accepted" });
+      const server = await fakeServer({ generation: "0.44", cancelStatus: "accepted" });
       const agent = await repository.createAgentConnection({
         name: `Cancel ${title}`,
         baseUrl: server.baseUrl,
@@ -1635,7 +1563,7 @@ describe("per-chat Eve protocol proxy", () => {
   });
 
   it("clears stale parks when a new session replaces the old one", async () => {
-    const server = await fakeServer({ generation: "0.31" });
+    const server = await fakeServer({ generation: "0.44" });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
       name: "Replaced Eve",
@@ -1680,7 +1608,7 @@ describe("per-chat Eve protocol proxy", () => {
 
   it("derives a legacy chat's parks from stored events on first read", async () => {
     const repository = createRepository(testDb.db);
-    const server = await fakeServer({ generation: "0.31" });
+    const server = await fakeServer({ generation: "0.44" });
     const agent = await repository.createAgentConnection({
       name: "Legacy Eve",
       baseUrl: server.baseUrl,
@@ -1758,7 +1686,7 @@ describe("per-chat Eve protocol proxy", () => {
   });
 
   it("serves the ledger to a Caller Token client", async () => {
-    const server = await fakeServer({ generation: "0.31" });
+    const server = await fakeServer({ generation: "0.44" });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
       name: "Challenged Eve",

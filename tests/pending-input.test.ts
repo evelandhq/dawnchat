@@ -1,14 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  agentEveVersion,
   clearPendingBatchesForTurn,
   derivePendingInput,
-  holdsMessagesForPendingInput,
   parsePendingInput,
   serializePendingInput,
-  settleAnsweredRequests,
-  settledApprovalRequestId,
   settlePendingInput,
   type PendingInputState,
   type StoredChatEvent,
@@ -118,16 +114,21 @@ describe("legacy pending-input derivation", () => {
     expect(derive(events).batches).toEqual([]);
   });
 
-  it("derives an approval closed when a stored approval.settled covers it", () => {
+  it("derives a question closed when a stored input.resolved covers it", () => {
     nextIndex = 1;
     const events = [
-      inputRequested([{ requestId: "req_1", kind: "tool-approval" }]),
-      event("approval.settled", {
-        type: "approval.settled",
+      inputRequested([{ requestId: "req_1", kind: "question" }]),
+      event("input.resolved", {
+        type: "input.resolved",
         data: {
-          outcome: "approved",
-          requestId: "req_1",
-          responderPrincipalId: "prn_other",
+          resolutions: [
+            {
+              kind: "question",
+              outcome: "answered",
+              requestId: "req_1",
+              response: { requestId: "req_1", optionId: "yes" },
+            },
+          ],
           sequence: 2,
           stepIndex: 0,
           turnId: "turn_1",
@@ -139,9 +140,8 @@ describe("legacy pending-input derivation", () => {
 
   it("settles every copy of a re-parked batch on one answer", () => {
     nextIndex = 1;
-    // From Eve 0.35 a turn that parked on an approval beside a subagent call
-    // re-parks on the same still-pending approval when the delegation result
-    // arrives, emitting `input.requested` again with the same request IDs.
+    // A turn parked beside a subagent call can re-park on the same pending
+    // approval when the delegation result arrives, repeating the request IDs.
     const events = [
       inputRequested([{ requestId: "req_1", kind: "tool-approval" }], { turnId: "turn_1" }),
       inputRequested([{ requestId: "req_1", kind: "tool-approval" }], { turnId: "turn_1" }),
@@ -216,52 +216,28 @@ describe("legacy pending-input derivation", () => {
     expect(derive(parked, { sessionId: null }).batches).toEqual([]);
   });
 
-  it("classifies requests predating `kind` by their shape, not their action", () => {
-    // Old questions and approvals both carry an action.callId; display and
-    // options are what their emitters actually differed on.
-    const kindOf = (request: Record<string, unknown>): string | undefined => {
-      nextIndex = 1;
-      const derived = derive([
-        event("input.requested", {
-          type: "input.requested",
-          data: { requests: [{ requestId: "req_1", ...request }] },
-        }),
-      ]);
-      return derived.batches[0]?.requests[0]?.kind;
-    };
-    const action = { kind: "tool-call", callId: "call_1", toolName: "delete_record", input: {} };
-    const ask = { ...action, toolName: "ask_question" };
-
-    expect(
-      kindOf({
-        display: "confirmation",
-        options: [{ id: "approve", label: "Allow" }, { id: "deny", label: "Deny" }],
-        action,
+  it("ignores a request that does not satisfy the supported `kind` contract", () => {
+    nextIndex = 1;
+    const events = [
+      event("input.requested", {
+        type: "input.requested",
+        data: {
+          requests: [
+            {
+              requestId: "req_1",
+              display: "confirmation",
+              action: {
+                kind: "tool-call",
+                callId: "call_1",
+                toolName: "delete_record",
+                input: {},
+              },
+            },
+          ],
+        },
       }),
-    ).toBe("tool-approval");
-    expect(
-      kindOf({
-        display: "select",
-        options: [{ id: "a", label: "A" }, { id: "b", label: "B" }],
-        action: ask,
-      }),
-    ).toBe("question");
-    expect(kindOf({ display: "text", allowFreeform: true, action: ask })).toBe("question");
-    expect(kindOf({ action: ask })).toBe("question");
-    // Unrecognisable shapes err required: a locked composer is answerable on
-    // screen, a dismissed approval silently defers every later message.
-    expect(kindOf({ action })).toBe("tool-approval");
-    // Eve 0.32 renamed the negative approval option from `deny` to `cancel`.
-    // Nothing here has to learn the new id: a request that old predates `kind`
-    // by four minors, and every Agent in the support window states its kind.
-    expect(
-      kindOf({
-        kind: "tool-approval",
-        display: "confirmation",
-        options: [{ id: "approve", label: "Allow" }, { id: "cancel", label: "Cancel" }],
-        action,
-      }),
-    ).toBe("tool-approval");
+    ];
+    expect(derive(events).batches).toEqual([]);
   });
 });
 
@@ -335,76 +311,6 @@ describe("clearPendingBatchesForTurn", () => {
 
   it("spares every park when a steered turn is cancelled", () => {
     expect(clearPendingBatchesForTurn(parked, "turn_9")).toEqual(parked);
-  });
-});
-
-describe("approval.settled (Eve ≥ 0.35, stream version 22)", () => {
-  const settledEvent = (requestId: string, outcome: "approved" | "cancelled") => ({
-    type: "approval.settled",
-    data: {
-      outcome,
-      requestId,
-      responderPrincipalId: "prn_other",
-      sequence: 9,
-      stepIndex: 0,
-      turnId: "turn_1",
-    },
-  });
-
-  it("reads the settled request out of the event and nothing else", () => {
-    expect(settledApprovalRequestId(settledEvent("req_a", "approved"))).toBe("req_a");
-    expect(settledApprovalRequestId(settledEvent("req_a", "cancelled"))).toBe("req_a");
-    expect(
-      settledApprovalRequestId({ type: "approval.candidate", data: { requestId: "req_a" } }),
-    ).toBeUndefined();
-    expect(settledApprovalRequestId({ type: "approval.settled", data: {} })).toBeUndefined();
-  });
-
-  it("settles the approval whichever channel answered it, closing a completed batch", () => {
-    const parked: PendingInputState = {
-      batches: [
-        {
-          eventIndex: 1,
-          requests: [
-            { requestId: "req_a", kind: "tool-approval" },
-            { requestId: "req_b", kind: "tool-approval" },
-          ],
-          answered: [],
-        },
-      ],
-    };
-    const partial = settleAnsweredRequests(parked, ["req_a"]);
-    expect(partial.batches[0]).toMatchObject({ answered: ["req_a"] });
-    expect(settleAnsweredRequests(partial, ["req_b"]).batches).toEqual([]);
-  });
-});
-
-describe("holdsMessagesForPendingInput", () => {
-  it("locks through 0.31 and releases from 0.32", () => {
-    expect(holdsMessagesForPendingInput("0.31.1")).toBe(true);
-    expect(holdsMessagesForPendingInput("0.32.0")).toBe(false);
-    expect(holdsMessagesForPendingInput("0.33.2")).toBe(false);
-    expect(holdsMessagesForPendingInput("1.0.0")).toBe(false);
-  });
-
-  it("locks when the version is missing or unreadable", () => {
-    expect(holdsMessagesForPendingInput(undefined)).toBe(true);
-    expect(holdsMessagesForPendingInput("nightly")).toBe(true);
-  });
-});
-
-describe("agentEveVersion", () => {
-  it("reads the newest session.started runtime and ignores everything else", () => {
-    expect(
-      agentEveVersion([
-        { type: "turn.started", data: { turnId: "turn_1" } },
-        { type: "session.started", data: { runtime: { eveVersion: "0.31.1" } } },
-        // A replaced session reports what the Agent runs now.
-        { type: "session.started", data: { runtime: { eveVersion: "0.33.2" } } },
-      ]),
-    ).toBe("0.33.2");
-    expect(agentEveVersion([{ type: "session.started", data: {} }])).toBeUndefined();
-    expect(agentEveVersion([])).toBeUndefined();
   });
 });
 

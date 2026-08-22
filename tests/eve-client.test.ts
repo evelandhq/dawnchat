@@ -80,6 +80,18 @@ describe("Eve client connector", () => {
     ]);
   });
 
+  it.each(["0.42", "0.43", "0.44"] as const)(
+    "models Eve %s with stream version 23",
+    async (generation) => {
+      const server = await fakeServer({ generation });
+
+      const response = await fetch(`${server.baseUrl}/eve/v1/session/ses_1/stream`);
+
+      expect(response.headers.get("x-eve-stream-version")).toBe("23");
+      await response.text();
+    },
+  );
+
   it("reports unreachable health for an unreachable agent", async () => {
     const server = await fakeServer();
     const baseUrl = server.baseUrl;
