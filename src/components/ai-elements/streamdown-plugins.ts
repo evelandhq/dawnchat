@@ -22,6 +22,11 @@ type LazyPlugins = {
 let mermaidPlugin: DiagramPlugin | undefined;
 let mathPlugin: MathPlugin | undefined;
 
+// Streamdown resolves its public highlighter types through our Shiki 4
+// dependency, while @streamdown/code currently builds the same runtime
+// contract against Shiki 3. Bridge that package-level type skew here.
+const streamdownCode = code as unknown as NonNullable<PluginConfig["code"]>;
+
 export function useStreamdownPlugins(content: unknown): PluginConfig {
   const markdown = typeof content === "string" ? content : "";
   const wantsMermaid = MERMAID_FENCE.test(markdown);
@@ -58,7 +63,7 @@ export function useStreamdownPlugins(content: unknown): PluginConfig {
   return useMemo(
     () => ({
       cjk,
-      code,
+      code: streamdownCode,
       ...(loaded.mermaid ? { mermaid: loaded.mermaid } : {}),
       ...(loaded.math ? { math: loaded.math } : {}),
     }),

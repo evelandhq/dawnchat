@@ -10,3 +10,16 @@ minimumReleaseAgeExclude:
   # The client library is pinned to the newest verified release of the support
   # window Eveland hosts: Eve 0.42.x through 0.44.x agents.
   - eve@0.44.0
+  - '@ai-sdk/gateway@4.0.61'
+  - '@next/env@16.3.2'
+  - '@next/swc-darwin-arm64@16.3.2'
+  - '@next/swc-darwin-x64@16.3.2'
+  - '@next/swc-linux-arm64-gnu@16.3.2'
+  - '@next/swc-linux-arm64-musl@16.3.2'
+  - '@next/swc-linux-x64-gnu@16.3.2'
+  - '@next/swc-linux-x64-musl@16.3.2'
+  - '@next/swc-win32-arm64-msvc@16.3.2'
+  - '@next/swc-win32-x64-msvc@16.3.2'
+  - ai@7.0.76
+  - next@16.3.2
+  - shadcn@4.19.0
