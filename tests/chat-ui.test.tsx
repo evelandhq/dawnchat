@@ -84,6 +84,7 @@ describe("ChatThread with Eve and AI Elements", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     onTurnFinished.mockReset();
+    window.sessionStorage.clear();
   });
 
   it("renders Eve text, files, reasoning, and completed tool calls from raw events", async () => {
@@ -1542,7 +1543,7 @@ describe("ChatThread with Eve and AI Elements", () => {
     expect(screen.getByRole("button", { name: "Allow" })).toBeEnabled();
   });
 
-  it("asks for the queue turn policy so a message never steers a running turn", async () => {
+  it("asks for the queue turn policy for an ordinary turn", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ sessionId: "ses_1" }), {
         status: 200,
@@ -1569,6 +1570,509 @@ describe("ChatThread with Eve and AI Elements", () => {
     await waitFor(() => expect(turnCalls().length).toBeGreaterThan(0));
     // The default steer policy would otherwise replace the running turn.
     expect(JSON.parse(String(turnCalls()[0]?.[1]?.body))).toMatchObject({
+      turnPolicy: "queue",
+    });
+  });
+
+  it("queues a message above the composer during a running turn and lets the user delete it", async () => {
+    let streamController!: ReadableStreamDefaultController<Uint8Array>;
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (url.includes("/pending-input")) return pendingInputResponse();
+        if (init?.method === "POST") {
+          return Response.json(
+            { sessionId: "ses_1" },
+            { headers: { "x-eve-session-id": "ses_1" } },
+          );
+        }
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            streamController = controller;
+            for (const event of [
+              {
+                type: "message.received",
+                data: {
+                  message: "Start a long task",
+                  sequence: 1,
+                  turnId: "turn_1",
+                },
+              },
+              { type: "turn.started", data: { sequence: 2, turnId: "turn_1" } },
+              {
+                type: "message.appended",
+                data: {
+                  messageDelta: "Working",
+                  messageSoFar: "Working",
+                  sequence: 3,
+                  stepIndex: 0,
+                  turnId: "turn_1",
+                },
+              },
+            ]) {
+              controller.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
+            }
+          },
+        });
+        return new Response(body, {
+          headers: { "content-type": "application/x-ndjson; charset=utf-8" },
+        });
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({ id: "chat_queue_delete" })}
+        events={[]}
+        pendingInput={EMPTY_PENDING}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "Start a long task" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await screen.findByRole("button", { name: "Stop generating" });
+
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "Use the newer requirements" },
+    });
+    fireEvent.submit(screen.getByLabelText("Message").closest("form")!);
+
+    expect(await screen.findByRole("list", { name: "Queued messages" })).toHaveTextContent(
+      "Use the newer requirements",
+    );
+    const turnCalls = () =>
+      fetchMock.mock.calls.filter(([, init]) => init?.method === "POST");
+    expect(turnCalls()).toHaveLength(1);
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: 'Delete queued message "Use the newer requirements"',
+      }),
+    );
+    expect(screen.queryByRole("list", { name: "Queued messages" })).not.toBeInTheDocument();
+    expect(turnCalls()).toHaveLength(1);
+
+    streamController.close();
+  });
+
+  it("steers a queued message into the running turn immediately", async () => {
+    let streamController!: ReadableStreamDefaultController<Uint8Array>;
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (url.includes("/pending-input")) return pendingInputResponse();
+        if (init?.method === "POST") {
+          return Response.json(
+            { sessionId: "ses_1" },
+            { headers: { "x-eve-session-id": "ses_1" } },
+          );
+        }
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            streamController = controller;
+            for (const event of [
+              {
+                type: "message.received",
+                data: { message: "Start", sequence: 1, turnId: "turn_1" },
+              },
+              { type: "turn.started", data: { sequence: 2, turnId: "turn_1" } },
+            ]) {
+              controller.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
+            }
+          },
+        });
+        return new Response(body, {
+          headers: { "content-type": "application/x-ndjson; charset=utf-8" },
+        });
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({ id: "chat_steer_now" })}
+        events={[]}
+        pendingInput={EMPTY_PENDING}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Start" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await screen.findByText("Start");
+    await screen.findByRole("button", { name: "Stop generating" });
+
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "Change direction now" },
+    });
+    fireEvent.submit(screen.getByLabelText("Message").closest("form")!);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: 'Steer now with "Change direction now"',
+      }),
+    );
+
+    const turnCalls = () =>
+      fetchMock.mock.calls.filter(([, init]) => init?.method === "POST");
+    await waitFor(() => expect(turnCalls()).toHaveLength(2));
+    expect(JSON.parse(String(turnCalls()[1]?.[1]?.body))).toMatchObject({
+      message: "Change direction now",
+      turnPolicy: "steer",
+    });
+    expect(
+      screen.queryByRole("button", {
+        name: 'Delete queued message "Change direction now"',
+      }),
+    ).not.toBeInTheDocument();
+
+    for (const event of [
+      { type: "turn.cancelled", data: { sequence: 3, turnId: "turn_1" } },
+      {
+        type: "message.received",
+        data: { message: "Change direction now", sequence: 4, turnId: "turn_2" },
+      },
+      { type: "turn.started", data: { sequence: 5, turnId: "turn_2" } },
+      { type: "turn.completed", data: { sequence: 6, turnId: "turn_2" } },
+      { type: "session.waiting", data: { wait: "next-user-message" } },
+    ]) {
+      streamController.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
+    }
+    streamController.close();
+  });
+
+  it("retries an authenticated Steer without losing its queued row", async () => {
+    const challenge =
+      'Bearer realm="eveland", authorization_uri="https://identity.example.com/identity/login", project_id="project_support", display_name="Eveland"';
+    const respondToAuthenticationChallenge = vi.fn(async () => "caller-token");
+    const seenAuthorization: Array<string | null> = [];
+    let postNumber = 0;
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (url.includes("/pending-input")) return pendingInputResponse();
+        if (init?.method === "POST") {
+          postNumber += 1;
+          seenAuthorization.push(new Headers(init.headers).get("authorization"));
+          if (postNumber === 2) {
+            return Response.json(
+              {
+                code: "authentication_required",
+                error: "Eveland authentication is required.",
+              },
+              {
+                status: 401,
+                headers: { "www-authenticate": challenge },
+              },
+            );
+          }
+          return Response.json(
+            { sessionId: "ses_1" },
+            { headers: { "x-eve-session-id": "ses_1" } },
+          );
+        }
+        if (postNumber < 3) {
+          const body = new ReadableStream<Uint8Array>({
+            start(controller) {
+              for (const event of [
+                {
+                  type: "message.received",
+                  data: { message: "Start", sequence: 1, turnId: "turn_1" },
+                },
+                { type: "turn.started", data: { sequence: 2, turnId: "turn_1" } },
+              ]) {
+                controller.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
+              }
+              init?.signal?.addEventListener("abort", () => {
+                controller.error(new DOMException("Aborted", "AbortError"));
+              });
+            },
+          });
+          return new Response(body, {
+            headers: { "content-type": "application/x-ndjson; charset=utf-8" },
+          });
+        }
+        return ndjson([
+          {
+            type: "message.received",
+            data: { message: "Authenticated steer", sequence: 10, turnId: "turn_2" },
+          },
+          { type: "turn.started", data: { sequence: 11, turnId: "turn_2" } },
+          { type: "turn.completed", data: { sequence: 12, turnId: "turn_2" } },
+          { type: "session.waiting", data: { wait: "next-user-message" } },
+        ]);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({ id: "chat_authenticated_steer" })}
+        events={[]}
+        getAccessToken={async () => "app-token"}
+        getCallerToken={async () => "caller-token"}
+        pendingInput={EMPTY_PENDING}
+        respondToAuthenticationChallenge={respondToAuthenticationChallenge}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Start" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await screen.findByText("Start");
+    await screen.findByRole("button", { name: "Stop generating" });
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "Authenticated steer" },
+    });
+    fireEvent.submit(screen.getByLabelText("Message").closest("form")!);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: 'Steer now with "Authenticated steer"',
+      }),
+    );
+
+    await waitFor(() => expect(seenAuthorization).toHaveLength(3));
+    expect(seenAuthorization).toEqual([
+      "Bearer app-token",
+      "Bearer app-token",
+      "Bearer caller-token",
+    ]);
+    expect(respondToAuthenticationChallenge).toHaveBeenCalledOnce();
+    const callerRetry = fetchMock.mock.calls.find(
+      ([, init]) =>
+        init?.method === "POST" &&
+        new Headers(init.headers).get("authorization") === "Bearer caller-token",
+    );
+    expect(JSON.parse(String(callerRetry?.[1]?.body))).toMatchObject({
+      message: "Authenticated steer",
+      turnPolicy: "queue",
+    });
+    await waitFor(() =>
+      expect(screen.queryByRole("list", { name: "Queued messages" })).not.toBeInTheDocument(),
+    );
+  });
+
+  it("sends queued messages in FIFO order after each turn settles", async () => {
+    let firstStreamController!: ReadableStreamDefaultController<Uint8Array>;
+    let streamNumber = 0;
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (url.includes("/pending-input")) return pendingInputResponse();
+        if (init?.method === "POST") {
+          return Response.json(
+            { sessionId: "ses_1" },
+            { headers: { "x-eve-session-id": "ses_1" } },
+          );
+        }
+        streamNumber += 1;
+        if (streamNumber === 1) {
+          const body = new ReadableStream<Uint8Array>({
+            start(controller) {
+              firstStreamController = controller;
+              for (const event of [
+                {
+                  type: "message.received",
+                  data: { message: "First", sequence: 1, turnId: "turn_1" },
+                },
+                { type: "turn.started", data: { sequence: 2, turnId: "turn_1" } },
+              ]) {
+                controller.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
+              }
+            },
+          });
+          return new Response(body, {
+            headers: { "content-type": "application/x-ndjson; charset=utf-8" },
+          });
+        }
+
+        const queuedMessage = streamNumber === 2 ? "Second" : "Third";
+        const turnId = `turn_${streamNumber}`;
+        return ndjson([
+          {
+            type: "message.received",
+            data: { message: queuedMessage, sequence: streamNumber * 10, turnId },
+          },
+          { type: "turn.started", data: { sequence: streamNumber * 10 + 1, turnId } },
+          { type: "turn.completed", data: { sequence: streamNumber * 10 + 2, turnId } },
+          { type: "session.waiting", data: { wait: "next-user-message" } },
+        ]);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({ id: "chat_queue_fifo" })}
+        events={[]}
+        pendingInput={EMPTY_PENDING}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "First" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await screen.findByRole("button", { name: "Stop generating" });
+    for (const value of ["Second", "Third"]) {
+      fireEvent.change(screen.getByLabelText("Message"), { target: { value } });
+      fireEvent.submit(screen.getByLabelText("Message").closest("form")!);
+    }
+    expect(await screen.findByRole("list", { name: "Queued messages" })).toHaveTextContent(
+      "Second",
+    );
+    expect(screen.getByRole("list", { name: "Queued messages" })).toHaveTextContent(
+      "Third",
+    );
+
+    for (const event of [
+      { type: "turn.completed", data: { sequence: 3, turnId: "turn_1" } },
+      { type: "session.waiting", data: { wait: "next-user-message" } },
+    ]) {
+      firstStreamController.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
+    }
+    firstStreamController.close();
+
+    const turnCalls = () =>
+      fetchMock.mock.calls.filter(([, init]) => init?.method === "POST");
+    await waitFor(() => expect(turnCalls()).toHaveLength(3));
+    expect(
+      turnCalls().map((call) => JSON.parse(String(call[1]?.body))),
+    ).toMatchObject([
+      { message: "First", turnPolicy: "queue" },
+      { message: "Second", turnPolicy: "queue" },
+      { message: "Third", turnPolicy: "queue" },
+    ]);
+  });
+
+  it("keeps a failed queued message available for retry", async () => {
+    let firstStreamController!: ReadableStreamDefaultController<Uint8Array>;
+    let postNumber = 0;
+    let streamNumber = 0;
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (url.includes("/pending-input")) return pendingInputResponse();
+        if (init?.method === "POST") {
+          postNumber += 1;
+          if (postNumber === 2) {
+            return Response.json(
+              { error: "Eve is temporarily unavailable" },
+              { status: 502 },
+            );
+          }
+          return Response.json(
+            { sessionId: "ses_1" },
+            { headers: { "x-eve-session-id": "ses_1" } },
+          );
+        }
+        streamNumber += 1;
+        if (streamNumber === 1) {
+          const body = new ReadableStream<Uint8Array>({
+            start(controller) {
+              firstStreamController = controller;
+              for (const event of [
+                {
+                  type: "message.received",
+                  data: { message: "First", sequence: 1, turnId: "turn_1" },
+                },
+                { type: "turn.started", data: { sequence: 2, turnId: "turn_1" } },
+              ]) {
+                controller.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
+              }
+            },
+          });
+          return new Response(body, {
+            headers: { "content-type": "application/x-ndjson; charset=utf-8" },
+          });
+        }
+        return ndjson([
+          {
+            type: "message.received",
+            data: { message: "Retry me", sequence: 10, turnId: "turn_2" },
+          },
+          { type: "turn.started", data: { sequence: 11, turnId: "turn_2" } },
+          { type: "turn.completed", data: { sequence: 12, turnId: "turn_2" } },
+          { type: "session.waiting", data: { wait: "next-user-message" } },
+        ]);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({ id: "chat_queue_retry" })}
+        events={[]}
+        pendingInput={EMPTY_PENDING}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "First" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await screen.findByRole("button", { name: "Stop generating" });
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "Retry me" },
+    });
+    fireEvent.submit(screen.getByLabelText("Message").closest("form")!);
+
+    for (const event of [
+      { type: "turn.completed", data: { sequence: 3, turnId: "turn_1" } },
+      { type: "session.waiting", data: { wait: "next-user-message" } },
+    ]) {
+      firstStreamController.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
+    }
+    firstStreamController.close();
+
+    const retry = await screen.findByRole("button", {
+      name: 'Retry queued message "Retry me"',
+    });
+    expect(screen.getByRole("list", { name: "Queued messages" })).toHaveTextContent(
+      "Retry me",
+    );
+
+    fireEvent.click(retry);
+    const turnCalls = () =>
+      fetchMock.mock.calls.filter(([, init]) => init?.method === "POST");
+    await waitFor(() => expect(turnCalls()).toHaveLength(3));
+    expect(JSON.parse(String(turnCalls()[2]?.[1]?.body))).toMatchObject({
+      message: "Retry me",
+      turnPolicy: "queue",
+    });
+    await waitFor(() =>
+      expect(screen.queryByRole("list", { name: "Queued messages" })).not.toBeInTheDocument(),
+    );
+  });
+
+  it("restores an unsent queued message from this chat's session storage", async () => {
+    window.sessionStorage.setItem(
+      "dawn:queued-turns:chat_queue_restore",
+      JSON.stringify([
+        {
+          id: "queued_saved",
+          message: { files: [], text: "Remember this after remount" },
+          status: "queued",
+        },
+      ]),
+    );
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ sessionId: "ses_1" }), {
+        status: 200,
+        headers: { "content-type": "application/json", "x-eve-session-id": "ses_1" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({ id: "chat_queue_restore" })}
+        events={[]}
+        pendingInput={EMPTY_PENDING}
+      />,
+    );
+
+    const turnCalls = () =>
+      fetchMock.mock.calls.filter(([, init]) => init?.method === "POST");
+    await waitFor(() => expect(turnCalls()).toHaveLength(1));
+    expect(JSON.parse(String(turnCalls()[0]?.[1]?.body))).toMatchObject({
+      message: "Remember this after remount",
       turnPolicy: "queue",
     });
   });

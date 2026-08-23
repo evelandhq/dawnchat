@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { UserContent } from "ai";
 import {
   ClientError,
@@ -15,6 +15,7 @@ import {
   useEveAgent,
 } from "eve/react";
 import { AlertCircleIcon, MessageCircleIcon } from "lucide-react";
+import { nanoid } from "nanoid";
 
 import {
   Conversation,
@@ -34,6 +35,10 @@ import {
   ChatAttachmentButton,
   ChatComposerAttachments,
 } from "@/components/chat-composer-attachments";
+import {
+  ChatSteerQueue,
+  type QueuedTurn,
+} from "@/components/chat-steer-queue";
 import { EveMessageView, type InputRequestBatch } from "@/components/eve-message";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import {
@@ -53,12 +58,16 @@ import {
 /** One outbound turn: a user message, or a reply to pending HITL requests. */
 type TurnPayload = Parameters<PrepareSend>[0];
 
+type UpdateQueuedTurns = (
+  update: (current: QueuedTurn[]) => QueuedTurn[],
+) => void;
+
 /**
- * Eve 0.42–0.44 send messages with `turnPolicy: "steer"` by default: a message
- * that arrives while a turn is running cancels that turn and replaces it,
- * keeping its partial output. This chat offers Stop as the deliberate way to
- * interrupt, so every message asks for the queue policy; a racing second tab
- * then waits for the running turn instead of destroying it.
+ * Eve 0.42–0.44 send messages with `turnPolicy: "steer"` by default. Dawn uses
+ * queue for ordinary turns, including the local FIFO above the composer, and
+ * opts into steer only when the user presses that queued message's Steer
+ * action. A racing second tab therefore still waits instead of destroying the
+ * running turn.
  */
 const TURN_POLICY = "queue" as const;
 
@@ -125,6 +134,21 @@ export function ChatThread({
   const pendingSentRef = useRef(false);
   const challengeInFlightRef = useRef(false);
   const authenticationAttemptedRef = useRef(false);
+  const [queuedTurnState, setQueuedTurnState] = useState<{
+    chatId: string | null;
+    turns: QueuedTurn[];
+  }>({ chatId: null, turns: [] });
+  const queuedTurns =
+    queuedTurnState.chatId === chat.id ? queuedTurnState.turns : [];
+  const updateQueuedTurns = useCallback<UpdateQueuedTurns>(
+    (update) => {
+      setQueuedTurnState((current) => ({
+        chatId: chat.id,
+        turns: update(current.chatId === chat.id ? current.turns : []),
+      }));
+    },
+    [chat.id],
+  );
   const [authentication, setAuthentication] = useState<{
     revision: number;
     mode: "app" | "caller";
@@ -132,6 +156,7 @@ export function ChatThread({
     pendingBatches: ClientPendingBatch[];
     session?: ClientSessionState;
     retryInput?: TurnPayload;
+    retryQueuedTurnId?: string;
   }>({
     revision: 0,
     mode: "app",
@@ -145,6 +170,7 @@ export function ChatThread({
     currentEvents: ChatEvent[],
     currentSession: ClientSessionState | undefined,
     currentPendingBatches: ClientPendingBatch[],
+    queuedTurnId?: string,
   ): Promise<void> => {
     if (
       error.status !== 401 ||
@@ -170,11 +196,24 @@ export function ChatThread({
         pendingBatches: currentPendingBatches,
         session: currentSession,
         retryInput,
+        retryQueuedTurnId: queuedTurnId,
       }));
     } finally {
       challengeInFlightRef.current = false;
     }
   };
+
+  useEffect(() => {
+    setQueuedTurnState({
+      chatId: chat.id,
+      turns: readQueuedTurns(chat.id),
+    });
+  }, [chat.id]);
+
+  useEffect(() => {
+    if (queuedTurnState.chatId !== chat.id) return;
+    writeQueuedTurns(chat.id, queuedTurnState.turns);
+  }, [chat.id, queuedTurnState]);
 
   return (
     <ChatThreadSession
@@ -192,8 +231,11 @@ export function ChatThread({
       getCallerToken={getCallerToken}
       onAuthenticationError={handleAuthenticationError}
       onTurnFinished={onTurnFinished}
+      queuedTurns={queuedTurns}
       readOnly={readOnly}
       retryInput={authentication.retryInput}
+      retryQueuedTurnId={authentication.retryQueuedTurnId}
+      updateQueuedTurns={updateQueuedTurns}
     />
   );
 }
@@ -209,8 +251,11 @@ function ChatThreadSession({
   getCallerToken,
   onAuthenticationError,
   onTurnFinished,
+  queuedTurns,
   readOnly,
   retryInput,
+  retryQueuedTurnId,
+  updateQueuedTurns,
 }: ChatThreadProps & {
   initialPendingBatches: ClientPendingBatch[];
   initialSession?: ClientSessionState;
@@ -221,8 +266,12 @@ function ChatThreadSession({
     events: ChatEvent[],
     session: ClientSessionState | undefined,
     pendingBatches: ClientPendingBatch[],
+    queuedTurnId?: string,
   ): Promise<void>;
+  queuedTurns: QueuedTurn[];
   retryInput?: TurnPayload;
+  retryQueuedTurnId?: string;
+  updateQueuedTurns: UpdateQueuedTurns;
 }): React.ReactElement {
   const agentRef = useRef<ReturnType<typeof useEveAgent> | null>(null);
   const latestInputRef = useRef<TurnPayload | null>(null);
@@ -245,6 +294,40 @@ function ChatThreadSession({
   const [showPendingUserMessage, setShowPendingUserMessage] = useState(
     Boolean(pendingUserMessage) &&
       !events.some((event) => event.type === "message.received"),
+  );
+  const queuedTurnsRef = useRef(queuedTurns);
+  queuedTurnsRef.current = queuedTurns;
+  const activeQueuedTurnIdRef = useRef<string | null>(
+    retryQueuedTurnId ??
+      queuedTurns.find((turn) => turn.status === "sending")?.id ??
+      null,
+  );
+
+  const removeQueuedTurn = useCallback(
+    (id: string): void => {
+      updateQueuedTurns((current) => current.filter((turn) => turn.id !== id));
+      if (activeQueuedTurnIdRef.current === id) {
+        activeQueuedTurnIdRef.current = null;
+      }
+    },
+    [updateQueuedTurns],
+  );
+
+  const failQueuedTurn = useCallback(
+    (id: string, error: unknown): void => {
+      const message = errorMessage(error);
+      updateQueuedTurns((current) =>
+        current.map((turn) =>
+          turn.id === id
+            ? { ...turn, dispatchPolicy: undefined, error: message, status: "failed" }
+            : turn,
+        ),
+      );
+      if (activeQueuedTurnIdRef.current === id) {
+        activeQueuedTurnIdRef.current = null;
+      }
+    },
+    [updateQueuedTurns],
   );
 
   const setDrafts = (drafts: ReadonlyMap<string, InputResponse>): void => {
@@ -363,6 +446,10 @@ function ChatThreadSession({
 
       const current = agentRef.current;
       const retry = latestInputRef.current;
+      const queuedTurnId = activeQueuedTurnIdRef.current ?? undefined;
+      if (queuedTurnId) {
+        failQueuedTurn(queuedTurnId, error);
+      }
       if (
         error instanceof ClientError &&
         current &&
@@ -374,6 +461,7 @@ function ChatThreadSession({
           [...current.events],
           current.session,
           pendingBatchesRef.current,
+          queuedTurnId,
         ).catch((authenticationError: unknown) => {
           setLocalError(errorMessage(authenticationError));
         });
@@ -382,6 +470,13 @@ function ChatThreadSession({
     onEvent(event) {
       if (event.type === "message.received") {
         setShowPendingUserMessage(false);
+        const queuedTurnId = activeQueuedTurnIdRef.current;
+        const queuedTurn = queuedTurnsRef.current.find(
+          (turn) => turn.id === queuedTurnId,
+        );
+        if (queuedTurn && receivedMessageMatchesQueuedTurn(event, queuedTurn)) {
+          removeQueuedTurn(queuedTurn.id);
+        }
       }
       if (event.type === "input.requested") {
         const requests = pendingRequestsFromEvent(event);
@@ -409,6 +504,17 @@ function ChatThreadSession({
       // A cancelled turn settles here without an error surfacing anywhere
       // else, so every finish reconciles.
       void refetchPendingInput();
+      const queuedTurnId = activeQueuedTurnIdRef.current;
+      if (queuedTurnId) {
+        if (snapshot.status === "ready") {
+          removeQueuedTurn(queuedTurnId);
+        } else {
+          failQueuedTurn(
+            queuedTurnId,
+            snapshot.error ?? new Error("Unable to send the queued message."),
+          );
+        }
+      }
       if (snapshot.status === "ready") {
         onTurnFinished?.();
       }
@@ -428,15 +534,80 @@ function ChatThreadSession({
     return ids;
   }, [pendingBatches]);
   const composerDisabled = readOnly || chat.status === "completed";
+  const projectedMessages = queuedTurns.some(
+    (turn) => turn.status === "sending" || turn.status === "failed",
+  )
+    ? agent.data.messages.filter((message) => !message.metadata?.optimistic)
+    : agent.data.messages;
   const visibleMessages =
     showPendingUserMessage && pendingUserMessage
       ? [
           pendingUserContentMessage(chat.id, pendingUserMessage),
-          ...agent.data.messages.filter(
+          ...projectedMessages.filter(
             (message) => !message.metadata?.optimistic,
           ),
         ]
-      : agent.data.messages;
+      : projectedMessages;
+
+  const dispatchQueuedTurn = useCallback(
+    (id: string, requestedPolicy: "queue" | "steer"): void => {
+      if (composerDisabled || activeQueuedTurnIdRef.current) return;
+      const turn = queuedTurnsRef.current.find(
+        (candidate) => candidate.id === id && candidate.status !== "sending",
+      );
+      const currentAgent = agentRef.current;
+      if (!turn || !currentAgent) return;
+
+      // If the active turn settles in the same frame as the click, Steer
+      // degrades to a normal queued turn instead of cancelling nothing.
+      const busy =
+        currentAgent.status === "submitted" || currentAgent.status === "streaming";
+      const dispatchPolicy = requestedPolicy === "steer" && busy ? "steer" : "queue";
+      activeQueuedTurnIdRef.current = id;
+      updateQueuedTurns((current) =>
+        current.map((candidate) =>
+          candidate.id === id
+            ? {
+                ...candidate,
+                dispatchPolicy,
+                error: undefined,
+                status: "sending",
+              }
+            : candidate,
+        ),
+      );
+      setLocalError(null);
+      void currentAgent
+        .send(promptMessageToUserContent(turn.message), {
+          turnPolicy: dispatchPolicy,
+        })
+        .catch((error: unknown) => {
+          if (activeQueuedTurnIdRef.current !== id) return;
+          failQueuedTurn(id, error);
+          setLocalError(errorMessage(error));
+          const current = agentRef.current;
+          const retry = latestInputRef.current;
+          if (error instanceof ClientError && current && retry) {
+            void onAuthenticationError(
+              error,
+              retry,
+              [...current.events],
+              current.session,
+              pendingBatchesRef.current,
+              id,
+            ).catch((authenticationError: unknown) => {
+              setLocalError(errorMessage(authenticationError));
+            });
+          }
+        });
+    },
+    [
+      composerDisabled,
+      failQueuedTurn,
+      onAuthenticationError,
+      updateQueuedTurns,
+    ],
+  );
 
   useEffect(() => {
     if (!retryInput || retryRefetchedRef.current) {
@@ -462,13 +633,32 @@ function ChatThreadSession({
       if (agentRef.current?.status !== "ready") return;
       retrySentRef.current = true;
       setLocalError(null);
+      if (retryQueuedTurnId) {
+        activeQueuedTurnIdRef.current = retryQueuedTurnId;
+        updateQueuedTurns((current) =>
+          current.map((turn) =>
+            turn.id === retryQueuedTurnId
+              ? { ...turn, error: undefined, status: "sending" }
+              : turn,
+          ),
+        );
+      }
       void sendTurn(agent, retryInput).catch((error: unknown) => {
         retrySentRef.current = false;
+        if (retryQueuedTurnId) {
+          failQueuedTurn(retryQueuedTurnId, error);
+        }
         setLocalError(errorMessage(error));
       });
     }, 0);
     return () => clearTimeout(timer);
-  }, [agent, retryInput]);
+  }, [
+    agent,
+    failQueuedTurn,
+    retryInput,
+    retryQueuedTurnId,
+    updateQueuedTurns,
+  ]);
 
   useEffect(() => {
     if (
@@ -492,9 +682,51 @@ function ChatThreadSession({
     return () => clearTimeout(timer);
   }, [agent, pendingUserMessage, readOnly, retryInput, pendingSentRef]);
 
+  useEffect(() => {
+    if (
+      composerDisabled ||
+      retryInput ||
+      (pendingUserMessage && !pendingSentRef.current) ||
+      isBusy ||
+      activeQueuedTurnIdRef.current
+    ) {
+      return;
+    }
+    const next = queuedTurns[0];
+    if (!next || next.status !== "queued") return;
+
+    const timer = setTimeout(() => {
+      const status = agentRef.current?.status;
+      if (status === "submitted" || status === "streaming") return;
+      dispatchQueuedTurn(next.id, "queue");
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [
+    agent.status,
+    composerDisabled,
+    dispatchQueuedTurn,
+    isBusy,
+    pendingSentRef,
+    pendingUserMessage,
+    queuedTurns,
+    retryInput,
+  ]);
+
   const handleSubmit = async (message: PromptInputMessage): Promise<void> => {
     const text = message.text.trim();
-    if ((text.length === 0 && message.files.length === 0) || isBusy || composerDisabled) {
+    if ((text.length === 0 && message.files.length === 0) || composerDisabled) {
+      return;
+    }
+
+    if (isBusy || queuedTurnsRef.current.length > 0) {
+      updateQueuedTurns((current) => [
+        ...current,
+        {
+          id: nanoid(),
+          message: { files: message.files, text },
+          status: "queued",
+        },
+      ]);
       return;
     }
 
@@ -628,6 +860,15 @@ function ChatThreadSession({
             onError={(error) => setLocalError(error.message)}
             onSubmit={handleSubmit}
           >
+            <ChatSteerQueue
+              dispatchBlocked={
+                composerDisabled ||
+                queuedTurns.some((turn) => turn.status === "sending")
+              }
+              onDelete={removeQueuedTurn}
+              onDispatch={(id) => dispatchQueuedTurn(id, "steer")}
+              turns={queuedTurns}
+            />
             <ChatComposerAttachments />
             <PromptInputTextarea
               aria-label="Message"
@@ -640,7 +881,7 @@ function ChatThreadSession({
             />
             <PromptInputFooter>
               <PromptInputTools>
-                <ChatAttachmentButton disabled={composerDisabled || isBusy} />
+                <ChatAttachmentButton disabled={composerDisabled} />
               </PromptInputTools>
               <PromptInputSubmit
                 aria-label={isBusy ? "Stop generating" : "Send message"}
@@ -701,6 +942,128 @@ function pendingUserContentMessage(
     parts,
     role: "user",
   };
+}
+
+function queuedTurnsStorageKey(chatId: string): string {
+  return `dawn:queued-turns:${chatId}`;
+}
+
+function readQueuedTurns(chatId: string): QueuedTurn[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const value = JSON.parse(
+      window.sessionStorage.getItem(queuedTurnsStorageKey(chatId)) ?? "[]",
+    ) as unknown;
+    if (!Array.isArray(value)) return [];
+    return value.flatMap((candidate): QueuedTurn[] => {
+      if (
+        typeof candidate !== "object" ||
+        candidate === null ||
+        !("id" in candidate) ||
+        typeof candidate.id !== "string" ||
+        !("message" in candidate) ||
+        typeof candidate.message !== "object" ||
+        candidate.message === null ||
+        !("text" in candidate.message) ||
+        typeof candidate.message.text !== "string" ||
+        !("files" in candidate.message) ||
+        !Array.isArray(candidate.message.files) ||
+        !candidate.message.files.every(isStoredFilePart)
+      ) {
+        return [];
+      }
+      const failed = "status" in candidate && candidate.status === "failed";
+      return [
+        {
+          id: candidate.id,
+          message: {
+            files: candidate.message.files,
+            text: candidate.message.text,
+          },
+          status: failed ? "failed" : "queued",
+          error:
+            failed && "error" in candidate && typeof candidate.error === "string"
+              ? candidate.error
+              : undefined,
+        },
+      ];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function isStoredFilePart(value: unknown): value is PromptInputMessage["files"][number] {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "type" in value &&
+    value.type === "file" &&
+    "url" in value &&
+    typeof value.url === "string"
+  );
+}
+
+function writeQueuedTurns(chatId: string, turns: QueuedTurn[]): void {
+  if (typeof window === "undefined") return;
+  try {
+    const key = queuedTurnsStorageKey(chatId);
+    if (turns.length === 0) {
+      window.sessionStorage.removeItem(key);
+      return;
+    }
+    window.sessionStorage.setItem(
+      key,
+      JSON.stringify(
+        turns.map(({ dispatchPolicy: _dispatchPolicy, ...turn }) => ({
+          ...turn,
+          status: turn.status === "sending" ? "queued" : turn.status,
+        })),
+      ),
+    );
+  } catch {
+    // A large data-URL attachment may exceed the browser's storage quota. The
+    // in-memory queue remains fully functional for the current page lifetime.
+  }
+}
+
+function receivedMessageMatchesQueuedTurn(
+  event: Extract<MessageStreamEvent, { type: "message.received" }>,
+  turn: QueuedTurn,
+): boolean {
+  const text = turn.message.text.trim();
+  if (turn.message.files.length === 0) {
+    return event.data.message === text;
+  }
+  if (event.data.parts) {
+    const expectedParts = [
+      ...(text ? [{ type: "text" as const, text }] : []),
+      ...turn.message.files.map((file) => ({
+        filename: file.filename,
+        mediaType: file.mediaType,
+        type: "file" as const,
+      })),
+    ];
+    return (
+      event.data.parts.length === expectedParts.length &&
+      event.data.parts.every((part, index) => {
+        const expected = expectedParts[index];
+        if (!expected || part.type !== expected.type) return false;
+        return part.type === "text" && expected.type === "text"
+          ? part.text === expected.text
+          : part.type === "file" && expected.type === "file"
+            ? part.filename === expected.filename &&
+              part.mediaType === expected.mediaType
+            : false;
+      })
+    );
+  }
+  return (
+    (!text || event.data.message.startsWith(text)) &&
+    turn.message.files.every((file) =>
+      event.data.message.includes(file.filename?.trim() || "Attachment"),
+    )
+  );
 }
 
 function composerPlaceholder(status: ChatThreadSummary["status"]): string {

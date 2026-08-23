@@ -104,17 +104,16 @@ export async function proxyCancelEveTurn(
     // clearing the ledger for it would hide the controls while every later
     // message is silently deferred.
     //
-    // The browser stops its stream before it cancels, so the `turn.cancelled`
-    // event may never reach the tap — this is the ledger's only chance to
-    // record the teardown. A caller that named the turn it was stopping gets
-    // the same turn-scoped clear the tap applies; an unattributed cancel keeps
-    // the blanket one, which is what "cancel this chat" has always meant.
-    if (cancelWasAccepted(result)) {
+    // A caller that named the turn it was stopping gets the same turn-scoped
+    // clear the stream tap applies. Eve steering may also race before the
+    // client knows that id and issue an unattributed accepted cancel; clearing
+    // every batch in that case would hide unrelated parks. The attached stream
+    // remains authoritative and its `turn.cancelled` event clears the exact
+    // turn when it arrives.
+    if (turnId && cancelWasAccepted(result)) {
       await resolved.repository
         .updatePendingInput(resolved.chat.id, (current) =>
-          turnId
-            ? current && clearPendingBatchesForTurn(current, turnId)
-            : EMPTY_PENDING_INPUT,
+          current && clearPendingBatchesForTurn(current, turnId),
         )
         .catch((error: unknown) => {
           console.error(`Failed to clear pending input for ${resolved.chat.id}:`, error);
