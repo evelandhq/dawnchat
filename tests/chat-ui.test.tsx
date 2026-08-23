@@ -1,6 +1,6 @@
 import React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ClientSessionState, MessageStreamEvent } from "eve/client";
 
 import { ChatThread, type ChatThreadSummary } from "@/components/chat-thread";
@@ -1941,6 +1941,101 @@ describe("ChatThread with Eve and AI Elements", () => {
       { message: "Second", turnPolicy: "queue" },
       { message: "Third", turnPolicy: "queue" },
     ]);
+  });
+
+  it("starts draining the queue as part of turn settlement", async () => {
+    let firstStreamController!: ReadableStreamDefaultController<Uint8Array>;
+    let streamNumber = 0;
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (url.includes("/pending-input")) return pendingInputResponse();
+        if (init?.method === "POST") {
+          return Response.json(
+            { sessionId: "ses_1" },
+            { headers: { "x-eve-session-id": "ses_1" } },
+          );
+        }
+        streamNumber += 1;
+        if (streamNumber === 1) {
+          const body = new ReadableStream<Uint8Array>({
+            start(controller) {
+              firstStreamController = controller;
+              for (const event of [
+                {
+                  type: "message.received",
+                  data: { message: "First", sequence: 1, turnId: "turn_1" },
+                },
+                { type: "turn.started", data: { sequence: 2, turnId: "turn_1" } },
+              ]) {
+                controller.enqueue(
+                  new TextEncoder().encode(`${JSON.stringify(event)}\n`),
+                );
+              }
+            },
+          });
+          return new Response(body, {
+            headers: { "content-type": "application/x-ndjson; charset=utf-8" },
+          });
+        }
+        return ndjson([
+          {
+            type: "message.received",
+            data: { message: "Second", sequence: 10, turnId: "turn_2" },
+          },
+          { type: "turn.started", data: { sequence: 11, turnId: "turn_2" } },
+          { type: "turn.completed", data: { sequence: 12, turnId: "turn_2" } },
+          { type: "session.waiting", data: { wait: "next-user-message" } },
+        ]);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({ id: "chat_queue_settlement" })}
+        events={[]}
+        pendingInput={EMPTY_PENDING}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "First" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await screen.findByRole("button", { name: "Stop generating" });
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "Second" },
+    });
+    fireEvent.submit(screen.getByLabelText("Message").closest("form")!);
+    await screen.findByRole("list", { name: "Queued messages" });
+
+    const turnCalls = () =>
+      fetchMock.mock.calls.filter(([, init]) => init?.method === "POST");
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        for (const event of [
+          { type: "turn.completed", data: { sequence: 3, turnId: "turn_1" } },
+          { type: "session.waiting", data: { wait: "next-user-message" } },
+        ]) {
+          firstStreamController.enqueue(
+            new TextEncoder().encode(`${JSON.stringify(event)}\n`),
+          );
+        }
+        firstStreamController.close();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(turnCalls()).toHaveLength(2);
+      expect(JSON.parse(String(turnCalls()[1]?.[1]?.body))).toMatchObject({
+        message: "Second",
+        turnPolicy: "queue",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("keeps a failed queued message available for retry", async () => {

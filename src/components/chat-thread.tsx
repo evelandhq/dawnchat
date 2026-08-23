@@ -274,6 +274,9 @@ function ChatThreadSession({
   updateQueuedTurns: UpdateQueuedTurns;
 }): React.ReactElement {
   const agentRef = useRef<ReturnType<typeof useEveAgent> | null>(null);
+  const drainQueuedTurnRef = useRef<
+    ((settledQueuedTurnId?: string) => void) | null
+  >(null);
   const latestInputRef = useRef<TurnPayload | null>(null);
   const retrySentRef = useRef(false);
   const retryRefetchedRef = useRef(false);
@@ -516,6 +519,12 @@ function ChatThreadSession({
         }
       }
       if (snapshot.status === "ready") {
+        // Finishing a turn is the authoritative queue-drain trigger. The
+        // idle-state effect below remains useful for restored queues, but its
+        // deferred timer can be cancelled by an unrelated parent refresh.
+        // Dispatch here before that refresh so a queued message cannot strand
+        // every later composer submission behind it.
+        drainQueuedTurnRef.current?.(queuedTurnId ?? undefined);
         onTurnFinished?.();
       }
     },
@@ -609,6 +618,19 @@ function ChatThreadSession({
     ],
   );
 
+  const drainQueuedTurn = useCallback(
+    (settledQueuedTurnId?: string): void => {
+      if (composerDisabled || activeQueuedTurnIdRef.current) return;
+      const next = queuedTurnsRef.current.find(
+        (turn) => turn.id !== settledQueuedTurnId,
+      );
+      if (!next || next.status !== "queued") return;
+      dispatchQueuedTurn(next.id, "queue");
+    },
+    [composerDisabled, dispatchQueuedTurn],
+  );
+  drainQueuedTurnRef.current = drainQueuedTurn;
+
   useEffect(() => {
     if (!retryInput || retryRefetchedRef.current) {
       return;
@@ -698,13 +720,13 @@ function ChatThreadSession({
     const timer = setTimeout(() => {
       const status = agentRef.current?.status;
       if (status === "submitted" || status === "streaming") return;
-      dispatchQueuedTurn(next.id, "queue");
+      drainQueuedTurn();
     }, 0);
     return () => clearTimeout(timer);
   }, [
     agent.status,
     composerDisabled,
-    dispatchQueuedTurn,
+    drainQueuedTurn,
     isBusy,
     pendingSentRef,
     pendingUserMessage,
