@@ -1271,7 +1271,7 @@ describe("per-chat Eve protocol proxy", () => {
     });
   });
 
-  it("clears parks only when Eve reports the cancel as accepted", async () => {
+  it("preserves parks for an unattributed cancel even when Eve accepts it", async () => {
     const repository = createRepository(testDb.db);
     const routes = await loadProxyRoutes();
     const parked = {
@@ -1319,10 +1319,13 @@ describe("per-chat Eve protocol proxy", () => {
       pendingInput: parked,
     });
 
+    // Eve 0.44 steering can race before its durable turn id is known. An
+    // accepted, unattributed cancel must wait for the stream's turn.cancelled
+    // event to clear the exact turn instead of hiding every unrelated park.
     const runningChat = await setUpChat("accepted");
     expect((await cancel(runningChat.id)).status).toBe(200);
     await expect(repository.getChat(runningChat.id)).resolves.toMatchObject({
-      pendingInput: { batches: [] },
+      pendingInput: parked,
     });
   });
 
