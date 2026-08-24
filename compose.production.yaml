@@ -7,7 +7,8 @@
 # it must stay the same across restarts or those credentials become unreadable.
 # Optional overrides (env or .env next to this file):
 # POSTGRES_PASSWORD, APP_PORT, NPM_REGISTRY (npm mirror used at build time),
-# EVELAND_IDENTITY_URL, and EVELAND_IDENTITY_ISSUER.
+# EVELAND_IDENTITY_URL, EVELAND_IDENTITY_INTERNAL_URL, and
+# EVELAND_IDENTITY_ISSUER.
 
 # Keep the legacy Compose project name so upgrades continue to attach the
 # existing production volume after the Dawn rename.
@@ -50,8 +51,13 @@ services:
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
         NEXT_PUBLIC_EVELAND_IDENTITY_URL: ${EVELAND_IDENTITY_URL:?EVELAND_IDENTITY_URL is required}
         NEXT_PUBLIC_EVELAND_IDENTITY_RETURN_TARGET: ${EVELAND_IDENTITY_RETURN_TARGET:-eve-chats}
+        # Base the server itself uses for the /identity rewrite and for reading
+        # the Agent Catalog. It carries the Dockerfile's name, not this file's,
+        # because EVELAND_IDENTITY_URL above reaches the browser and therefore
+        # has to stay publicly routable. Empty falls back to the issuer.
+        EVELAND_IDENTITY_URL: ${EVELAND_IDENTITY_INTERNAL_URL:-}
     restart: unless-stopped
-    # Lets a build-arg EVELAND_IDENTITY_URL of http://host.docker.internal:<port>
+    # Lets an EVELAND_IDENTITY_INTERNAL_URL of http://host.docker.internal:<port>
     # reach an identity service on the host when the public identity host is
     # not routable from inside the box (hairpin).
     extra_hosts:

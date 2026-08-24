@@ -19,8 +19,8 @@ across restarts: changing it invalidates browser sessions and makes stored
 external-Agent credentials unreadable.
 
 Optional values include `POSTGRES_PASSWORD`, `APP_PORT`,
-`EVELAND_IDENTITY_RETURN_TARGET`, and `NPM_REGISTRY`. The default application
-port is 3010.
+`EVELAND_IDENTITY_RETURN_TARGET`, `EVELAND_IDENTITY_INTERNAL_URL`, and
+`NPM_REGISTRY`. The default application port is 3010.
 
 ## Start or update
 
@@ -33,9 +33,13 @@ only after the migration service succeeds.
 
 Register the exact public Dawn origin under Eveland System > Identity and
 add it to Eveland's allowed Identity origins. The public Identity URL is baked
-into the browser bundle at image-build time. `EVELAND_IDENTITY_URL` may point to
-`host.docker.internal` when the container needs a different server-reachable
-route to the same Identity service.
+into the browser bundle at image-build time, so `EVELAND_IDENTITY_URL` has to
+stay publicly routable. When the box cannot reach that host itself — a load
+balancer that only answers from outside, for instance — set
+`EVELAND_IDENTITY_INTERNAL_URL` to an in-box address such as
+`http://host.docker.internal:4000`. The server then reads Identity and the
+Agent Catalog over that route while the browser keeps the public one; leaving
+it unset falls back to the issuer.
 
 ## Network and cookie requirements
 
