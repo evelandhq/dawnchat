@@ -18,9 +18,11 @@ describe("Catalog Agent connection API", () => {
     setDbClientForTests(testDb.db);
     setCallerTokenVerifierForTests(testVerifier);
     process.env.EVELAND_IDENTITY_ISSUER = "https://identity.example.com";
+    delete process.env.EVELAND_IDENTITY_URL;
   });
 
   afterEach(async () => {
+    delete process.env.EVELAND_IDENTITY_URL;
     vi.unstubAllGlobals();
     setDbClientForTests(null);
     setCallerTokenVerifierForTests(null);
@@ -145,6 +147,38 @@ describe("Catalog Agent connection API", () => {
         evelandProjectId: "project_support",
       },
     });
+  });
+
+  it("reads the Catalog over EVELAND_IDENTITY_URL while still requiring the public issuer", async () => {
+    process.env.EVELAND_IDENTITY_URL = "http://host.docker.internal:4000/";
+    const fetchCatalog = vi.fn<typeof globalThis.fetch>(async () =>
+      Response.json({
+        agents: [
+          {
+            projectId: "project_support",
+            name: "Support",
+            description: null,
+            url: "https://support.agents.example.com",
+            capabilities: { eveChat: true },
+          },
+        ],
+      }),
+    );
+    vi.stubGlobal("fetch", fetchCatalog);
+
+    const response = await connect({
+      issuer: "https://identity.example.com",
+      projectId: "project_support",
+    });
+
+    expect(response.status).toBe(201);
+    expect(fetchCatalog).toHaveBeenCalledWith(
+      "http://host.docker.internal:4000/agent-catalog",
+      expect.objectContaining({ redirect: "error" }),
+    );
+    await expect(createRepository(testDb.db).listAgentConnections()).resolves.toEqual([
+      expect.objectContaining({ identityIssuer: "https://identity.example.com" }),
+    ]);
   });
 
   it("rejects a Catalog issuer that does not match the configured Eveland instance", async () => {

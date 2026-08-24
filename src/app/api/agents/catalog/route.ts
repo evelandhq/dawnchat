@@ -49,10 +49,13 @@ export async function POST(request: Request): Promise<Response> {
         { status: 401 },
       );
     }
-    const catalogResponse = await fetch(`${issuer}/agent-catalog`, {
-      headers: { accept: "application/json" },
-      redirect: "error",
-    });
+    const catalogResponse = await fetch(
+      `${catalogRequestBaseUrl(issuer)}/agent-catalog`,
+      {
+        headers: { accept: "application/json" },
+        redirect: "error",
+      },
+    );
     if (!catalogResponse.ok) {
       return Response.json(
         { error: "Eveland Agent Catalog is unavailable" },
@@ -111,6 +114,15 @@ export async function POST(request: Request): Promise<Response> {
   } catch {
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
+}
+
+// The issuer identifies the Eveland instance and must keep matching the value
+// the browser and its tokens carry. EVELAND_IDENTITY_URL is where this server
+// can actually reach that instance, which differs whenever the deployment box
+// cannot route to its own public identity host (hairpin routing).
+function catalogRequestBaseUrl(issuer: string): string {
+  const requestBaseUrl = process.env.EVELAND_IDENTITY_URL?.trim();
+  return requestBaseUrl ? requestBaseUrl.replace(/\/$/, "") : issuer;
 }
 
 function configuredCatalogIssuer(): string {
