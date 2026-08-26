@@ -1189,7 +1189,7 @@ describe("per-chat Eve protocol proxy", () => {
     });
   });
 
-  it("settles every terminal outcome carried by Eve 0.42 input.resolved", async () => {
+  it("settles every terminal outcome carried by Eve 0.44 input.resolved", async () => {
     const streamEvents = [
       {
         type: "input.requested",
@@ -1247,7 +1247,7 @@ describe("per-chat Eve protocol proxy", () => {
       },
       { type: "session.waiting", data: { wait: "next-user-message" } },
     ] as const;
-    const server = await fakeServer({ generation: "0.42", streamEvents });
+    const server = await fakeServer({ generation: "0.44", streamEvents });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
       name: "Resolving Eve",

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type {
   EveAuthorizationPart,
   EveDynamicToolPart,
@@ -10,7 +10,10 @@ import type {
 } from "eve/react";
 import type { InputResponse } from "eve/client";
 import {
+  ArrowRightIcon,
+  ArrowUpIcon,
   BookOpenIcon,
+  CheckIcon,
   CheckCircleIcon,
   ExternalLinkIcon,
   KeyRoundIcon,
@@ -34,6 +37,7 @@ import {
 import { Message, MessageContent, MessageResponse } from "@/components/ai-elements/message";
 import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-elements/reasoning";
 import {
+  BashToolContent,
   getStatusBadge,
   Tool,
   ToolContent,
@@ -44,7 +48,12 @@ import {
 } from "@/components/ai-elements/tool";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupButton,
+  InputGroupTextarea,
+} from "@/components/ui/input-group";
 import { cn } from "@/lib/utils";
 
 type EveFilePart = Extract<EveMessagePart, { type: "file" }>;
@@ -124,28 +133,57 @@ function EveMessagePartView({
       return <FilePart part={part} />;
     case "authorization":
       return <AuthorizationPart part={part} />;
-    case "dynamic-tool": {
-      const state = displayState(part, inputRequests);
-      if (isLoadSkillPart(part)) {
-        return <LoadSkillPart inputRequests={inputRequests} part={part} state={state} />;
-      }
-      return (
-        <Tool defaultOpen={state === "approval-requested"}>
-          <ToolHeader
-            state={state}
-            title={part.toolName}
-            toolName={part.toolName}
-            type="dynamic-tool"
-          />
-          <ToolContent>
-            <ToolInput input={part.input} />
-            <InputRequestPart inputRequests={inputRequests} part={part} state={state} />
-            <ToolOutput errorText={part.errorText} output={part.output} />
-          </ToolContent>
-        </Tool>
-      );
-    }
+    case "dynamic-tool":
+      return <DynamicToolPartView inputRequests={inputRequests} part={part} />;
   }
+}
+
+function DynamicToolPartView({
+  inputRequests,
+  part,
+}: {
+  inputRequests: InputRequestBatch;
+  part: EveDynamicToolPart;
+}): React.ReactElement {
+  const state = displayState(part, inputRequests);
+  const [open, setOpen] = useState(state === "approval-requested");
+  const isQuestion = part.toolMetadata?.eve?.inputRequest?.kind === "question";
+
+  useEffect(() => {
+    if (state === "approval-requested") {
+      setOpen(true);
+    }
+  }, [state]);
+
+  if (isLoadSkillPart(part)) {
+    return <LoadSkillPart inputRequests={inputRequests} part={part} state={state} />;
+  }
+
+  return (
+    <Tool onOpenChange={setOpen} open={open}>
+      <ToolHeader
+        state={state}
+        title={part.toolName}
+        toolName={part.toolName}
+        type="dynamic-tool"
+      />
+      <ToolContent>
+        {part.toolName === "bash" ? (
+          <BashToolContent
+            errorText={part.errorText}
+            input={part.input}
+            output={part.output}
+          />
+        ) : isQuestion ? null : (
+          <ToolInput input={part.input} />
+        )}
+        <InputRequestPart inputRequests={inputRequests} part={part} state={state} />
+        {part.toolName === "bash" || isQuestion ? null : (
+          <ToolOutput errorText={part.errorText} output={part.output} />
+        )}
+      </ToolContent>
+    </Tool>
+  );
 }
 
 /**
@@ -174,17 +212,17 @@ function LoadSkillPart({
   const skill = skillNameFromInput(part.input);
 
   return (
-    <div className="not-prose mb-4 w-full rounded-md border">
-      <div className="flex items-center gap-2 p-3">
+    <div className="not-prose w-full">
+      <div className="flex items-center gap-2 py-0.5 text-muted-foreground">
         <BookOpenIcon className="size-4 text-muted-foreground" />
-        <span className="font-medium text-sm">
+        <span className="text-sm">
           {part.state === "output-available" ? "Loaded" : "Load"} skill
           {skill ? ` · ${skill}` : ""}
         </span>
         {getStatusBadge(state)}
       </div>
       {part.toolMetadata?.eve?.inputRequest ? (
-        <div className="px-4 pb-4">
+        <div className="pt-2">
           <InputRequestPart inputRequests={inputRequests} part={part} state={state} />
         </div>
       ) : null}
@@ -359,13 +397,14 @@ function InputRequestControls({
   return (
     <div className="flex flex-col gap-3 pt-2">
       {inputRequest.options?.length ? (
-        <ConfirmationActions className="flex-wrap justify-start self-start">
-          {inputRequest.options.map((option) => (
+        <ConfirmationActions className="w-full flex-col items-stretch self-stretch">
+          {inputRequest.options.map((option, index) => (
             <ConfirmationAction
+              aria-label={option.label}
               aria-pressed={draft?.optionId === option.id}
               className={cn(
-                "h-auto min-h-8 whitespace-normal px-3 py-1.5 text-left text-sm",
-                draft?.optionId === option.id && "ring-2 ring-ring",
+                "h-auto min-h-11 w-full justify-start gap-3 whitespace-normal px-3 py-2.5 text-left",
+                draft?.optionId === option.id && "ring-2 ring-ring ring-offset-1",
               )}
               disabled={!canRespond}
               key={option.id}
@@ -383,31 +422,62 @@ function InputRequestControls({
                     : "outline"
               }
             >
-              {option.label}
+              <span className="w-5 shrink-0 text-center font-mono text-muted-foreground text-xs tabular-nums">
+                {index + 1}
+              </span>
+              <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                <span className="font-medium text-sm">{option.label}</span>
+                {option.description ? (
+                  <span className="text-muted-foreground text-xs leading-relaxed">
+                    {option.description}
+                  </span>
+                ) : null}
+              </span>
+              {draft?.optionId === option.id ? (
+                <CheckIcon className="size-4 shrink-0" data-icon="inline-end" />
+              ) : (
+                <ArrowRightIcon
+                  className="size-4 shrink-0 text-muted-foreground"
+                  data-icon="inline-end"
+                />
+              )}
             </ConfirmationAction>
           ))}
         </ConfirmationActions>
       ) : null}
       {acceptsText ? (
-        <div className="flex items-center gap-2">
-          <Input
+        <InputGroup>
+          <InputGroupTextarea
             aria-label="Response"
+            className="max-h-40 min-h-20"
             disabled={!canRespond}
             onBlur={commitTextOnBlur}
             onChange={(event) => setText(event.currentTarget.value)}
             onKeyDown={(event) => {
-              if (event.key === "Enter") {
+              if (
+                event.key === "Enter" &&
+                !event.shiftKey &&
+                !event.nativeEvent.isComposing
+              ) {
                 event.preventDefault();
                 submitText();
               }
             }}
-            placeholder="Type a response"
+            placeholder="Type a response…"
             value={text}
           />
-          <Button disabled={!canRespond || text.trim().length === 0} onClick={submitText} size="sm">
-            Continue
-          </Button>
-        </div>
+          <InputGroupAddon align="block-end" className="justify-end pt-0">
+            <InputGroupButton
+              aria-label="Submit response"
+              disabled={!canRespond || text.trim().length === 0}
+              onClick={submitText}
+              size="icon-sm"
+              variant="default"
+            >
+              <ArrowUpIcon data-icon="inline-end" />
+            </InputGroupButton>
+          </InputGroupAddon>
+        </InputGroup>
       ) : null}
     </div>
   );

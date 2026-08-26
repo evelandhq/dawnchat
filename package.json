@@ -34,7 +34,7 @@
     "cmdk": "^1.1.1",
     "drizzle-orm": "latest",
     "embla-carousel-react": "^8.6.0",
-    "eve": "0.44.3",
+    "eve": "0.45.0",
     "lucide-react": "latest",
     "media-chrome": "^4.19.2",
     "motion": "^13.1.1",

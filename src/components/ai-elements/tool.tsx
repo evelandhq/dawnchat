@@ -1,6 +1,5 @@
 "use client";
 
-import { Badge } from "@/components/ui/badge";
 import {
   Collapsible,
   CollapsibleContent,
@@ -8,27 +7,27 @@ import {
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 import type { DynamicToolUIPart, ToolUIPart } from "ai";
-import {
-  CheckCircleIcon,
-  ChevronDownIcon,
-  CircleIcon,
-  ClockIcon,
-  MinusCircleIcon,
-  WrenchIcon,
-  XCircleIcon,
-} from "lucide-react";
+import { ChevronRightIcon, TerminalIcon, WrenchIcon } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
 import { isValidElement } from "react";
 
 import { CodeBlock } from "./code-block";
+import {
+  Terminal,
+  TerminalActions,
+  TerminalContent,
+  TerminalCopyButton,
+  TerminalHeader,
+  TerminalTitle,
+} from "./terminal";
+
+const compactCodeBlockClassName =
+  "rounded-none border-0 bg-transparent [&_pre]:!bg-transparent [&_pre]:px-3 [&_pre]:pt-2 [&_pre]:pb-3 [&_pre]:text-xs [&_code]:text-xs";
 
 export type ToolProps = ComponentProps<typeof Collapsible>;
 
 export const Tool = ({ className, ...props }: ToolProps) => (
-  <Collapsible
-    className={cn("group not-prose mb-4 w-full rounded-md border", className)}
-    {...props}
-  />
+  <Collapsible className={cn("group not-prose w-full", className)} {...props} />
 );
 
 export type ToolPart = ToolUIPart | DynamicToolUIPart;
@@ -67,23 +66,21 @@ const statusLabels: Record<ToolStatus, string> = {
   "output-error": "Error",
 };
 
-const statusIcons: Record<ToolStatus, ReactNode> = {
-  "approval-requested": <ClockIcon className="size-4 text-yellow-600" />,
-  "approval-responded": <CheckCircleIcon className="size-4 text-blue-600" />,
-  "input-available": <ClockIcon className="size-4 animate-pulse" />,
-  "input-dismissed": <MinusCircleIcon className="size-4 text-muted-foreground" />,
-  "input-streaming": <CircleIcon className="size-4" />,
-  "output-available": <CheckCircleIcon className="size-4 text-green-600" />,
-  "output-denied": <XCircleIcon className="size-4 text-orange-600" />,
-  "output-error": <XCircleIcon className="size-4 text-red-600" />,
-};
+export const getStatusIndicator = (status: ToolStatus): ReactNode =>
+  status === "output-available" ? null : (
+    <span
+      className={cn(
+        "text-xs",
+        (status === "output-error" || status === "output-denied") &&
+          "text-destructive",
+      )}
+    >
+      {statusLabels[status]}
+    </span>
+  );
 
-export const getStatusBadge = (status: ToolStatus) => (
-  <Badge className="gap-1.5 rounded-full text-xs" variant="secondary">
-    {statusIcons[status]}
-    {statusLabels[status]}
-  </Badge>
-);
+/** Kept for other AI Elements that consume the shared tool lifecycle UI. */
+export const getStatusBadge = getStatusIndicator;
 
 export const ToolHeader = ({
   className,
@@ -95,21 +92,21 @@ export const ToolHeader = ({
 }: ToolHeaderProps) => {
   const derivedName =
     type === "dynamic-tool" ? toolName : type.split("-").slice(1).join("-");
+  const displayName = title ?? derivedName;
+  const Icon = displayName.toLowerCase() === "bash" ? TerminalIcon : WrenchIcon;
 
   return (
     <CollapsibleTrigger
       className={cn(
-        "flex w-full items-center justify-between gap-4 p-3",
-        className
+        "flex w-full items-center gap-2 rounded-sm py-0.5 text-left text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50",
+        className,
       )}
       {...props}
     >
-      <div className="flex items-center gap-2">
-        <WrenchIcon className="size-4 text-muted-foreground" />
-        <span className="font-medium text-sm">{title ?? derivedName}</span>
-        {getStatusBadge(state)}
-      </div>
-      <ChevronDownIcon className="size-4 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
+      <Icon className="size-4 shrink-0" />
+      <span className="text-sm">{displayName}</span>
+      {getStatusIndicator(state)}
+      <ChevronRightIcon className="size-3.5 shrink-0 transition-transform group-data-[state=open]:rotate-90" />
     </CollapsibleTrigger>
   );
 };
@@ -119,25 +116,109 @@ export type ToolContentProps = ComponentProps<typeof CollapsibleContent>;
 export const ToolContent = ({ className, ...props }: ToolContentProps) => (
   <CollapsibleContent
     className={cn(
-      "data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-2 data-[state=open]:slide-in-from-top-2 space-y-4 p-4 text-popover-foreground outline-none data-[state=closed]:animate-out data-[state=open]:animate-in",
-      className
+      "flex flex-col gap-3 py-2 text-popover-foreground outline-none data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-2 data-[state=open]:animate-in data-[state=open]:slide-in-from-top-2",
+      className,
     )}
     {...props}
   />
 );
+
+export type BashToolContentProps = ComponentProps<"div"> & {
+  input: ToolPart["input"];
+  output: ToolPart["output"];
+  errorText: ToolPart["errorText"];
+};
+
+export const BashToolContent = ({
+  className,
+  input,
+  output,
+  errorText,
+  ...props
+}: BashToolContentProps) => {
+  const command = getRecordValue(input, "command");
+  const stdout =
+    getRecordValue(output, "stdout") ??
+    (typeof output === "string" ? output : "");
+  const stderr = getRecordValue(output, "stderr") ?? errorText ?? "";
+  const exitCode = getRecordValue(output, "exitCode");
+  const hasResult = Boolean(
+    stdout || stderr || (typeof exitCode === "number" && exitCode !== 0),
+  );
+  const transcript = [
+    `$ ${command ?? "…"}`,
+    stdout ? String(stdout).trimEnd() : undefined,
+    stderr ? String(stderr).trimEnd() : undefined,
+    typeof exitCode === "number" && exitCode !== 0
+      ? `Exited with code ${exitCode}`
+      : undefined,
+  ]
+    .filter((line): line is string => line !== undefined)
+    .join("\n");
+
+  return (
+    <div className={className} {...props}>
+      <Terminal className="rounded-md" output={transcript}>
+        <TerminalHeader className="px-3 py-1.5">
+          <TerminalTitle>Shell</TerminalTitle>
+          <TerminalActions>
+            <TerminalCopyButton aria-label="Copy terminal transcript" />
+          </TerminalActions>
+        </TerminalHeader>
+        <TerminalContent className="max-h-80 p-3 text-xs leading-relaxed">
+          <pre className="flex flex-col whitespace-pre-wrap break-words">
+            <span>{`$ ${command ?? "…"}`}</span>
+            {hasResult ? (
+              <>
+                {stdout ? <span>{String(stdout).trimEnd()}</span> : null}
+                {stderr ? (
+                  <span className="text-destructive">{String(stderr).trimEnd()}</span>
+                ) : null}
+                {typeof exitCode === "number" && exitCode !== 0 ? (
+                  <span className="text-muted-foreground">
+                    Exited with code {exitCode}
+                  </span>
+                ) : null}
+              </>
+            ) : null}
+          </pre>
+        </TerminalContent>
+      </Terminal>
+    </div>
+  );
+};
+
+const getRecordValue = (
+  value: unknown,
+  key: string,
+): string | number | undefined => {
+  if (typeof value !== "object" || value === null || !(key in value)) {
+    return undefined;
+  }
+
+  const property = value[key as keyof typeof value];
+  return typeof property === "string" || typeof property === "number"
+    ? property
+    : undefined;
+};
 
 export type ToolInputProps = ComponentProps<"div"> & {
   input: ToolPart["input"];
 };
 
 export const ToolInput = ({ className, input, ...props }: ToolInputProps) => (
-  <div className={cn("space-y-2 overflow-hidden", className)} {...props}>
-    <h4 className="font-medium text-muted-foreground text-xs uppercase tracking-wide">
+  <div
+    className={cn("overflow-hidden rounded-md bg-muted/50", className)}
+    {...props}
+  >
+    <span className="block px-3 pt-3 font-sans text-[10px] text-muted-foreground uppercase tracking-wide">
       Parameters
-    </h4>
-    <div className="rounded-md bg-muted/50">
-      <CodeBlock code={JSON.stringify(input, null, 2)} language="json" />
-    </div>
+    </span>
+    <CodeBlock
+      className={compactCodeBlockClassName}
+      code={JSON.stringify(input, null, 2)}
+      language="json"
+    />
   </div>
 );
 
@@ -160,30 +241,46 @@ export const ToolOutput = ({
 
   if (typeof output === "object" && !isValidElement(output)) {
     Output = (
-      <CodeBlock code={JSON.stringify(output, null, 2)} language="json" />
+      <CodeBlock
+        className={compactCodeBlockClassName}
+        code={JSON.stringify(output, null, 2)}
+        language="json"
+      />
     );
   } else if (typeof output === "string") {
-    Output = <CodeBlock code={output} language="json" />;
+    Output = (
+      <CodeBlock
+        className={compactCodeBlockClassName}
+        code={output}
+        language="json"
+      />
+    );
   } else if (output !== undefined) {
-    Output = <CodeBlock code={JSON.stringify(output)} language="json" />;
+    Output = (
+      <CodeBlock
+        className={compactCodeBlockClassName}
+        code={JSON.stringify(output)}
+        language="json"
+      />
+    );
   }
 
   return (
-    <div className={cn("space-y-2", className)} {...props}>
-      <h4 className="font-medium text-muted-foreground text-xs uppercase tracking-wide">
+    <div
+      className={cn(
+        "overflow-x-auto rounded-md text-xs [&_table]:w-full",
+        errorText
+          ? "bg-destructive/10 text-destructive"
+          : "bg-muted/50 text-foreground",
+        className,
+      )}
+      {...props}
+    >
+      <span className="block px-3 pt-3 font-sans text-[10px] text-muted-foreground uppercase tracking-wide">
         {errorText ? "Error" : "Result"}
-      </h4>
-      <div
-        className={cn(
-          "overflow-x-auto rounded-md text-xs [&_table]:w-full",
-          errorText
-            ? "bg-destructive/10 text-destructive"
-            : "bg-muted/50 text-foreground"
-        )}
-      >
-        {errorText && <div>{errorText}</div>}
-        {Output}
-      </div>
+      </span>
+      {errorText ? <div className="px-3 pt-2 pb-3">{errorText}</div> : null}
+      {Output}
     </div>
   );
 };

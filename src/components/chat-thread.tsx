@@ -30,6 +30,7 @@ import {
   PromptInputSubmit,
   PromptInputTextarea,
   PromptInputTools,
+  usePromptInputAttachments,
 } from "@/components/ai-elements/prompt-input";
 import {
   ChatAttachmentButton,
@@ -67,7 +68,7 @@ type UpdateQueuedTurns = (
 ) => void;
 
 /**
- * Eve 0.42–0.44 send messages with `turnPolicy: "steer"` by default. Dawn uses
+ * Eve 0.44–0.45 send messages with `turnPolicy: "steer"` by default. Dawn uses
  * queue for ordinary turns, including the local FIFO above the composer, and
  * opts into steer only when the user presses that queued message's Steer
  * action. A racing second tab therefore still waits instead of destroying the
@@ -285,6 +286,7 @@ function ChatThreadSession({
   const retrySentRef = useRef(false);
   const retryRefetchedRef = useRef(false);
   const [localError, setLocalError] = useState<string | null>(null);
+  const [composerText, setComposerText] = useState("");
   // Refs mirror the states below so callbacks and same-batch dispatches read
   // the latest value instead of a stale render's.
   const draftResponsesRef = useRef<ReadonlyMap<string, InputResponse>>(new Map());
@@ -534,6 +536,7 @@ function ChatThreadSession({
     },
   });
   agentRef.current = agent;
+  const isResuming = agent.status === "resuming";
   const isBusy = agent.status === "submitted" || agent.status === "streaming";
   const pendingRequestIds = useMemo(() => {
     const ids = new Set<string>();
@@ -546,7 +549,7 @@ function ChatThreadSession({
     }
     return ids;
   }, [pendingBatches]);
-  const composerDisabled = readOnly || chat.status === "completed";
+  const composerDisabled = readOnly || chat.status === "completed" || isResuming;
   const projectedMessages = queuedTurns.some(
     (turn) => turn.status === "sending" || turn.status === "failed",
   )
@@ -570,6 +573,7 @@ function ChatThreadSession({
       );
       const currentAgent = agentRef.current;
       if (!turn || !currentAgent) return;
+      if (currentAgent.status === "resuming") return;
 
       // If the active turn settles in the same frame as the click, Steer
       // degrades to a normal queued turn instead of cancelling nothing.
@@ -723,7 +727,13 @@ function ChatThreadSession({
 
     const timer = setTimeout(() => {
       const status = agentRef.current?.status;
-      if (status === "submitted" || status === "streaming") return;
+      if (
+        status === "resuming" ||
+        status === "submitted" ||
+        status === "streaming"
+      ) {
+        return;
+      }
       drainQueuedTurn();
     }, 0);
     return () => clearTimeout(timer);
@@ -753,15 +763,18 @@ function ChatThreadSession({
           status: "queued",
         },
       ]);
+      setComposerText("");
       return;
     }
 
     setLocalError(null);
+    setComposerText("");
     try {
       await agent.send(promptMessageToUserContent(message), {
         turnPolicy: TURN_POLICY,
       });
     } catch (error) {
+      setComposerText((current) => current || message.text);
       setLocalError(errorMessage(error));
       throw error;
     }
@@ -816,7 +829,7 @@ function ChatThreadSession({
   };
 
   const inputRequests: InputRequestBatch = {
-    canRespond: !readOnly && !isBusy && chat.status !== "completed",
+    canRespond: !composerDisabled && !isBusy,
     drafts: draftResponses,
     pending: pendingRequestIds,
     respond: handleInputResponse,
@@ -889,6 +902,7 @@ function ChatThreadSession({
             </div>
           ) : null}
           <PromptInput
+            className="rounded-xl bg-background/90 shadow-sm backdrop-blur-sm"
             maxFileSize={CHAT_ATTACHMENT_MAX_FILE_SIZE}
             maxFiles={CHAT_ATTACHMENT_MAX_FILES}
             multiple
@@ -908,27 +922,71 @@ function ChatThreadSession({
             <PromptInputTextarea
               aria-label="Message"
               disabled={composerDisabled}
+              onChange={(event) => setComposerText(event.currentTarget.value)}
               placeholder={
                 readOnly
                   ? "This Agent is currently unavailable"
                   : composerPlaceholder(chat.status)
               }
+              value={composerText}
             />
             <PromptInputFooter>
               <PromptInputTools>
                 <ChatAttachmentButton disabled={composerDisabled} />
               </PromptInputTools>
-              <PromptInputSubmit
-                aria-label={isBusy ? "Stop generating" : "Send message"}
-                disabled={composerDisabled && !isBusy}
+              <ChatComposerAction
+                agentStatus={agent.status}
+                composerDisabled={composerDisabled}
+                composerText={composerText}
+                isBusy={isBusy}
                 onStop={handleStop}
-                status={agent.status}
               />
             </PromptInputFooter>
           </PromptInput>
         </div>
       </section>
     </TooltipProvider>
+  );
+}
+
+function ChatComposerAction({
+  agentStatus,
+  composerDisabled,
+  composerText,
+  isBusy,
+  onStop,
+}: {
+  agentStatus: ReturnType<typeof useEveAgent>["status"];
+  composerDisabled: boolean;
+  composerText: string;
+  isBusy: boolean;
+  onStop: () => void;
+}): React.ReactElement {
+  const attachments = usePromptInputAttachments();
+  const hasDraft = composerText.trim().length > 0 || attachments.files.length > 0;
+  const action = isBusy ? (hasDraft ? "queue" : "stop") : "send";
+  const status =
+    action === "stop"
+      ? agentStatus === "streaming"
+        ? "streaming"
+        : "submitted"
+      : agentStatus === "error"
+        ? "error"
+        : "ready";
+
+  return (
+    <PromptInputSubmit
+      aria-label={
+        action === "stop"
+          ? "Stop generating"
+          : action === "queue"
+            ? "Queue message"
+            : "Send message"
+      }
+      disabled={composerDisabled && action !== "stop"}
+      onStop={onStop}
+      status={status}
+    />
   );
 }
 

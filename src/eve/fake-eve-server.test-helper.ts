@@ -10,7 +10,8 @@ export interface CapturedEveRequest {
 }
 
 /** Eve versions currently hosted by Eveland and supported by Dawn. */
-export type FakeEveGeneration = "0.42" | "0.43" | "0.44";
+export const SUPPORTED_EVE_GENERATIONS = ["0.44", "0.45"] as const;
+export type FakeEveGeneration = (typeof SUPPORTED_EVE_GENERATIONS)[number];
 
 export interface FakeEveServerOptions {
   readonly authenticationChallenge?: {
@@ -74,6 +75,11 @@ function writeNdjson(
 }
 
 export async function startFakeEveServer(options: FakeEveServerOptions = {}): Promise<FakeEveServer> {
+  const generation = options.generation ?? "0.45";
+  if (!SUPPORTED_EVE_GENERATIONS.includes(generation)) {
+    throw new Error(`Unsupported fake Eve generation: ${generation}`);
+  }
+
   const requests: CapturedEveRequest[] = [];
   let nextSessionId = 1;
 
@@ -95,7 +101,7 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
       }
 
       if (request.method === "GET" && url.pathname === "/eve/v1/health") {
-        writeJson(response, 200, { ok: true, status: "ready", workflowId: "fake-workflow", name: "Fake Eve Agent" });
+        writeJson(response, 200, { ok: true, status: "ready", workflowId: "fake-workflow" });
         return;
       }
 
