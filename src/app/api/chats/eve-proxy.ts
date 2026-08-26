@@ -10,6 +10,11 @@ import {
 import { getDbClient } from "@/db/provider";
 import { createEveClientForConnection } from "@/eve/client";
 import {
+  formatEveErrorMessage,
+  readEveErrorId,
+  sessionFailureErrorId,
+} from "@/eve/error-observability";
+import {
   clearPendingBatchesForTurn,
   EMPTY_PENDING_INPUT,
   inputRespondedEvent,
@@ -501,6 +506,14 @@ function createPersistedEventStream(input: {
       pendingInput: pendingInputTransition(browserEvent),
       sessionState: { state: currentSession, ...(status ? { status } : {}) },
     });
+    const errorId = sessionFailureErrorId(browserEvent);
+    if (errorId) {
+      console.error("Eve agent session failed", {
+        chatId: input.chat.id,
+        sessionId: input.sessionId,
+        errorId,
+      });
+    }
     return { event: browserEvent, terminal: status !== undefined };
   };
 
@@ -676,10 +689,8 @@ function prepareEveError(body: string): { body: string; errorId?: string } {
     const value = JSON.parse(body) as unknown;
     if (!value || typeof value !== "object" || Array.isArray(value)) return { body };
     const errorBody = value as Record<string, unknown>;
-    const candidateErrorId =
-      typeof errorBody.errorId === "string" ? errorBody.errorId.trim() : "";
-    if (!/^[A-Za-z0-9._:-]{1,128}$/.test(candidateErrorId)) return { body };
-    const errorId = candidateErrorId;
+    const errorId = readEveErrorId(errorBody.errorId);
+    if (!errorId) return { body };
     const message =
       typeof errorBody.error === "string" && errorBody.error.trim()
         ? errorBody.error.trim()
@@ -687,9 +698,7 @@ function prepareEveError(body: string): { body: string; errorId?: string } {
     return {
       body: JSON.stringify({
         ...errorBody,
-        error: message.includes(`Error ID: ${errorId}`)
-          ? message
-          : `${message} Error ID: ${errorId}`,
+        error: formatEveErrorMessage(message, errorId),
       }),
       errorId,
     };

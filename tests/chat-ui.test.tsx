@@ -1372,6 +1372,48 @@ describe("ChatThread with Eve and AI Elements", () => {
     );
   });
 
+  it("shows the error id when an accepted session fails in the stream", async () => {
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        if (isPendingInputCall([input])) return pendingInputResponse();
+        if (init?.method === "POST") {
+          return Response.json(
+            { sessionId: "ses_stream_failed" },
+            {
+              status: 202,
+              headers: { "x-eve-session-id": "ses_stream_failed" },
+            },
+          );
+        }
+        return ndjson([
+          {
+            type: "session.failed",
+            data: {
+              code: "MODEL_CALL_FAILED",
+              details: { errorId: "err_streamed_session_failure" },
+              message: "Forbidden",
+              sessionId: "ses_stream_failed",
+            },
+          },
+        ]);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({ id: "chat_stream_failed", sessionState: null })}
+        events={[]}
+        pendingInput={EMPTY_PENDING}
+        pendingUserMessage="Start analysis"
+      />,
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Forbidden Error ID: err_streamed_session_failure",
+    );
+  });
+
   it("answers each independently parked batch on its own", async () => {
     const events = stampEvents([
       { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
