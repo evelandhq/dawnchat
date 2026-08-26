@@ -1338,6 +1338,40 @@ describe("ChatThread with Eve and AI Elements", () => {
     expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
   });
 
+  it("shows the upstream Eve error id when session creation fails", async () => {
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        if (isPendingInputCall([input])) return pendingInputResponse();
+        if (init?.method === "POST") {
+          return Response.json(
+            {
+              error:
+                "Failed to create the session. Error ID: err_session_create_123",
+              errorId: "err_session_create_123",
+              ok: false,
+            },
+            { status: 500 },
+          );
+        }
+        return ndjson([]);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({ id: "chat_failed_create", sessionState: null })}
+        events={[]}
+        pendingInput={EMPTY_PENDING}
+        pendingUserMessage="Start analysis"
+      />,
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Failed to create the session. Error ID: err_session_create_123",
+    );
+  });
+
   it("answers each independently parked batch on its own", async () => {
     const events = stampEvents([
       { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
