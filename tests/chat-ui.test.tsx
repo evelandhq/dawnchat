@@ -300,7 +300,11 @@ describe("ChatThread with Eve and AI Elements", () => {
               display: "select",
               options: [
                 { id: "subscription", label: "Subscribers" },
-                { id: "gmv_payors", label: "Payors" },
+                {
+                  id: "gmv_payors",
+                  label: "Payors",
+                  description: "Count unique accounts that completed a payment.",
+                },
               ],
               action: {
                 kind: "tool-call",
@@ -363,10 +367,11 @@ describe("ChatThread with Eve and AI Elements", () => {
       />,
     );
 
-    // Option rows wrap instead of overflowing the card when labels are wide.
+    expect(screen.queryByText("Parameters")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Payors" })).toHaveClass("w-full");
     expect(
-      screen.getByRole("button", { name: "Same period last month" }).parentElement,
-    ).toHaveClass("flex-wrap");
+      screen.getByText("Count unique accounts that completed a payment."),
+    ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Same period last month" }));
     expect(await screen.findByText(/Selected: Same period last month/)).toBeInTheDocument();
@@ -768,8 +773,12 @@ describe("ChatThread with Eve and AI Elements", () => {
       />,
     );
 
-    fireEvent.change(screen.getByLabelText("Response"), { target: { value: "Proceed carefully" } });
-    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    const response = screen.getByLabelText("Response");
+    expect(response.tagName).toBe("TEXTAREA");
+    fireEvent.change(response, { target: { value: "Proceed carefully" } });
+    fireEvent.keyDown(response, { key: "Enter", shiftKey: true });
+    expect(fetchMock).not.toHaveBeenCalled();
+    fireEvent.keyDown(response, { key: "Enter" });
 
     const turnCalls = () =>
       fetchMock.mock.calls.filter((call) => !isPendingInputCall(call));
@@ -1714,7 +1723,8 @@ describe("ChatThread with Eve and AI Elements", () => {
     fireEvent.change(screen.getByLabelText("Message"), {
       target: { value: "Use the newer requirements" },
     });
-    fireEvent.submit(screen.getByLabelText("Message").closest("form")!);
+    expect(screen.queryByRole("button", { name: "Stop generating" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Queue message" }));
 
     expect(await screen.findByRole("list", { name: "Queued messages" })).toHaveTextContent(
       "Use the newer requirements",

@@ -4,7 +4,11 @@ import { once } from "node:events";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { checkEveAgent, createEveClientForConnection } from "@/eve/client";
-import { startFakeEveServer, type FakeEveServer } from "@/eve/fake-eve-server.test-helper";
+import {
+  startFakeEveServer,
+  SUPPORTED_EVE_GENERATIONS,
+  type FakeEveServer,
+} from "@/eve/fake-eve-server.test-helper";
 
 function connection(
   baseUrl: string,
@@ -80,7 +84,7 @@ describe("Eve client connector", () => {
     ]);
   });
 
-  it.each(["0.42", "0.43", "0.44"] as const)(
+  it.each(SUPPORTED_EVE_GENERATIONS)(
     "models Eve %s with stream version 23",
     async (generation) => {
       const server = await fakeServer({ generation });
@@ -91,6 +95,20 @@ describe("Eve client connector", () => {
       await response.text();
     },
   );
+
+  it("rejects fake Eve generations outside the supported window", async () => {
+    let server: FakeEveServer | undefined;
+    let error: unknown;
+
+    try {
+      server = await startFakeEveServer({ generation: "0.42" as never });
+    } catch (caught) {
+      error = caught;
+    }
+
+    await server?.close();
+    expect(error).toEqual(new Error("Unsupported fake Eve generation: 0.42"));
+  });
 
   it("reports unreachable health for an unreachable agent", async () => {
     const server = await fakeServer();

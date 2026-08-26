@@ -1,6 +1,6 @@
 # Eve protocol integration
 
-Dawn supports Eve Agents running versions 0.42.x through 0.44.x. This
+Dawn supports Eve Agents running versions 0.44.x through 0.45.x. This
 window uses stream version 23, the same HTTP route family, and durable sessions
 addressed by ID.
 

@@ -11,7 +11,7 @@ import { setDbClientForTests } from "@/db/provider";
 import { createRepository } from "@/db/repository";
 import {
   startFakeEveServer,
-  type FakeEveGeneration,
+  SUPPORTED_EVE_GENERATIONS,
   type FakeEveServer,
 } from "@/eve/fake-eve-server.test-helper";
 import { createTestDbHandle, type TestDbHandle } from "@/test/db";
@@ -20,9 +20,7 @@ import {
   type CallerTokenVerifier,
 } from "@/identity/server";
 
-const generations: readonly FakeEveGeneration[] = ["0.42", "0.43", "0.44"];
-
-describe.each(generations)("Eve %s chat flow smoke", (generation) => {
+describe.each(SUPPORTED_EVE_GENERATIONS)("Eve %s chat flow smoke", (generation) => {
   let server: FakeEveServer;
   let testDb: TestDbHandle;
 
