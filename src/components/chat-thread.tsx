@@ -42,6 +42,10 @@ import {
 import { EveMessageView, type InputRequestBatch } from "@/components/eve-message";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import {
+  formatEveErrorMessage,
+  sessionFailureErrorId,
+} from "@/eve/error-observability";
+import {
   isRequiredKind,
   pendingRequestsFromEvent,
   resolvedInputRequestIds,
@@ -840,6 +844,15 @@ function ChatThreadSession({
       });
   };
 
+  const displayedError =
+    localError ??
+    (agent.error
+      ? formatEveErrorMessage(
+          agent.error.message,
+          sessionFailureErrorId(agent.events.at(-1)),
+        )
+      : null);
+
   return (
     <TooltipProvider>
       <section className="flex h-full min-h-0 flex-col bg-background">
@@ -869,10 +882,10 @@ function ChatThreadSession({
         </Conversation>
 
         <div className="mx-auto w-full max-w-3xl shrink-0 px-4 pb-5 sm:px-6">
-          {agent.error || localError ? (
+          {displayedError ? (
             <div className="mb-2 flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm">
               <AlertCircleIcon className="mt-0.5 size-4 shrink-0 text-destructive" />
-              <p role="alert">{localError ?? agent.error?.message ?? "Unable to continue."}</p>
+              <p role="alert">{displayedError}</p>
             </div>
           ) : null}
           <PromptInput

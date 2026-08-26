@@ -10,6 +10,11 @@ import {
 import { getDbClient } from "@/db/provider";
 import { createEveClientForConnection } from "@/eve/client";
 import {
+  formatEveErrorMessage,
+  readEveErrorId,
+  sessionFailureErrorId,
+} from "@/eve/error-observability";
+import {
   clearPendingBatchesForTurn,
   EMPTY_PENDING_INPUT,
   inputRespondedEvent,
@@ -217,7 +222,7 @@ async function proxyTurnRequest(
     if (remote.status !== 401) {
       await context.repository.updateChatStatus(context.chat.id, "failed");
     }
-    return forwardErrorResponse(remote);
+    return forwardErrorResponse(remote, context.chat.id);
   }
 
   const payload = await readResponseObject(remote);
@@ -501,6 +506,14 @@ function createPersistedEventStream(input: {
       pendingInput: pendingInputTransition(browserEvent),
       sessionState: { state: currentSession, ...(status ? { status } : {}) },
     });
+    const errorId = sessionFailureErrorId(browserEvent);
+    if (errorId) {
+      console.error("Eve agent session failed", {
+        chatId: input.chat.id,
+        sessionId: input.sessionId,
+        errorId,
+      });
+    }
     return { event: browserEvent, terminal: status !== undefined };
   };
 
@@ -650,17 +663,48 @@ async function readResponseObject(response: Response): Promise<Record<string, un
   }
 }
 
-async function forwardErrorResponse(response: Response): Promise<Response> {
+async function forwardErrorResponse(response: Response, chatId: string): Promise<Response> {
   const body = await response.text();
+  const forwarded = prepareEveError(body);
+  if (response.status !== 401) {
+    console.error("Eve agent request failed", {
+      chatId,
+      status: response.status,
+      ...(forwarded.errorId ? { errorId: forwarded.errorId } : {}),
+    });
+  }
   const headers = new Headers();
   for (const name of ["cache-control", "content-type", "www-authenticate"]) {
     const value = response.headers.get(name);
     if (value) headers.set(name, value);
   }
-  return new Response(body || JSON.stringify({ error: "Eve request failed" }), {
+  return new Response(forwarded.body || JSON.stringify({ error: "Eve request failed" }), {
     status: response.status,
     headers,
   });
+}
+
+function prepareEveError(body: string): { body: string; errorId?: string } {
+  try {
+    const value = JSON.parse(body) as unknown;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return { body };
+    const errorBody = value as Record<string, unknown>;
+    const errorId = readEveErrorId(errorBody.errorId);
+    if (!errorId) return { body };
+    const message =
+      typeof errorBody.error === "string" && errorBody.error.trim()
+        ? errorBody.error.trim()
+        : "Eve request failed.";
+    return {
+      body: JSON.stringify({
+        ...errorBody,
+        error: formatEveErrorMessage(message, errorId),
+      }),
+      errorId,
+    };
+  } catch {
+    return { body };
+  }
 }
 
 function stringValue(value: unknown): string | undefined {

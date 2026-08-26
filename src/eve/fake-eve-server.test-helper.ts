@@ -120,7 +120,11 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
           return;
         }
         if (options.failCreateSession) {
-          writeJson(response, 500, { error: "Failed to create fake session" });
+          writeJson(response, 500, {
+            error: "Failed to create fake session",
+            errorId: "err_fake_session_create",
+            ok: false,
+          });
           return;
         }
 

@@ -1,5 +1,5 @@
 import { eq } from "drizzle-orm";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { resolveAppBrowserSession } from "@/app-session";
 import { setDbClientForTests } from "@/db/provider";
@@ -112,6 +112,7 @@ describe("per-chat Eve protocol proxy", () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     setDbClientForTests(null);
     setCallerTokenVerifierForTests(null);
     await testDb.close();
@@ -160,6 +161,113 @@ describe("per-chat Eve protocol proxy", () => {
 
     expect(response.status).toBe(202);
     expect(server.requests[0]?.headers.authorization).toBeUndefined();
+  });
+
+  it("logs and forwards an upstream Eve error id without logging the message", async () => {
+    const server = await fakeServer({ failCreateSession: true });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Failing Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Failure observability",
+      pendingUserMessage: "sensitive prompt must not be logged",
+      ...chatIdentity,
+    });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const routes = await loadProxyRoutes();
+
+    const response = await routes.createSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ message: "sensitive prompt must not be logged" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id }) },
+    );
+
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toEqual({
+      error: "Failed to create fake session Error ID: err_fake_session_create",
+      errorId: "err_fake_session_create",
+      ok: false,
+    });
+    expect(consoleError).toHaveBeenCalledWith("Eve agent request failed", {
+      chatId: chat.id,
+      status: 500,
+      errorId: "err_fake_session_create",
+    });
+    expect(JSON.stringify(consoleError.mock.calls)).not.toContain(
+      "sensitive prompt must not be logged",
+    );
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({ status: "failed" });
+  });
+
+  it("logs an error id from a streamed session failure after accepting creation", async () => {
+    const sessionFailure = {
+      type: "session.failed",
+      data: {
+        code: "MODEL_CALL_FAILED",
+        details: { errorId: "err_streamed_session_failure" },
+        message: "Forbidden",
+        sessionId: "ses_1",
+      },
+    } as const;
+    const server = await fakeServer({
+      generation: "0.44",
+      streamEvents: [sessionFailure],
+    });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Stream-failing Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Stream failure observability",
+      pendingUserMessage: "sensitive streamed prompt",
+      ...chatIdentity,
+    });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const routes = await loadProxyRoutes();
+
+    const created = await routes.createSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ message: "sensitive streamed prompt" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id }) },
+    );
+    expect(created.status).toBe(202);
+
+    const streamed = await routes.streamSession(
+      new Request(
+        `http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1/stream`,
+        { headers: callerHeaders() },
+      ),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+
+    expect(streamed.status).toBe(200);
+    await expect(streamed.json()).resolves.toEqual(sessionFailure);
+    expect(consoleError).toHaveBeenCalledWith("Eve agent session failed", {
+      chatId: chat.id,
+      sessionId: "ses_1",
+      errorId: "err_streamed_session_failure",
+    });
+    expect(JSON.stringify(consoleError.mock.calls)).not.toContain(
+      "sensitive streamed prompt",
+    );
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({ status: "failed" });
   });
 
   it("uses the App Token only for local ownership and does not infer Agent auth from Project ID", async () => {
