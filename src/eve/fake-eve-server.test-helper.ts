@@ -24,6 +24,8 @@ export interface FakeEveServerOptions {
   readonly generation?: FakeEveGeneration;
   readonly redirectHealthTo?: string;
   readonly failCreateSession?: boolean;
+  /** Commit one operation-owned session, then make its first create response ambiguous. */
+  readonly failFirstCreateResponseAfterCommit?: boolean;
   readonly streamEvents?: readonly unknown[];
   /** Emit stream events without ending the response, like a live Agent. */
   readonly holdStreamOpen?: boolean;
@@ -82,6 +84,8 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
 
   const requests: CapturedEveRequest[] = [];
   let nextSessionId = 1;
+  const sessionsByOperationId = new Map<string, string>();
+  const failedCreateResponses = new Set<string>();
 
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
@@ -134,10 +138,35 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
           return;
         }
 
-        const id = nextSessionId++;
+        const requestedOperationId = (body as { operationId?: unknown } | null)?.operationId;
+        const operationId =
+          generation === "0.45" && typeof requestedOperationId === "string"
+            ? requestedOperationId
+            : undefined;
+        const existingSessionId = operationId
+          ? sessionsByOperationId.get(operationId)
+          : undefined;
+        const sessionId = existingSessionId ?? `ses_${nextSessionId++}`;
+        if (operationId && !existingSessionId) {
+          sessionsByOperationId.set(operationId, sessionId);
+        }
+        if (
+          options.failFirstCreateResponseAfterCommit &&
+          operationId &&
+          !failedCreateResponses.has(operationId)
+        ) {
+          failedCreateResponses.add(operationId);
+          writeJson(response, 500, {
+            error: "Failed to create the session.",
+            errorId: "err_ambiguous_session_create",
+            ok: false,
+          });
+          return;
+        }
+
         writeJson(response, 202, {
           ok: true,
-          sessionId: `ses_${id}`,
+          sessionId,
           status: "accepted",
         });
         return;

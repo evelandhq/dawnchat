@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type { MessageStreamEvent } from "eve/client";
 
 import { resolveAppBrowserSession } from "@/app-session";
@@ -45,6 +47,7 @@ type ProxyContext = {
   chat: Chat;
   repository: Repository;
   client: ReturnType<typeof createEveClientForConnection>;
+  sessionCreateOperationId?: string;
 };
 
 export async function proxyCreateEveSession(request: Request, chatId: string): Promise<Response> {
@@ -212,6 +215,10 @@ async function proxyTurnRequest(
   }
 
   const body = withoutContinuationToken({ ...input });
+  delete body.operationId;
+  if (!sessionId && context.sessionCreateOperationId) {
+    body.operationId = context.sessionCreateOperationId;
+  }
   const currentSession = context.chat.sessionState;
 
   let remote: Response;
@@ -350,10 +357,21 @@ async function resolveProxyContext(
       chat,
       repository,
       client: createEveClientForConnection(agent, callerToken),
+      ...((callerToken || agent.authType === "bearer")
+        ? { sessionCreateOperationId: createSessionOperationId(chat.id) }
+        : {}),
     };
   } catch {
     return errorResponse("Agent authentication configuration is invalid", 500);
   }
+}
+
+function createSessionOperationId(chatId: string): string {
+  const digest = createHash("sha256")
+    .update("dawnchat:create-session:v1\0")
+    .update(chatId)
+    .digest("hex");
+  return `dawnchat-create-${digest}`;
 }
 
 /**

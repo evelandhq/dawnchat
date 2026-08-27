@@ -154,13 +154,90 @@ describe("per-chat Eve protocol proxy", () => {
           cookie: session.setCookie!.split(";")[0]!,
           "content-type": "application/json",
         },
-        body: JSON.stringify({ message: "Hello" }),
+        body: JSON.stringify({
+          message: "Hello",
+          operationId: "untrusted-browser-operation",
+        }),
       }),
       { params: Promise.resolve({ chatId: chat.id }) },
     );
 
     expect(response.status).toBe(202);
     expect(server.requests[0]?.headers.authorization).toBeUndefined();
+    expect(server.requests[0]?.body).toEqual({ message: "Hello" });
+  });
+
+  it("reuses one stable operation id when an authenticated create is retried", async () => {
+    const server = await fakeServer({ failFirstCreateResponseAfterCommit: true });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Recoverable Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Recover create",
+      pendingUserMessage: "Run this once",
+      ...chatIdentity,
+    });
+    const routes = await loadProxyRoutes();
+
+    const createRequest = () =>
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({
+          message: "Run this once",
+          operationId: "untrusted-browser-operation",
+        }),
+      });
+
+    const ambiguous = await routes.createSession(
+      createRequest(),
+      { params: Promise.resolve({ chatId: chat.id }) },
+    );
+
+    expect(ambiguous.status).toBe(500);
+    await expect(ambiguous.json()).resolves.toMatchObject({
+      errorId: "err_ambiguous_session_create",
+      ok: false,
+    });
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      pendingUserMessage: "Run this once",
+      sessionState: null,
+      status: "failed",
+    });
+
+    const recovered = await routes.createSession(
+      createRequest(),
+      { params: Promise.resolve({ chatId: chat.id }) },
+    );
+
+    expect(recovered.status).toBe(202);
+    await expect(recovered.json()).resolves.toMatchObject({ sessionId: "ses_1" });
+    const creates = server.requests.filter(
+      (request) => request.method === "POST" && request.path === "/eve/v1/session",
+    );
+    expect(creates).toHaveLength(2);
+    const operationIds = creates.map(
+      (request) => (request.body as { operationId?: unknown }).operationId,
+    );
+    expect(operationIds[0]).toEqual(expect.any(String));
+    expect(operationIds[0]).not.toBe("untrusted-browser-operation");
+    expect(operationIds[0]).not.toContain(chat.id);
+    expect(operationIds[1]).toBe(operationIds[0]);
+    expect(creates.map((request) => request.body)).toEqual([
+      { message: "Run this once", operationId: operationIds[0] },
+      { message: "Run this once", operationId: operationIds[0] },
+    ]);
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      pendingUserMessage: null,
+      sessionState: { sessionId: "ses_1", streamIndex: 0 },
+      status: "active",
+    });
   });
 
   it("logs and forwards an upstream Eve error id without logging the message", async () => {
@@ -1077,6 +1154,7 @@ describe("per-chat Eve protocol proxy", () => {
         headers: callerHeaders({ "content-type": "application/json" }),
         body: JSON.stringify({
           continuationToken: "untrusted-browser-token",
+          operationId: "untrusted-browser-operation",
           inputResponses: [{ requestId: "req_1", optionId: "approve" }],
         }),
       }),

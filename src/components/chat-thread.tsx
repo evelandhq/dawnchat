@@ -41,6 +41,7 @@ import {
   type QueuedTurn,
 } from "@/components/chat-steer-queue";
 import { EveMessageView, type InputRequestBatch } from "@/components/eve-message";
+import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import {
   formatEveErrorMessage,
@@ -538,6 +539,10 @@ function ChatThreadSession({
   agentRef.current = agent;
   const isResuming = agent.status === "resuming";
   const isBusy = agent.status === "submitted" || agent.status === "streaming";
+  const hasUnconfirmedInitialMessage = Boolean(pendingUserMessage) && !agent.session;
+  const pendingCreateNeedsRetry =
+    hasUnconfirmedInitialMessage &&
+    (chat.status === "failed" || agent.status === "error");
   const pendingRequestIds = useMemo(() => {
     const ids = new Set<string>();
     for (const batch of pendingBatches) {
@@ -549,7 +554,11 @@ function ChatThreadSession({
     }
     return ids;
   }, [pendingBatches]);
-  const composerDisabled = readOnly || chat.status === "completed" || isResuming;
+  const composerDisabled =
+    readOnly ||
+    chat.status === "completed" ||
+    isResuming ||
+    hasUnconfirmedInitialMessage;
   const projectedMessages = queuedTurns.some(
     (turn) => turn.status === "sending" || turn.status === "failed",
   )
@@ -695,6 +704,7 @@ function ChatThreadSession({
       readOnly ||
       retryInput ||
       !pendingUserMessage ||
+      chat.status === "failed" ||
       pendingSentRef.current ||
       agent.status !== "ready"
     ) {
@@ -710,7 +720,7 @@ function ChatThreadSession({
       });
     }, 0);
     return () => clearTimeout(timer);
-  }, [agent, pendingUserMessage, readOnly, retryInput, pendingSentRef]);
+  }, [agent, chat.status, pendingUserMessage, readOnly, retryInput, pendingSentRef]);
 
   useEffect(() => {
     if (
@@ -857,6 +867,25 @@ function ChatThreadSession({
       });
   };
 
+  const handleRetryPendingMessage = (): void => {
+    const current = agentRef.current;
+    if (
+      !pendingUserMessage ||
+      !current ||
+      (current.status !== "ready" && current.status !== "error")
+    ) {
+      return;
+    }
+    pendingSentRef.current = true;
+    setLocalError(null);
+    void current
+      .send(pendingUserMessage, { turnPolicy: TURN_POLICY })
+      .catch((error: unknown) => {
+        pendingSentRef.current = false;
+        setLocalError(errorMessage(error));
+      });
+  };
+
   const displayedError =
     localError ??
     (agent.error
@@ -864,7 +893,9 @@ function ChatThreadSession({
           agent.error.message,
           sessionFailureErrorId(agent.events.at(-1)),
         )
-      : null);
+      : pendingCreateNeedsRetry
+        ? "The previous session creation result could not be confirmed."
+        : null);
 
   return (
     <TooltipProvider>
@@ -898,7 +929,18 @@ function ChatThreadSession({
           {displayedError ? (
             <div className="mb-2 flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm">
               <AlertCircleIcon className="mt-0.5 size-4 shrink-0 text-destructive" />
-              <p role="alert">{displayedError}</p>
+              <p className="min-w-0 flex-1" role="alert">{displayedError}</p>
+              {pendingCreateNeedsRetry ? (
+                <Button
+                  disabled={isBusy || isResuming}
+                  onClick={handleRetryPendingMessage}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  Retry message
+                </Button>
+              ) : null}
             </div>
           ) : null}
           <PromptInput

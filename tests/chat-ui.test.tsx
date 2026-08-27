@@ -1418,6 +1418,62 @@ describe("ChatThread with Eve and AI Elements", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Failed to create the session. Error ID: err_session_create_123",
     );
+    expect(screen.getByRole("button", { name: "Retry message" })).toBeEnabled();
+  });
+
+  it("waits for an explicit retry when a failed chat still has its initial message", async () => {
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        if (isPendingInputCall([input])) return pendingInputResponse();
+        if (init?.method === "POST") {
+          return Response.json(
+            { sessionId: "ses_recovered" },
+            {
+              status: 202,
+              headers: { "x-eve-session-id": "ses_recovered" },
+            },
+          );
+        }
+        return ndjson([
+          {
+            type: "session.waiting",
+            data: { wait: "next-user-message" },
+          },
+        ]);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({
+          id: "chat_ambiguous_create",
+          sessionState: null,
+          status: "failed",
+        })}
+        events={[]}
+        pendingInput={EMPTY_PENDING}
+        pendingUserMessage="Run this once"
+      />,
+    );
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const turnCalls = () =>
+      fetchMock.mock.calls.filter(([, init]) => init?.method === "POST");
+    expect(turnCalls()).toHaveLength(0);
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "The previous session creation result could not be confirmed.",
+    );
+    expect(screen.getByLabelText("Message")).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry message" }));
+
+    await waitFor(() => expect(turnCalls()).toHaveLength(1));
+    expect(JSON.parse(String(turnCalls()[0]?.[1]?.body))).toMatchObject({
+      message: "Run this once",
+    });
   });
 
   it("shows the error id when an accepted session fails in the stream", async () => {
