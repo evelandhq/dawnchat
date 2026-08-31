@@ -70,6 +70,10 @@ export const chats = pgTable(
       withTimezone: true,
       mode: "date",
     }),
+    // Identifies the holder of the claim above. A request may only release or
+    // take over a claim it can name, so an attempt that lost its claim to an
+    // expiry cannot clear the one that replaced it.
+    sessionCreateClaimToken: text("session_create_claim_token"),
     status: text("status", { enum: chatStatuses }).notNull().default("active"),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull(),

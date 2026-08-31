@@ -231,6 +231,7 @@ export function AuthenticatedChatThread({
           // A finished turn changes the chat's title and preview, nothing the
           // server render owns.
           onTurnFinished={() => void refreshChatList()}
+          onChatStale={() => setAttempt((current) => current + 1)}
         />
       </div>
     </div>

@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { DatabaseError } from "pg";
 import { z } from "zod";
@@ -174,17 +174,31 @@ export type Repository = {
   updateChatStatus(chatId: string, status: ChatStatus): Promise<Chat>;
   /**
    * Claims the one session create a chat may have in flight, and records in
-   * the same write that its outcome is not yet known. Returns `false` when
-   * another request holds the claim or the chat already has an active
-   * session — the caller must not reach the Agent.
+   * the same write that its outcome is not yet known. Returns the claim's
+   * token, or `null` when another request holds the claim or the chat already
+   * has a session — the caller must not then reach the Agent.
    *
    * `staleBefore` expires a claim a handler never released, which is the only
    * reason a claim is not simply held until it is released: a process that
-   * dies mid-create would otherwise lock the chat out for good.
+   * dies mid-create would otherwise lock the chat out for good. Callers must
+   * bound their attempt well inside that window, so an expired claim always
+   * means a handler that is gone rather than one still working.
    */
-  claimSessionCreate(chatId: string, staleBefore: Date): Promise<boolean>;
-  /** Releases the claim, leaving the unconfirmed mark for proof to clear. */
-  releaseSessionCreateClaim(chatId: string): Promise<void>;
+  claimSessionCreate(
+    chatId: string,
+    staleBefore: Date,
+    replaceSessionId?: string,
+  ): Promise<string | null>;
+  /**
+   * Whether a terminal event is stored for this session — Eve's own word that
+   * it ended. A chat may only replace a session it can prove is over.
+   */
+  hasSessionEnded(chatId: string, sessionId: string): Promise<boolean>;
+  /**
+   * Releases the claim `token` names, leaving the unconfirmed mark for proof
+   * to clear. A token that no longer holds the claim releases nothing.
+   */
+  releaseSessionCreateClaim(chatId: string, token: string): Promise<void>;
   /** Clears the mark after proof of what the Agent did with the request. */
   clearSessionCreateUnconfirmed(chatId: string): Promise<Chat>;
   /**
@@ -766,6 +780,7 @@ export function createRepository(db: RepositoryDb): Repository {
           // for, whichever attempt produced it.
           sessionCreateUnconfirmedAt: null,
           sessionCreateClaimedAt: null,
+          sessionCreateClaimToken: null,
           ...(status ? { status } : {}),
           updatedAt: new Date(),
         })
@@ -793,21 +808,30 @@ export function createRepository(db: RepositoryDb): Repository {
       return mapChat(updated);
     },
 
-    async claimSessionCreate(chatId, staleBefore) {
+    async claimSessionCreate(chatId, staleBefore, replaceSessionId) {
       const now = new Date();
+      const token = createId("claim");
       const claimed = await db
         .update(chats)
         .set({
           sessionCreateClaimedAt: now,
+          sessionCreateClaimToken: token,
           sessionCreateUnconfirmedAt: now,
           updatedAt: now,
         })
         .where(
           and(
             eq(chats.id, chatId),
-            // The same condition the create route checks, applied here so a
-            // racing request cannot pass it against a stale read.
-            or(ne(chats.status, "active"), isNull(chats.sessionStateJson)),
+            // A chat creates a session only while it has none, or in place of
+            // exactly the one the caller decided may be replaced: a session
+            // this write does not recognise may still be running, and a
+            // second one would run beside it.
+            replaceSessionId === undefined
+              ? isNull(chats.sessionStateJson)
+              : or(
+                  isNull(chats.sessionStateJson),
+                  sql`(${chats.sessionStateJson}::json->>'sessionId') = ${replaceSessionId}`,
+                ),
             or(
               isNull(chats.sessionCreateClaimedAt),
               lt(chats.sessionCreateClaimedAt, staleBefore),
@@ -816,14 +840,36 @@ export function createRepository(db: RepositoryDb): Repository {
         )
         .returning({ id: chats.id });
 
-      return claimed.length > 0;
+      return claimed.length > 0 ? token : null;
     },
 
-    async releaseSessionCreateClaim(chatId) {
+    async hasSessionEnded(chatId, sessionId) {
+      const [row] = await db
+        .select({ id: events.id })
+        .from(events)
+        .where(
+          and(
+            eq(events.chatId, chatId),
+            eq(events.sessionId, sessionId),
+            inArray(events.type, ["session.failed", "session.completed"]),
+          ),
+        )
+        .limit(1);
+
+      return row !== undefined;
+    },
+
+    async releaseSessionCreateClaim(chatId, token) {
       await db
         .update(chats)
-        .set({ sessionCreateClaimedAt: null, updatedAt: new Date() })
-        .where(eq(chats.id, chatId));
+        .set({
+          sessionCreateClaimedAt: null,
+          sessionCreateClaimToken: null,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(eq(chats.id, chatId), eq(chats.sessionCreateClaimToken, token)),
+        );
     },
 
     async clearSessionCreateUnconfirmed(chatId) {

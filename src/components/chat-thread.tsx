@@ -139,6 +139,11 @@ type ChatThreadProps = {
   readOnly?: boolean;
   /** Called when a turn completes, so the app can re-read what it changed. */
   onTurnFinished?: () => void;
+  /**
+   * Called when the server says this chat's state is no longer what the thread
+   * was handed — another request owns its session create, or already made it.
+   */
+  onChatStale?: () => void;
 };
 
 export function ChatThread({
@@ -151,6 +156,7 @@ export function ChatThread({
   respondToAuthenticationChallenge,
   readOnly = false,
   onTurnFinished,
+  onChatStale,
 }: ChatThreadProps): React.ReactElement {
   const pendingSentRef = useRef(false);
   const challengeInFlightRef = useRef(false);
@@ -251,6 +257,7 @@ export function ChatThread({
       }
       getCallerToken={getCallerToken}
       onAuthenticationError={handleAuthenticationError}
+      onChatStale={onChatStale}
       onTurnFinished={onTurnFinished}
       queuedTurns={queuedTurns}
       readOnly={readOnly}
@@ -271,6 +278,7 @@ function ChatThreadSession({
   getAccessToken,
   getCallerToken,
   onAuthenticationError,
+  onChatStale,
   onTurnFinished,
   queuedTurns,
   readOnly,
@@ -299,6 +307,7 @@ function ChatThreadSession({
     ((settledQueuedTurnId?: string) => void) | null
   >(null);
   const latestInputRef = useRef<TurnPayload | null>(null);
+  const staleReportedRef = useRef(false);
   const retrySentRef = useRef(false);
   const retryRefetchedRef = useRef(false);
   const [localError, setLocalError] = useState<string | null>(null);
@@ -481,6 +490,19 @@ function ChatThreadSession({
       if (pendingUserMessage && !current?.session) {
         const outcome = initialCreateFromFailure(error);
         if (outcome) setLiveInitialCreate(outcome);
+      }
+      // A 409 means the chat this thread is looking at is behind the server's:
+      // another request owns its create, or has already made the session. Ask
+      // once for a fresh read rather than leaving the composer closed until
+      // the user reloads the page.
+      if (
+        error instanceof ClientError &&
+        error.status === 409 &&
+        !current?.session &&
+        !staleReportedRef.current
+      ) {
+        staleReportedRef.current = true;
+        onChatStale?.();
       }
       const retry = latestInputRef.current;
       const queuedTurnId = activeQueuedTurnIdRef.current ?? undefined;

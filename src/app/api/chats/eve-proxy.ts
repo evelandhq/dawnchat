@@ -37,12 +37,30 @@ import {
 const NDJSON_CONTENT_TYPE = "application/x-ndjson; charset=utf-8";
 
 /**
- * How long a create claim stays valid without being released. Eve's command
- * hook wait means a create can legitimately take 30s before it answers, so
- * this only has to outlast a real attempt: past it, the claim belongs to a
- * handler that never came back.
+ * How long one create attempt may take before Dawn abandons it. Eve waits on
+ * the Agent's command hook for 30s, so a real attempt answers inside this;
+ * past it, nothing is learned by waiting longer.
  */
-const CREATE_CLAIM_LEASE_MS = 90_000;
+const DEFAULT_CREATE_ATTEMPT_TIMEOUT_MS = 45_000;
+
+/** Eve's exact refusal to accept an operation from the principal it resolved. */
+const OPERATION_ID_PRINCIPAL_REFUSAL = "operationid requires an authenticated principal";
+
+function createAttemptTimeoutMs(): number {
+  const configured = Number(process.env.EVE_CREATE_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured > 0
+    ? configured
+    : DEFAULT_CREATE_ATTEMPT_TIMEOUT_MS;
+}
+
+/**
+ * A claim older than this belongs to a handler that is gone, never to one
+ * still working: the attempt it guards is aborted at half this age, so the
+ * two windows cannot overlap and no attempt outlives its own claim.
+ */
+function createClaimLeaseMs(): number {
+  return createAttemptTimeoutMs() * 2;
+}
 
 /** Forwarded to the browser but never persisted; see `persistEvent`. */
 const STREAM_DELTA_EVENT_TYPES = new Set([
@@ -72,11 +90,19 @@ export async function proxyCreateEveSession(request: Request, chatId: string): P
   if (resolved.chat.status === "completed") {
     return errorResponse("Chat is completed", 409);
   }
-  if (resolved.chat.status === "active" && resolved.chat.sessionState?.sessionId) {
+  // A stored session is replaceable only once Eve's own stream says it ended.
+  // A `failed` status alone does not: a turn that failed on the transport
+  // leaves the session it failed on running, and a second one would run
+  // beside it.
+  const storedSessionId = resolved.chat.sessionState?.sessionId;
+  if (
+    storedSessionId &&
+    !(await resolved.repository.hasSessionEnded(resolved.chat.id, storedSessionId))
+  ) {
     return errorResponse("Chat already has an Eve session", 409);
   }
 
-  return proxyTurnRequest(request, resolved);
+  return proxyTurnRequest(request, resolved, undefined, storedSessionId);
 }
 
 export async function proxyContinueEveSession(
@@ -221,6 +247,7 @@ async function proxyTurnRequest(
   request: Request,
   context: ProxyContext,
   sessionId?: string,
+  replaceSessionId?: string,
 ): Promise<Response> {
   const input = await readObjectBody(request);
   if (input instanceof Response) {
@@ -245,21 +272,32 @@ async function proxyTurnRequest(
   // attempt are separate reads, so two requests could each pass that check
   // against a stale row and both cross a boundary neither can take back. The
   // claim collapses the check and the mark into one conditional write.
-  const claimed = await context.repository.claimSessionCreate(
+  const claim = await context.repository.claimSessionCreate(
     context.chat.id,
-    new Date(Date.now() - CREATE_CLAIM_LEASE_MS),
+    new Date(Date.now() - createClaimLeaseMs()),
+    replaceSessionId,
   );
-  if (!claimed) {
+  if (!claim) {
     return errorResponse("A session create for this chat is already in progress", 409);
   }
 
   try {
-    return await forwardTurn(request, context, undefined, body);
+    // The attempt is bounded so it cannot still be running when its claim
+    // becomes takeable. Both attempts of an operation-id fallback share this
+    // deadline, and the caller going away still ends it early.
+    return await forwardTurn(
+      request,
+      context,
+      undefined,
+      body,
+      AbortSignal.any([request.signal, AbortSignal.timeout(createAttemptTimeoutMs())]),
+    );
   } finally {
-    // Only the claim is released here; the unconfirmed mark it left is for
-    // proof to clear, and outlives every failure this request can have.
+    // Only the claim is released, and only while this request still holds it:
+    // the unconfirmed mark it left is for proof to clear, and a claim that has
+    // already passed to another request is not this one's to drop.
     await context.repository
-      .releaseSessionCreateClaim(context.chat.id)
+      .releaseSessionCreateClaim(context.chat.id, claim)
       .catch((error: unknown) => {
         console.error(`Failed to release the create claim for ${context.chat.id}:`, error);
       });
@@ -271,13 +309,14 @@ async function forwardTurn(
   context: ProxyContext,
   sessionId: string | undefined,
   body: Record<string, unknown>,
+  signal: AbortSignal = request.signal,
 ): Promise<Response> {
   const isCreate = sessionId === undefined;
   const currentSession = context.chat.sessionState;
 
   let remote: Response;
   try {
-    remote = await postTurn(context, sessionId, body, request.signal);
+    remote = await postTurn(context, sessionId, body, signal);
   } catch {
     await context.repository.updateChatStatus(context.chat.id, "failed");
     return errorResponse("Unable to reach Eve agent", 502);
@@ -292,7 +331,7 @@ async function forwardTurn(
     // not have offered anyway.
     delete body.operationId;
     try {
-      remote = await postTurn(context, sessionId, body, request.signal);
+      remote = await postTurn(context, sessionId, body, signal);
     } catch {
       await context.repository.updateChatStatus(context.chat.id, "failed");
       return errorResponse("Unable to reach Eve agent", 502);
@@ -459,10 +498,11 @@ function isAmbiguousFailureStatus(status: number): boolean {
 }
 
 /**
- * Eve's own refusal to accept an `operationId` from the principal it resolved:
- * `operationId requires an authenticated principal.` A reworded refusal stops
- * matching and surfaces as the deterministic 400 it is, which loses the
- * fallback without risking a second session.
+ * Eve's own refusal to accept an `operationId` from the principal it resolved,
+ * matched as that whole message and nothing else. Every other 400 — including
+ * one that merely mentions the field — is a deterministic failure to forward:
+ * retrying it without the operation would trade a visible error for a second
+ * session.
  */
 async function rejectsOperationId(
   response: Response,
@@ -478,8 +518,8 @@ async function rejectsOperationId(
         ? (value as { error?: unknown }).error
         : undefined;
     if (typeof error !== "string") return false;
-    const message = error.toLowerCase();
-    return message.includes("operationid") && message.includes("authenticated principal");
+    const message = error.trim().toLowerCase().replace(/\s+/g, " ").replace(/\.$/, "");
+    return message === OPERATION_ID_PRINCIPAL_REFUSAL;
   } catch {
     return false;
   }

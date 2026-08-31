@@ -57,11 +57,21 @@ settles nothing until the Caller Token retry.
 
 One create at a time per chat. Resolving the chat, finding it has no session,
 and recording the attempt are separate reads, so the mark is written as a
-conditional claim: a second request that meets a live claim is refused with
-409 rather than reaching the Agent. A claim a handler never released expires
-on a lease longer than Eve's own wait, so a dead process cannot lock a chat
-out — the unconfirmed mark it leaves behind is what keeps the chat safe in the
-meantime.
+conditional claim naming its holder: a request that meets a live claim is
+refused with 409 rather than reaching the Agent, and only the holder named by
+a claim can release it. Each attempt is abandoned after `EVE_CREATE_TIMEOUT_MS`
+(45s by default, past Eve's own 30s wait), and a claim is takeable only at
+twice that age — so a claim that looks stale always belongs to a handler that
+is gone rather than one still working, and no attempt outlives its own claim.
+The unconfirmed mark an abandoned attempt leaves behind is what keeps the chat
+safe until a retry settles it.
+
+A chat that already holds a session creates no other, whatever its status: a
+turn that failed on the transport leaves the session it failed on running. Only
+a session Eve's own stream reported as ended — a stored `session.failed` or
+`session.completed` — may be replaced, and the create that replaces it must
+name exactly that session, so a racing request cannot replace a session
+neither of them examined.
 
 Every create for one chat carries the same operation ID, derived server-side
 from the chat ID and never taken from the browser. Eve answers a repeat of an

@@ -85,6 +85,13 @@
       "when": 1788173078718,
       "tag": "0011_redundant_vision",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1788178724240,
+      "tag": "0012_narrow_hex",
+      "breakpoints": true
     }
   ]
 }

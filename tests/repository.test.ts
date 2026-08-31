@@ -19,6 +19,46 @@ describe("repository", () => {
     await testDb.close();
   });
 
+  it("only lets the claim's own holder release it", async () => {
+    const repository = createRepository(db);
+    const agent = await repository.createAgentConnection({
+      name: "Claimed Agent",
+      baseUrl: "https://claimed.example.com",
+      authType: "none",
+    });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Claimed",
+      pendingUserMessage: "Run this once",
+    });
+    const past = new Date(Date.now() - 60_000);
+    const future = new Date(Date.now() + 60_000);
+
+    const first = await repository.claimSessionCreate(chat.id, past);
+    expect(first).toMatch(/^claim_[a-f0-9]{16}$/);
+    // A live claim is nobody else's to take.
+    await expect(repository.claimSessionCreate(chat.id, past)).resolves.toBeNull();
+
+    // `future` treats the live claim as expired, the way a lease does for a
+    // handler that is gone.
+    const second = await repository.claimSessionCreate(chat.id, future);
+    expect(second).not.toBe(first);
+
+    // The displaced holder must not be able to drop the claim that replaced
+    // its own, which would admit a third create.
+    await repository.releaseSessionCreateClaim(chat.id, first!);
+    const stillClaimed = await repository.getChat(chat.id);
+    expect(stillClaimed?.sessionCreateClaimToken).toBe(second);
+    expect(stillClaimed?.sessionCreateClaimedAt).toBeInstanceOf(Date);
+
+    await repository.releaseSessionCreateClaim(chat.id, second!);
+    const released = await repository.getChat(chat.id);
+    expect(released?.sessionCreateClaimToken).toBeNull();
+    expect(released?.sessionCreateClaimedAt).toBeNull();
+    // Releasing a claim never clears what only proof may clear.
+    expect(released?.sessionCreateUnconfirmedAt).toBeInstanceOf(Date);
+  });
+
   it("creates and lists agent connections", async () => {
     const repository = createRepository(db);
 
