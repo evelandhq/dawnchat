@@ -204,23 +204,28 @@ const getRecordValue = (
 
 export type ToolInputProps = ComponentProps<"div"> & {
   input: ToolPart["input"];
+  inputText?: string;
 };
 
-export const ToolInput = ({ className, input, ...props }: ToolInputProps) => (
-  <div
-    className={cn("overflow-hidden rounded-md bg-muted/50", className)}
-    {...props}
-  >
-    <span className="block px-3 pt-3 font-sans text-[10px] text-muted-foreground uppercase tracking-wide">
-      Parameters
-    </span>
-    <CodeBlock
-      className={compactCodeBlockClassName}
-      code={JSON.stringify(input, null, 2)}
-      language="json"
-    />
-  </div>
-);
+export const ToolInput = ({ className, input, inputText, ...props }: ToolInputProps) => {
+  const code = inputText ?? JSON.stringify(input, null, 2) ?? "";
+
+  return (
+    <div
+      className={cn("overflow-hidden rounded-md bg-muted/50", className)}
+      {...props}
+    >
+      <span className="block px-3 pt-3 font-sans text-[10px] text-muted-foreground uppercase tracking-wide">
+        Parameters
+      </span>
+      <CodeBlock
+        className={compactCodeBlockClassName}
+        code={code}
+        language="json"
+      />
+    </div>
+  );
+};
 
 export type ToolOutputProps = ComponentProps<"div"> & {
   output: ToolPart["output"];

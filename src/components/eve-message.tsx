@@ -168,7 +168,9 @@ function DynamicToolPartView({
         type="dynamic-tool"
       />
       <ToolContent>
-        {part.toolName === "bash" ? (
+        {part.state === "input-streaming" ? (
+          <ToolInput input={part.input} inputText={part.inputText} />
+        ) : part.toolName === "bash" ? (
           <BashToolContent
             errorText={part.errorText}
             input={part.input}

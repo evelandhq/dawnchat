@@ -84,14 +84,18 @@ describe("Eve client connector", () => {
     ]);
   });
 
+  it("supports only the Eve 0.47 protocol generation", () => {
+    expect(SUPPORTED_EVE_GENERATIONS).toEqual(["0.47"]);
+  });
+
   it.each(SUPPORTED_EVE_GENERATIONS)(
-    "models Eve %s with stream version 23",
+    "models Eve %s with stream version 24",
     async (generation) => {
       const server = await fakeServer({ generation });
 
       const response = await fetch(`${server.baseUrl}/eve/v1/session/ses_1/stream`);
 
-      expect(response.headers.get("x-eve-stream-version")).toBe("23");
+      expect(response.headers.get("x-eve-stream-version")).toBe("24");
       await response.text();
     },
   );

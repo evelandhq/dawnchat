@@ -10,7 +10,7 @@ export interface CapturedEveRequest {
 }
 
 /** Eve versions currently hosted by Eveland and supported by Dawn. */
-export const SUPPORTED_EVE_GENERATIONS = ["0.44", "0.45"] as const;
+export const SUPPORTED_EVE_GENERATIONS = ["0.47"] as const;
 export type FakeEveGeneration = (typeof SUPPORTED_EVE_GENERATIONS)[number];
 
 export interface FakeEveServerOptions {
@@ -31,7 +31,7 @@ export interface FakeEveServerOptions {
   readonly cancelStatus?: "accepted" | "no_active_turn";
 }
 
-const SUPPORTED_STREAM_VERSION = 23;
+const SUPPORTED_STREAM_VERSION = 24;
 
 export interface FakeEveServer {
   readonly baseUrl: string;
@@ -75,7 +75,7 @@ function writeNdjson(
 }
 
 export async function startFakeEveServer(options: FakeEveServerOptions = {}): Promise<FakeEveServer> {
-  const generation = options.generation ?? "0.45";
+  const generation = options.generation ?? "0.47";
   if (!SUPPORTED_EVE_GENERATIONS.includes(generation)) {
     throw new Error(`Unsupported fake Eve generation: ${generation}`);
   }

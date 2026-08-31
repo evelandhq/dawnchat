@@ -206,7 +206,7 @@ export function clearPendingBatchesForTurn(
 /**
  * Applies the answers of one turn Eve accepted — a mirror of Eve's own batch
  * resolution (`resolveApprovalInputBatches`/`resolveQuestionOnlyInputBatches`
- * in eve@0.44–0.45). A batch closes once
+ * in eve@0.47). A batch closes once
  * it has been addressed and no required request is unanswered: Eve resolves a
  * question batch on any one answer and an approval batch only once every
  * approval in it has one, carrying the leftovers forward. An
