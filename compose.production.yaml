@@ -5,10 +5,10 @@
 #
 # AUTH_SECRET encrypts agent bearer/header credentials stored in Postgres —
 # it must stay the same across restarts or those credentials become unreadable.
-# Optional overrides (env or .env next to this file):
-# POSTGRES_PASSWORD, APP_PORT, NPM_REGISTRY (npm mirror used at build time),
-# EVELAND_IDENTITY_URL, EVELAND_IDENTITY_INTERNAL_URL, and
-# EVELAND_IDENTITY_ISSUER.
+# Required (env or .env next to this file): EVELAND_PUBLIC_ORIGIN.
+# Optional overrides: POSTGRES_PASSWORD, APP_PORT, NPM_REGISTRY (npm mirror
+# used at build time), EVELAND_INTERNAL_ORIGIN, EVELAND_IDENTITY_ISSUER,
+# EVELAND_IDENTITY_JWKS_URL, and EVELAND_IDENTITY_RETURN_TARGET.
 
 # Keep the legacy Compose project name so upgrades continue to attach the
 # existing production volume after the Dawn rename.
@@ -49,24 +49,24 @@ services:
       target: runner
       args:
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
-        NEXT_PUBLIC_EVELAND_IDENTITY_URL: ${EVELAND_IDENTITY_URL:?EVELAND_IDENTITY_URL is required}
-        NEXT_PUBLIC_EVELAND_IDENTITY_RETURN_TARGET: ${EVELAND_IDENTITY_RETURN_TARGET:-eve-chats}
-        # Base the server itself uses for the /identity rewrite and for reading
-        # the Agent Catalog. It carries the Dockerfile's name, not this file's,
-        # because EVELAND_IDENTITY_URL above reaches the browser and therefore
-        # has to stay publicly routable. Empty falls back to the issuer.
-        EVELAND_IDENTITY_URL: ${EVELAND_IDENTITY_INTERNAL_URL:-}
+        EVELAND_PUBLIC_ORIGIN: ${EVELAND_PUBLIC_ORIGIN:?EVELAND_PUBLIC_ORIGIN is required}
+        # The /api/identity rewrite is compiled at build time. Empty falls back
+        # to the single public frontdoor.
+        EVELAND_INTERNAL_ORIGIN: ${EVELAND_INTERNAL_ORIGIN:-}
     restart: unless-stopped
-    # Lets an EVELAND_IDENTITY_INTERNAL_URL of http://host.docker.internal:<port>
-    # reach an identity service on the host when the public identity host is
+    # Lets an EVELAND_INTERNAL_ORIGIN of http://host.docker.internal:<port>
+    # reach the Eveland frontdoor on the host when its public hostname is
     # not routable from inside the box (hairpin).
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
       DATABASE_URL: postgresql://eve_chats:${POSTGRES_PASSWORD:-eve_chats}@postgres:5432/eve_chats
       AUTH_SECRET: ${AUTH_SECRET:?AUTH_SECRET is required — put it in .env next to this compose file}
-      EVELAND_IDENTITY_ISSUER: ${EVELAND_IDENTITY_ISSUER:?EVELAND_IDENTITY_ISSUER is required}
-      EVELAND_IDENTITY_JWKS_URL: ${EVELAND_IDENTITY_JWKS_URL:?EVELAND_IDENTITY_JWKS_URL is required}
+      EVELAND_PUBLIC_ORIGIN: ${EVELAND_PUBLIC_ORIGIN:?EVELAND_PUBLIC_ORIGIN is required}
+      EVELAND_INTERNAL_ORIGIN: ${EVELAND_INTERNAL_ORIGIN:-}
+      EVELAND_IDENTITY_ISSUER: ${EVELAND_IDENTITY_ISSUER:-}
+      EVELAND_IDENTITY_JWKS_URL: ${EVELAND_IDENTITY_JWKS_URL:-}
+      EVELAND_IDENTITY_RETURN_TARGET: ${EVELAND_IDENTITY_RETURN_TARGET:-eve-chats}
     ports:
       - "${APP_PORT:-3010}:3010"
     depends_on:

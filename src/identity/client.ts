@@ -37,6 +37,7 @@ export type EvelandAuthenticationChallenge = {
 
 type IdentityClientOptions = {
   baseUrl: string;
+  issuer?: string;
   requestBaseUrl?: string;
   returnTarget: string;
   fetch?: typeof globalThis.fetch;
@@ -62,6 +63,7 @@ export class EvelandIdentityError extends Error {
 
 export function createEvelandIdentityClient(options: IdentityClientOptions) {
   const baseUrl = options.baseUrl.replace(/\/$/, "");
+  const issuer = (options.issuer ?? baseUrl).replace(/\/$/, "");
   const requestBaseUrl =
     options.requestBaseUrl === undefined
       ? undefined
@@ -85,7 +87,7 @@ export function createEvelandIdentityClient(options: IdentityClientOptions) {
     sessionPromise ??= (async () => {
       let response: Response;
       try {
-        response = await fetchIdentity(identityRequestUrl("/identity/session"), {
+        response = await fetchIdentity(identityRequestUrl("/api/identity/session"), {
           credentials: "include",
           headers: { accept: "application/json" },
         });
@@ -129,7 +131,7 @@ export function createEvelandIdentityClient(options: IdentityClientOptions) {
   async function getCatalog(returnPath = "/"): Promise<IdentityCatalog> {
     let response: Response;
     try {
-      response = await fetchIdentity(`${baseUrl}/agent-catalog`, {
+      response = await fetchIdentity(`${baseUrl}/api/agent-catalog`, {
         credentials: "include",
         headers: { accept: "application/json" },
       });
@@ -142,7 +144,7 @@ export function createEvelandIdentityClient(options: IdentityClientOptions) {
     }
     if (response.status === 401) beginLogin(returnPath);
     if (!response.ok) throw await responseError(response);
-    return parseIdentityCatalog(await response.json(), baseUrl);
+    return parseIdentityCatalog(await response.json(), issuer);
   }
 
   async function getAppToken(returnPath = "/"): Promise<string> {
@@ -163,7 +165,7 @@ export function createEvelandIdentityClient(options: IdentityClientOptions) {
     if (!session.authenticated) beginLogin(returnPath);
     let response: Response;
     try {
-      response = await fetchIdentity(identityRequestUrl("/identity/app-tokens"), {
+      response = await fetchIdentity(identityRequestUrl("/api/identity/app-tokens"), {
         method: "POST",
         credentials: "include",
         headers: {
@@ -201,7 +203,7 @@ export function createEvelandIdentityClient(options: IdentityClientOptions) {
     let response: Response;
     try {
       response = await fetchIdentity(
-        identityRequestUrl("/identity/caller-tokens"),
+        identityRequestUrl("/api/identity/caller-tokens"),
         {
           method: "POST",
           credentials: "include",
@@ -250,7 +252,7 @@ export function createEvelandIdentityClient(options: IdentityClientOptions) {
   ): Promise<string | null> {
     const challenge = parseEvelandAuthenticationChallenge(header);
     if (!challenge) return null;
-    const expectedLoginUrl = new URL(`${baseUrl}/identity/login`);
+    const expectedLoginUrl = new URL(`${baseUrl}/api/identity/login`);
     const challengeUrl = new URL(challenge.url);
     if (
       challenge.projectId !== expectedProjectId ||
@@ -283,13 +285,13 @@ export function createEvelandIdentityClient(options: IdentityClientOptions) {
       returnPath: safeReturnPath(returnPath),
     });
     // The probe carries no identity cookie, so it goes through the app's
-    // same-origin /identity rewrite: the refusal JSON it must read is not
+    // same-origin /api/identity rewrite: the refusal JSON it must read is not
     // CORS-readable cross-origin, and the redirect it detects needs no body.
     const probeBase =
       requestBaseUrl ?? (typeof window === "undefined" ? baseUrl : "");
     let response: Response;
     try {
-      response = await fetchIdentity(`${probeBase}/identity/login?${query.toString()}`, {
+      response = await fetchIdentity(`${probeBase}/api/identity/login?${query.toString()}`, {
         headers: { accept: "application/json" },
         redirect: "manual",
       });
@@ -325,7 +327,7 @@ export function createEvelandIdentityClient(options: IdentityClientOptions) {
   function beginLogin(
     returnPath: string,
     switchRealm = false,
-    loginUrl = `${baseUrl}/identity/login`,
+    loginUrl = `${baseUrl}/api/identity/login`,
   ): never {
     const login = new URL(loginUrl);
     login.searchParams.set("target", options.returnTarget);
@@ -346,7 +348,7 @@ export function createEvelandIdentityClient(options: IdentityClientOptions) {
     callerTokens.clear();
     appToken = undefined;
     sessionPromise = undefined;
-    const response = await fetchIdentity(identityRequestUrl("/identity/logout"), {
+    const response = await fetchIdentity(identityRequestUrl("/api/identity/logout"), {
       method: "POST",
       credentials: "include",
       headers: { accept: "application/json" },
@@ -373,7 +375,7 @@ export function createEvelandIdentityClient(options: IdentityClientOptions) {
     logout,
   };
 
-  function identityRequestUrl(path: `/identity/${string}`): string {
+  function identityRequestUrl(path: `/api/identity/${string}`): string {
     if (requestBaseUrl !== undefined) return `${requestBaseUrl}${path}`;
     if (
       typeof window !== "undefined" &&

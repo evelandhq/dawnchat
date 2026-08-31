@@ -4,6 +4,8 @@ import {
   type KeyObject,
 } from "node:crypto";
 
+import { resolveEvelandConfig } from "@/identity/config";
+
 export type CallerIdentity = {
   issuer: string;
   principalId: string;
@@ -297,19 +299,10 @@ export function callerTokenErrorResponse(error: CallerTokenError): Response {
 }
 
 function identityVerifierConfig(): CallerTokenVerifierOptions {
-  const issuer = process.env.EVELAND_IDENTITY_ISSUER?.trim();
-  if (!issuer) {
-    throw new CallerTokenError(
-      "caller_token_verification_unavailable",
-      503,
-      "EVELAND_IDENTITY_ISSUER is not configured.",
-    );
-  }
+  const eveland = resolveEvelandConfig();
   return {
-    issuer,
-    jwksUrl:
-      process.env.EVELAND_IDENTITY_JWKS_URL?.trim() ||
-      `${issuer.replace(/\/$/, "")}/.well-known/jwks.json`,
+    issuer: eveland.issuer,
+    jwksUrl: eveland.jwksUrl,
   };
 }
 

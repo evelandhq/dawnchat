@@ -37,11 +37,13 @@ const IdentityContext = createContext<IdentityContextValue | null>(null);
 
 export function IdentityProvider({
   baseUrl,
+  issuer,
   requestBaseUrl,
   returnTarget,
   children,
 }: {
   baseUrl: string;
+  issuer: string;
   requestBaseUrl?: string;
   returnTarget: string;
   children: ReactNode;
@@ -50,10 +52,11 @@ export function IdentityProvider({
     () =>
       createEvelandIdentityClient({
         baseUrl,
+        issuer,
         requestBaseUrl,
         returnTarget,
       }),
-    [baseUrl, requestBaseUrl, returnTarget],
+    [baseUrl, issuer, requestBaseUrl, returnTarget],
   );
   const [session, setSession] = useState<IdentitySession | null>(null);
   const getSession = useCallback(

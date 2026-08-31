@@ -41,9 +41,9 @@ to an identity.
 ## Same-origin Identity requests
 
 When Eveland Identity and Dawn use the same hostname on different ports,
-cookie-bearing `/identity/*` requests go through the app's same-origin Next.js
+cookie-bearing `/api/identity/*` requests go through the app's same-origin Next.js
 rewrite. Top-level provider login and Agent-provided continuation navigation go
-directly to Eveland.
+directly to Eveland's public frontdoor.
 
 Production should place Eveland Identity and Dawn on one HTTPS schemeful
 site, such as `identity.example.com` and `chat.example.com`. Unrelated sites
@@ -55,11 +55,13 @@ requests are not a substitute.
 | Variable | Meaning |
 | --- | --- |
 | `AUTH_SECRET` | Signs browser sessions and decrypts stored external-Agent credentials; keep stable across restarts |
-| `NEXT_PUBLIC_EVELAND_IDENTITY_URL` | Public Eveland Identity origin used by the browser |
-| `NEXT_PUBLIC_EVELAND_IDENTITY_RETURN_TARGET` | Registered Eveland return target; defaults to the legacy-compatible `eve-chats` key |
-| `EVELAND_IDENTITY_URL` | Optional server-reachable origin for the `/identity/*` rewrite |
-| `EVELAND_IDENTITY_ISSUER` | Exact issuer accepted by server-side token verification |
-| `EVELAND_IDENTITY_JWKS_URL` | Server-reachable Eveland signing-key endpoint |
+| `EVELAND_PUBLIC_ORIGIN` | Eveland's single public frontdoor; defaults to `http://localhost:17300` in development |
+| `EVELAND_IDENTITY_RETURN_TARGET` | Registered Eveland return target; defaults to the legacy-compatible `eve-chats` key |
+| `EVELAND_INTERNAL_ORIGIN` | Optional server-reachable frontdoor for the `/api/identity/*` rewrite, Catalog, and default JWKS URL |
+| `EVELAND_IDENTITY_ISSUER` | Optional exact Caller/App Token issuer; defaults to the public origin, but must keep the old value when an Eveland upgrade preserves it |
+| `EVELAND_IDENTITY_JWKS_URL` | Optional server-reachable signing-key endpoint; defaults to `<internal-origin>/.well-known/jwks.json` |
 
 Register the exact Dawn origin as the return target in Eveland System >
-Identity and include it in Eveland's allowed Identity origins.
+Identity and include it explicitly in Eveland's
+`EVELAND_IDENTITY_ALLOWED_ORIGINS`. Older Dawn variable names remain accepted
+as compatibility fallbacks, but new deployments should use the names above.

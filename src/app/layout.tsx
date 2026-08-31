@@ -10,6 +10,7 @@ import { ChatListProvider } from '@/components/chat-list-provider';
 import { ThemeProvider } from '@/components/theme-provider';
 import { IdentityGate } from '@/components/identity-gate';
 import { IdentityProvider } from '@/components/identity-provider';
+import { resolveEvelandConfig } from '@/identity/config';
 import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar';
 import { cn } from '@/lib/utils';
 
@@ -28,6 +29,7 @@ export default async function RootLayout({
 }): Promise<React.ReactElement> {
   const cookieStore = await cookies();
   const defaultOpen = cookieStore.get('sidebar_state')?.value !== 'false';
+  const eveland = resolveEvelandConfig();
 
   return (
     <html lang="en" className={cn('font-sans')} suppressHydrationWarning>
@@ -39,8 +41,9 @@ export default async function RootLayout({
           disableTransitionOnChange
         >
           <IdentityProvider
-            baseUrl={process.env.NEXT_PUBLIC_EVELAND_IDENTITY_URL ?? 'http://localhost:4000'}
-            returnTarget={process.env.NEXT_PUBLIC_EVELAND_IDENTITY_RETURN_TARGET ?? 'eve-chats'}
+            baseUrl={eveland.publicOrigin}
+            issuer={eveland.issuer}
+            returnTarget={eveland.returnTarget}
           >
             <IdentityGate>
               <ChatListProvider>
