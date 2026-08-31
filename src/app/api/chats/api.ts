@@ -41,6 +41,12 @@ export type ChatResponse = {
   evelandProjectId: string | null;
   /** The browser-safe, ID-addressed Eve session cursor. */
   sessionState: ClientSessionState | null;
+  /**
+   * A session-create request was issued for this chat and never proved what
+   * the Agent did with it. The initial message stays, and only an explicit
+   * retry may send it again.
+   */
+  sessionCreateUnconfirmed: boolean;
   /** The proxy's pending-input ledger: batches Eve is still parked on. */
   pendingInput: PendingInputState;
   pendingUserMessage: UserContent | null;
@@ -270,6 +276,7 @@ function chatResponse(chat: Chat): ChatResponse {
           streamIndex: chat.sessionState.streamIndex ?? 0,
         }
       : null,
+    sessionCreateUnconfirmed: chat.sessionCreateUnconfirmedAt !== null,
     pendingInput: chat.pendingInput ?? EMPTY_PENDING_INPUT,
     pendingUserMessage: deserializePendingUserContent(chat.pendingUserMessage),
     createdAt: chat.createdAt.toISOString(),

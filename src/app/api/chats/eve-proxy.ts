@@ -47,6 +47,11 @@ type ProxyContext = {
   chat: Chat;
   repository: Repository;
   client: ReturnType<typeof createEveClientForConnection>;
+  /**
+   * Present only when Eve can resolve an authenticated principal for this
+   * connection, which is the condition it requires before it will honour an
+   * `operationId` at all.
+   */
   sessionCreateOperationId?: string;
 };
 
@@ -215,11 +220,22 @@ async function proxyTurnRequest(
   }
 
   const body = withoutContinuationToken({ ...input });
+  // The browser never names the operation: a caller-chosen id could make one
+  // chat's create adopt the session another chat committed.
   delete body.operationId;
-  if (!sessionId && context.sessionCreateOperationId) {
+  const isCreate = sessionId === undefined;
+  if (isCreate && context.sessionCreateOperationId) {
     body.operationId = context.sessionCreateOperationId;
   }
   const currentSession = context.chat.sessionState;
+
+  if (isCreate) {
+    // Eve persists the workflow before it waits for the command hook, so a
+    // create that never answers — the 30s wait elapsing into a 500, a dropped
+    // connection, this handler dying — can still leave a session that runs
+    // later. The mark goes in before the request; only proof clears it.
+    await context.repository.markSessionCreateUnconfirmed(context.chat.id);
+  }
 
   let remote: Response;
   try {
@@ -229,13 +245,36 @@ async function proxyTurnRequest(
     return errorResponse("Unable to reach Eve agent", 502);
   }
 
+  if (!remote.ok && isCreate && (await rejectsOperationId(remote, body))) {
+    // Eve accepts `operationId` only for an authenticated principal, and an
+    // Agent whose Eve channel configures no authenticator resolves every
+    // caller as anonymous however Dawn holds its credential. The rejection is
+    // issued before any session work, so this retry replaces a request that
+    // provably created nothing; it costs idempotency, which that Agent could
+    // not have offered anyway.
+    delete body.operationId;
+    try {
+      remote = await postTurn(context, sessionId, body, request.signal);
+    } catch {
+      await context.repository.updateChatStatus(context.chat.id, "failed");
+      return errorResponse("Unable to reach Eve agent", 502);
+    }
+  }
+
   if (!remote.ok) {
+    if (isCreate && !isAmbiguousFailureStatus(remote.status)) {
+      // The Agent refused the request itself, which is proof it created
+      // nothing: this chat is safe to send from again.
+      await context.repository.clearSessionCreateUnconfirmed(context.chat.id);
+    }
     if (remote.status !== 401) {
       await context.repository.updateChatStatus(context.chat.id, "failed");
     }
     return forwardErrorResponse(remote, context.chat.id);
   }
 
+  // Eve answered 2xx from here on, so an unreadable body or a missing session
+  // ID leaves a create unconfirmed rather than refuted.
   const payload = await readResponseObject(remote);
   if (payload instanceof Response) {
     await context.repository.updateChatStatus(context.chat.id, "failed");
@@ -357,12 +396,43 @@ async function resolveProxyContext(
       chat,
       repository,
       client: createEveClientForConnection(agent, callerToken),
+      // A custom auth header is opaque to Dawn, and the browser session alone
+      // reaches Eve as an anonymous principal, which rejects an operationId.
       ...((callerToken || agent.authType === "bearer")
         ? { sessionCreateOperationId: createSessionOperationId(chat.id) }
         : {}),
     };
   } catch {
     return errorResponse("Agent authentication configuration is invalid", 500);
+  }
+}
+
+/**
+ * Whether a failed request leaves the Agent's side of it unknown. Only a
+ * refusal the Agent issued itself proves nothing was created; a 5xx or a
+ * request timeout can arrive after Eve has already persisted the workflow.
+ */
+function isAmbiguousFailureStatus(status: number): boolean {
+  return status >= 500 || status === 408;
+}
+
+/** Eve's 400 for an `operationId` it will not accept from this principal. */
+async function rejectsOperationId(
+  response: Response,
+  body: Record<string, unknown>,
+): Promise<boolean> {
+  if (response.status !== 400 || body.operationId === undefined) {
+    return false;
+  }
+  try {
+    const value = (await response.clone().json()) as unknown;
+    const error =
+      value && typeof value === "object" && !Array.isArray(value)
+        ? (value as { error?: unknown }).error
+        : undefined;
+    return typeof error === "string" && error.toLowerCase().includes("operationid");
+  } catch {
+    return false;
   }
 }
 

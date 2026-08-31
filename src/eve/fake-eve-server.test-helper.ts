@@ -24,6 +24,14 @@ export interface FakeEveServerOptions {
   readonly generation?: FakeEveGeneration;
   readonly redirectHealthTo?: string;
   readonly failCreateSession?: boolean;
+  /** Status for `failCreateSession`; defaults to an ambiguous 500. */
+  readonly failCreateSessionStatus?: number;
+  /**
+   * Force the anonymous principal an Agent whose Eve channel configures no
+   * authenticator resolves for every caller, credential or not. Defaults to
+   * "anonymous unless the request carries an Authorization header".
+   */
+  readonly anonymousPrincipal?: boolean;
   /** Commit one operation-owned session, then make its first create response ambiguous. */
   readonly failFirstCreateResponseAfterCommit?: boolean;
   readonly streamEvents?: readonly unknown[];
@@ -130,7 +138,7 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
           return;
         }
         if (options.failCreateSession) {
-          writeJson(response, 500, {
+          writeJson(response, options.failCreateSessionStatus ?? 500, {
             error: "Failed to create fake session",
             errorId: "err_fake_session_create",
             ok: false,
@@ -139,6 +147,20 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
         }
 
         const requestedOperationId = (body as { operationId?: unknown } | null)?.operationId;
+        // 0.45 derives an operation's replay-stable identity from the
+        // authenticated principal, and refuses the field without one. 0.44
+        // knows nothing about it and ignores it.
+        if (
+          generation === "0.45" &&
+          requestedOperationId !== undefined &&
+          (options.anonymousPrincipal ?? request.headers.authorization === undefined)
+        ) {
+          writeJson(response, 400, {
+            error: "operationId requires an authenticated principal.",
+            ok: false,
+          });
+          return;
+        }
         const operationId =
           generation === "0.45" && typeof requestedOperationId === "string"
             ? requestedOperationId

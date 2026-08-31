@@ -205,11 +205,15 @@ describe("per-chat Eve protocol proxy", () => {
       errorId: "err_ambiguous_session_create",
       ok: false,
     });
-    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+    const ambiguousChat = await repository.getChat(chat.id);
+    expect(ambiguousChat).toMatchObject({
       pendingUserMessage: "Run this once",
       sessionState: null,
       status: "failed",
     });
+    // The 500 says nothing about the workflow Eve committed, so the chat
+    // stays marked and only an explicit retry may send the message again.
+    expect(ambiguousChat?.sessionCreateUnconfirmedAt).toBeInstanceOf(Date);
 
     const recovered = await routes.createSession(
       createRequest(),
@@ -235,6 +239,192 @@ describe("per-chat Eve protocol proxy", () => {
     ]);
     await expect(repository.getChat(chat.id)).resolves.toMatchObject({
       pendingUserMessage: null,
+      sessionCreateUnconfirmedAt: null,
+      sessionState: { sessionId: "ses_1", streamIndex: 0 },
+      status: "active",
+    });
+  });
+
+  it("keeps a create unconfirmed when the connection breaks before any answer", async () => {
+    const server = await fakeServer();
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Interrupted Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Interrupted create",
+      pendingUserMessage: "Run this once",
+      ...chatIdentity,
+    });
+    const routes = await loadProxyRoutes();
+    const abort = new AbortController();
+    abort.abort();
+
+    const response = await routes.createSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ message: "Run this once" }),
+        signal: abort.signal,
+      }),
+      { params: Promise.resolve({ chatId: chat.id }) },
+    );
+
+    expect(response.status).toBe(502);
+    // The mark is written before the request, so a create whose answer never
+    // arrives — here the browser going away — is still remembered as open.
+    const stored = await repository.getChat(chat.id);
+    expect(stored?.sessionCreateUnconfirmedAt).toBeInstanceOf(Date);
+    expect(stored).toMatchObject({
+      pendingUserMessage: "Run this once",
+      sessionState: null,
+      status: "failed",
+    });
+  });
+
+  it("clears the unconfirmed mark when the Agent refuses the create itself", async () => {
+    const server = await fakeServer({
+      failCreateSession: true,
+      failCreateSessionStatus: 400,
+    });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Refusing Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Refused create",
+      pendingUserMessage: "Run this once",
+      ...chatIdentity,
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const routes = await loadProxyRoutes();
+
+    const response = await routes.createSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ message: "Run this once" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id }) },
+    );
+
+    expect(response.status).toBe(400);
+    // A refusal the Agent issued itself is proof no session exists.
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      pendingUserMessage: "Run this once",
+      sessionCreateUnconfirmedAt: null,
+      sessionState: null,
+      status: "failed",
+    });
+  });
+
+  it("creates an anonymous chat's session without naming an operation Eve would refuse", async () => {
+    const server = await fakeServer({ failCreateSession: true });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Public Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const session = resolveAppBrowserSession(
+      new Request("http://localhost/api/chats"),
+    );
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Anonymous create",
+      pendingUserMessage: "Run this once",
+      ownerClientId: session.clientId,
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const routes = await loadProxyRoutes();
+
+    const response = await routes.createSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session`, {
+        method: "POST",
+        headers: {
+          cookie: session.setCookie!.split(";")[0]!,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          message: "Run this once",
+          operationId: "untrusted-browser-operation",
+        }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id }) },
+    );
+
+    // Eve refuses an operationId from an anonymous principal, so this chat
+    // gets no idempotency — and therefore no automatic second attempt.
+    expect(response.status).toBe(500);
+    expect(server.requests[0]?.body).toEqual({ message: "Run this once" });
+    const stored = await repository.getChat(chat.id);
+    expect(stored?.sessionCreateUnconfirmedAt).toBeInstanceOf(Date);
+    expect(stored).toMatchObject({
+      pendingUserMessage: "Run this once",
+      sessionState: null,
+      status: "failed",
+    });
+  });
+
+  it("retries once without the operation id when the Agent refuses to accept one", async () => {
+    const server = await fakeServer({ anonymousPrincipal: true });
+    const repository = createRepository(testDb.db);
+    // A bearer credential is Dawn's only signal that Eve can name a
+    // principal, and an Agent whose channel configures no authenticator
+    // resolves this caller as anonymous anyway.
+    const agent = await repository.createAgentConnection({
+      name: "Unauthenticated Eve",
+      baseUrl: server.baseUrl,
+      authType: "bearer",
+      authConfigEncrypted: encryptAuthConfig({ bearerToken: "agent-token" }),
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const session = resolveAppBrowserSession(
+      new Request("http://localhost/api/chats"),
+    );
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Unnamed create",
+      pendingUserMessage: "Run this once",
+      ownerClientId: session.clientId,
+    });
+    const routes = await loadProxyRoutes();
+
+    const response = await routes.createSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session`, {
+        method: "POST",
+        headers: {
+          cookie: session.setCookie!.split(";")[0]!,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ message: "Run this once" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id }) },
+    );
+
+    expect(response.status).toBe(202);
+    const creates = server.requests.filter(
+      (request) => request.method === "POST" && request.path === "/eve/v1/session",
+    );
+    expect(creates).toHaveLength(2);
+    expect((creates[0]?.body as { operationId?: unknown }).operationId).toEqual(
+      expect.any(String),
+    );
+    expect(creates[1]?.body).toEqual({ message: "Run this once" });
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      pendingUserMessage: null,
+      sessionCreateUnconfirmedAt: null,
       sessionState: { sessionId: "ses_1", streamIndex: 0 },
       status: "active",
     });
@@ -465,6 +655,8 @@ describe("per-chat Eve protocol proxy", () => {
     await expect(repository.getChat(chat.id)).resolves.toMatchObject({
       status: "active",
       pendingUserMessage: "Hello",
+      // A challenge is answered by retrying, and it created nothing.
+      sessionCreateUnconfirmedAt: null,
       sessionState: null,
     });
 

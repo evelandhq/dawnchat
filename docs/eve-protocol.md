@@ -37,6 +37,33 @@ replaces that turn. Stop is the deliberate interruption mechanism: Dawn
 waits for the target `turn.started`, calls Eve's durable cancellation route,
 and stays attached until the turn settles.
 
+## Ambiguous session creation
+
+Eve persists a session's workflow before it waits for the Agent's command
+hook, so a create can answer with a generic 500 — or never answer at all —
+while the queued workflow still runs. Dawn treats a 5xx, a request timeout,
+and a broken connection as an unknown outcome rather than proof that no
+session exists. The chat is marked unconfirmed before the request leaves, so
+even a handler that dies mid-flight leaves the mark behind, and it keeps its
+initial message. Nothing resends that message on its own: a mount, a React
+StrictMode remount, and a refresh all leave the composer closed behind an
+explicit **Retry message**.
+
+Only a refusal the Agent issued itself — any 4xx other than 401 — clears the
+mark, and the chat then reads as an ordinary failed send with its composer
+open again. A 401 is the Eveland challenge described in
+[Authentication and identity](authentication.md); it creates nothing and
+settles nothing until the Caller Token retry.
+
+Every create for one chat carries the same operation ID, derived server-side
+from the chat ID and never taken from the browser. Eve answers a repeat of an
+operation it already committed with that session's ID, which Dawn adopts,
+persists at stream index 0, and resumes from the start of the stream. Eve
+honours an operation ID only for an authenticated principal, so an anonymous
+chat sends none and has no idempotency to fall back on — which is why a retry
+is always the user's decision. An Agent that refuses the field is retried once
+without it, since that refusal precedes any session work.
+
 ## Event persistence and projection
 
 The proxy persists canonical Eve events with idempotency on

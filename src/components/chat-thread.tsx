@@ -84,9 +84,24 @@ export type ChatThreadSummary = {
   title: string;
   status: "active" | "completed" | "failed";
   sessionState: ClientSessionState | null;
+  /** A create request for this chat never proved what the Agent did with it. */
+  sessionCreateUnconfirmed?: boolean;
   createdAt: string;
   updatedAt: string;
 };
+
+/**
+ * Where the initial message's session creation stands.
+ *
+ * - `settled`: the chat has a session, or carries no initial message.
+ * - `pending`: an attempt is in flight, or none has run in this page yet.
+ * - `unconfirmed`: an attempt ended without proving what Eve did with it. A
+ *   resend risks a second session replaying the same first message, so only
+ *   the user may ask for one.
+ * - `rejected`: an attempt ended with proof that no session exists, so the
+ *   composer is usable again.
+ */
+type InitialCreateState = "settled" | "pending" | "unconfirmed" | "rejected";
 
 /**
  * One input batch as this client tracks it. The proxy's ledger is the
@@ -287,6 +302,12 @@ function ChatThreadSession({
   const retrySentRef = useRef(false);
   const retryRefetchedRef = useRef(false);
   const [localError, setLocalError] = useState<string | null>(null);
+  // What a create attempt in this page's lifetime settled at. `null` defers to
+  // the stored chat, which is all a fresh page load has.
+  const [liveInitialCreate, setLiveInitialCreate] = useState<Exclude<
+    InitialCreateState,
+    "settled"
+  > | null>(null);
   const [composerText, setComposerText] = useState("");
   // Refs mirror the states below so callbacks and same-batch dispatches read
   // the latest value instead of a stale render's.
@@ -455,6 +476,12 @@ function ChatThreadSession({
       void refetchPendingInput();
 
       const current = agentRef.current;
+      // A send that failed before this chat holds a session was a create, and
+      // the hook resolves `send` either way, so this is where its verdict is.
+      if (pendingUserMessage && !current?.session) {
+        const outcome = initialCreateFromFailure(error);
+        if (outcome) setLiveInitialCreate(outcome);
+      }
       const retry = latestInputRef.current;
       const queuedTurnId = activeQueuedTurnIdRef.current ?? undefined;
       if (queuedTurnId) {
@@ -539,10 +566,24 @@ function ChatThreadSession({
   agentRef.current = agent;
   const isResuming = agent.status === "resuming";
   const isBusy = agent.status === "submitted" || agent.status === "streaming";
-  const hasUnconfirmedInitialMessage = Boolean(pendingUserMessage) && !agent.session;
-  const pendingCreateNeedsRetry =
-    hasUnconfirmedInitialMessage &&
-    (chat.status === "failed" || agent.status === "error");
+  // A stored chat can only say whether its last create is still unconfirmed;
+  // an attempt made in this page's lifetime is classified from its failure.
+  const initialCreate: InitialCreateState =
+    !pendingUserMessage || agent.session
+      ? "settled"
+      : (liveInitialCreate ??
+        (chat.sessionCreateUnconfirmed
+          ? "unconfirmed"
+          : chat.status === "failed"
+            ? "rejected"
+            : "pending"));
+  const createUnconfirmed = initialCreate === "unconfirmed";
+  // Retry is offered for every settled create failure, and while an attempt
+  // that left no verdict — a challenge nothing answered — sits in error.
+  const canRetryInitialMessage =
+    createUnconfirmed ||
+    initialCreate === "rejected" ||
+    (initialCreate === "pending" && agent.status === "error");
   const pendingRequestIds = useMemo(() => {
     const ids = new Set<string>();
     for (const batch of pendingBatches) {
@@ -558,7 +599,8 @@ function ChatThreadSession({
     readOnly ||
     chat.status === "completed" ||
     isResuming ||
-    hasUnconfirmedInitialMessage;
+    initialCreate === "pending" ||
+    initialCreate === "unconfirmed";
   const projectedMessages = queuedTurns.some(
     (turn) => turn.status === "sending" || turn.status === "failed",
   )
@@ -699,12 +741,15 @@ function ChatThreadSession({
     updateQueuedTurns,
   ]);
 
+  // Only a create whose outcome is still open may be sent without the user
+  // asking: an unconfirmed one could duplicate a session Eve already runs, and
+  // a rejected one belongs to the composer.
   useEffect(() => {
     if (
       readOnly ||
       retryInput ||
       !pendingUserMessage ||
-      chat.status === "failed" ||
+      initialCreate !== "pending" ||
       pendingSentRef.current ||
       agent.status !== "ready"
     ) {
@@ -720,7 +765,7 @@ function ChatThreadSession({
       });
     }, 0);
     return () => clearTimeout(timer);
-  }, [agent, chat.status, pendingUserMessage, readOnly, retryInput, pendingSentRef]);
+  }, [agent, initialCreate, pendingUserMessage, readOnly, retryInput, pendingSentRef]);
 
   useEffect(() => {
     if (
@@ -867,6 +912,11 @@ function ChatThreadSession({
       });
   };
 
+  /**
+   * Resends the initial message on the user's word. The proxy keeps naming the
+   * same create operation, so an Agent that already committed one answers with
+   * that session instead of starting a second.
+   */
   const handleRetryPendingMessage = (): void => {
     const current = agentRef.current;
     if (
@@ -877,6 +927,7 @@ function ChatThreadSession({
       return;
     }
     pendingSentRef.current = true;
+    setLiveInitialCreate("pending");
     setLocalError(null);
     void current
       .send(pendingUserMessage, { turnPolicy: TURN_POLICY })
@@ -893,7 +944,7 @@ function ChatThreadSession({
           agent.error.message,
           sessionFailureErrorId(agent.events.at(-1)),
         )
-      : pendingCreateNeedsRetry
+      : createUnconfirmed
         ? "The previous session creation result could not be confirmed."
         : null);
 
@@ -930,7 +981,7 @@ function ChatThreadSession({
             <div className="mb-2 flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm">
               <AlertCircleIcon className="mt-0.5 size-4 shrink-0 text-destructive" />
               <p className="min-w-0 flex-1" role="alert">{displayedError}</p>
-              {pendingCreateNeedsRetry ? (
+              {canRetryInitialMessage ? (
                 <Button
                   disabled={isBusy || isResuming}
                   onClick={handleRetryPendingMessage}
@@ -1199,6 +1250,23 @@ function receivedMessageMatchesQueuedTurn(
       event.data.message.includes(file.filename?.trim() || "Attachment"),
     )
   );
+}
+
+/**
+ * What a failed create proves, or `null` when the failure carries no verdict
+ * on it: a 401 is an Eveland challenge this thread answers by retrying with a
+ * Caller Token, and only that retry settles the create.
+ *
+ * Otherwise, a refusal the Agent issued itself rules a session out, while a
+ * 5xx, a request timeout, or a transport failure with no status at all can
+ * each follow a workflow Eve has already persisted.
+ */
+function initialCreateFromFailure(
+  error: unknown,
+): "unconfirmed" | "rejected" | null {
+  if (!(error instanceof ClientError)) return "unconfirmed";
+  if (error.status === 401) return null;
+  return error.status < 500 && error.status !== 408 ? "rejected" : "unconfirmed";
 }
 
 function composerPlaceholder(status: ChatThreadSummary["status"]): string {

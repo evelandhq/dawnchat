@@ -1,0 +1,1 @@
+ALTER TABLE "chats" ADD COLUMN "session_create_unconfirmed_at" timestamp with time zone;

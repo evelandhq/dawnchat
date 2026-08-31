@@ -55,6 +55,13 @@ export const chats = pgTable(
     // are derived from stored events on first touch and written back.
     pendingInputJson: text("pending_input_json"),
     pendingUserMessage: text("pending_user_message"),
+    // Set before every session-create request and cleared only by proof of
+    // what the Agent did with it. While set, a session may exist that this
+    // chat has no ID for, so nothing may resend the first message on its own.
+    sessionCreateUnconfirmedAt: timestamp("session_create_unconfirmed_at", {
+      withTimezone: true,
+      mode: "date",
+    }),
     status: text("status", { enum: chatStatuses }).notNull().default("active"),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull(),
