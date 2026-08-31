@@ -10,8 +10,8 @@ describe("Next configuration", () => {
     expect(rewrites).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          source: "/identity/:path*",
-          destination: expect.stringMatching(/\/identity\/:path\*$/),
+          source: "/api/identity/:path*",
+          destination: expect.stringMatching(/\/api\/identity\/:path\*$/),
         }),
       ]),
     );

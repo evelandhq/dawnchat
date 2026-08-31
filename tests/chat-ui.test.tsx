@@ -1220,7 +1220,7 @@ describe("ChatThread with Eve and AI Elements", () => {
 
   it("retries the original turn with a Caller Token after an Eveland route challenge", async () => {
     const challenge =
-      'Bearer realm="eveland", authorization_uri="https://identity.example.com/identity/login", project_id="project_support", display_name="Eveland"';
+      'Bearer realm="eveland", authorization_uri="https://identity.example.com/api/identity/login", project_id="project_support", display_name="Eveland"';
     const getAccessToken = vi.fn(async () => "app-token");
     const getCallerToken = vi.fn(async () => "caller-token");
     const respondToAuthenticationChallenge = vi.fn(
@@ -1289,7 +1289,7 @@ describe("ChatThread with Eve and AI Elements", () => {
 
   it("does not repeat the Eveland authentication flow when the Caller Token is rejected", async () => {
     const challenge =
-      'Bearer realm="eveland", authorization_uri="https://identity.example.com/identity/login", project_id="project_support", display_name="Eveland"';
+      'Bearer realm="eveland", authorization_uri="https://identity.example.com/api/identity/login", project_id="project_support", display_name="Eveland"';
     const respondToAuthenticationChallenge = vi
       .fn<(header: string | null) => Promise<string | null>>()
       .mockResolvedValueOnce("caller-token")
@@ -1869,7 +1869,7 @@ describe("ChatThread with Eve and AI Elements", () => {
 
   it("retries an authenticated Steer without losing its queued row", async () => {
     const challenge =
-      'Bearer realm="eveland", authorization_uri="https://identity.example.com/identity/login", project_id="project_support", display_name="Eveland"';
+      'Bearer realm="eveland", authorization_uri="https://identity.example.com/api/identity/login", project_id="project_support", display_name="Eveland"';
     const respondToAuthenticationChallenge = vi.fn(async () => "caller-token");
     const seenAuthorization: Array<string | null> = [];
     let postNumber = 0;

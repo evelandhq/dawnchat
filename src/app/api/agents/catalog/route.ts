@@ -3,6 +3,7 @@ import { z } from "zod";
 import { redactAgentConnection } from "@/app/api/agents/api";
 import { getDbClient } from "@/db/provider";
 import { createRepository } from "@/db/repository";
+import { resolveEvelandConfig } from "@/identity/config";
 import { normalizeAgentBaseUrl } from "@/lib/validation";
 
 const catalogEntrySchema = z.object({
@@ -42,7 +43,8 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   try {
-    const issuer = configuredCatalogIssuer();
+    const eveland = resolveEvelandConfig();
+    const issuer = eveland.issuer;
     if (issuer !== parsed.data.issuer.replace(/\/$/, "")) {
       return Response.json(
         { error: "Catalog issuer does not match the configured Eveland instance" },
@@ -50,7 +52,7 @@ export async function POST(request: Request): Promise<Response> {
       );
     }
     const catalogResponse = await fetch(
-      `${catalogRequestBaseUrl(issuer)}/agent-catalog`,
+      `${eveland.internalOrigin}/api/agent-catalog`,
       {
         headers: { accept: "application/json" },
         redirect: "error",
@@ -114,23 +116,4 @@ export async function POST(request: Request): Promise<Response> {
   } catch {
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
-}
-
-// The issuer identifies the Eveland instance and must keep matching the value
-// the browser and its tokens carry. EVELAND_IDENTITY_URL is where this server
-// can actually reach that instance, which differs whenever the deployment box
-// cannot route to its own public identity host (hairpin routing).
-function catalogRequestBaseUrl(issuer: string): string {
-  const requestBaseUrl = process.env.EVELAND_IDENTITY_URL?.trim();
-  return requestBaseUrl ? requestBaseUrl.replace(/\/$/, "") : issuer;
-}
-
-function configuredCatalogIssuer(): string {
-  const value =
-    process.env.EVELAND_IDENTITY_ISSUER?.trim() ||
-    process.env.NEXT_PUBLIC_EVELAND_IDENTITY_URL?.trim();
-  if (!value) {
-    throw new Error("Eveland Catalog issuer is not configured");
-  }
-  return value.replace(/\/$/, "");
 }

@@ -8,7 +8,7 @@ describe("Eveland browser identity client", () => {
       .fn<typeof globalThis.fetch>()
       .mockResolvedValueOnce(new Response(null, { status: 302, headers: { location: "http://localhost:3000/login" } }));
     const client = createEvelandIdentityClient({
-      baseUrl: "http://localhost:4000",
+      baseUrl: "http://localhost:17300",
       returnTarget: "eve-chats",
       fetch,
       redirect: vi.fn(),
@@ -17,10 +17,10 @@ describe("Eveland browser identity client", () => {
     await expect(client.getLoginAvailability("/chats/chat_1")).resolves.toEqual({
       available: true,
     });
-    // Same-origin via the app's /identity rewrite — the refusal JSON is not
+    // Same-origin via the app's /api/identity rewrite — the refusal JSON is not
     // CORS-readable from the identity host directly.
     expect(fetch).toHaveBeenCalledWith(
-      "/identity/login?target=eve-chats&returnPath=%2Fchats%2Fchat_1",
+      "/api/identity/login?target=eve-chats&returnPath=%2Fchats%2Fchat_1",
       expect.objectContaining({ redirect: "manual" }),
     );
   });
@@ -36,7 +36,7 @@ describe("Eveland browser identity client", () => {
       ),
     );
     const client = createEvelandIdentityClient({
-      baseUrl: "http://localhost:4000",
+      baseUrl: "http://localhost:17300",
       returnTarget: "eve-chats",
       fetch,
       redirect: vi.fn(),
@@ -54,7 +54,7 @@ describe("Eveland browser identity client", () => {
       .fn<typeof globalThis.fetch>()
       .mockRejectedValueOnce(new TypeError("fetch failed"));
     const client = createEvelandIdentityClient({
-      baseUrl: "http://localhost:4000",
+      baseUrl: "http://localhost:17300",
       returnTarget: "eve-chats",
       fetch,
       redirect: vi.fn(),
@@ -83,7 +83,7 @@ describe("Eveland browser identity client", () => {
       .mockResolvedValueOnce(new Response(null, { status: 204 }));
     const redirect = vi.fn();
     const client = createEvelandIdentityClient({
-      baseUrl: "http://localhost:4000",
+      baseUrl: "http://localhost:17300",
       returnTarget: "eve-chats",
       fetch,
       redirect,
@@ -99,17 +99,17 @@ describe("Eveland browser identity client", () => {
 
     expect(fetch).toHaveBeenNthCalledWith(
       1,
-      "/identity/session",
+      "/api/identity/session",
       expect.objectContaining({ credentials: "include" }),
     );
     expect(fetch).toHaveBeenNthCalledWith(
       2,
-      "/identity/caller-tokens",
+      "/api/identity/caller-tokens",
       expect.objectContaining({ credentials: "include" }),
     );
     expect(fetch).toHaveBeenNthCalledWith(
       3,
-      "/identity/logout",
+      "/api/identity/logout",
       expect.objectContaining({ credentials: "include" }),
     );
 
@@ -117,7 +117,7 @@ describe("Eveland browser identity client", () => {
       expect.objectContaining({ code: "identity_redirecting" }),
     );
     expect(redirect).toHaveBeenCalledWith(
-      "http://localhost:4000/identity/login?target=eve-chats&returnPath=%2Fchats%2Fchat_1",
+      "http://localhost:17300/api/identity/login?target=eve-chats&returnPath=%2Fchats%2Fchat_1",
     );
   });
 
@@ -149,14 +149,15 @@ describe("Eveland browser identity client", () => {
         Response.json({ token: "app-token", expiresAt }),
       );
     const client = createEvelandIdentityClient({
-      baseUrl: "https://eveland.example.com",
+      baseUrl: "https://frontdoor.example.com",
+      issuer: "https://identity-issuer.example.com",
       returnTarget: "eve-chats",
       fetch,
       redirect: vi.fn(),
     });
 
     await expect(client.getCatalog()).resolves.toEqual({
-      issuer: "https://eveland.example.com",
+      issuer: "https://identity-issuer.example.com",
       agents: [
         {
           projectId: "project_support",
@@ -170,12 +171,12 @@ describe("Eveland browser identity client", () => {
     await expect(client.getAppToken()).resolves.toBe("app-token");
     expect(fetch).toHaveBeenNthCalledWith(
       1,
-      "https://eveland.example.com/agent-catalog",
+      "https://frontdoor.example.com/api/agent-catalog",
       expect.objectContaining({ credentials: "include" }),
     );
     expect(fetch).toHaveBeenNthCalledWith(
       3,
-      "https://eveland.example.com/identity/app-tokens",
+      "https://frontdoor.example.com/api/identity/app-tokens",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({ target: "eve-chats" }),
@@ -282,7 +283,7 @@ describe("Eveland browser identity client", () => {
       client.getCallerToken("project_support", "/agents/agent_1?from=home"),
     ).rejects.toMatchObject({ code: "identity_redirecting" });
     expect(redirect).toHaveBeenCalledWith(
-      "https://eveland.example.com/identity/login?target=eve-chats&returnPath=%2Fagents%2Fagent_1%3Ffrom%3Dhome",
+      "https://eveland.example.com/api/identity/login?target=eve-chats&returnPath=%2Fagents%2Fagent_1%3Ffrom%3Dhome",
     );
   });
 
@@ -308,7 +309,7 @@ describe("Eveland browser identity client", () => {
       redirect,
     });
     const challenge =
-      'Basic realm="agent", Bearer realm="eveland", authorization_uri="https://eveland.example.com/identity/login", project_id="project_support", display_name="Eveland"';
+      'Basic realm="agent", Bearer realm="eveland", authorization_uri="https://eveland.example.com/api/identity/login", project_id="project_support", display_name="Eveland"';
 
     await expect(
       client.respondToAuthenticationChallenge(
@@ -320,7 +321,7 @@ describe("Eveland browser identity client", () => {
 
     expect(redirect).not.toHaveBeenCalled();
     expect(fetch).toHaveBeenLastCalledWith(
-      "https://eveland.example.com/identity/caller-tokens",
+      "https://eveland.example.com/api/identity/caller-tokens",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({ projectId: "project_support" }),
@@ -337,7 +338,7 @@ describe("Eveland browser identity client", () => {
       redirect,
     });
     const challenge =
-      'Bearer realm="eveland", authorization_uri="https://eveland.example.com/identity/login", project_id="project_support", display_name="Eveland"';
+      'Bearer realm="eveland", authorization_uri="https://eveland.example.com/api/identity/login", project_id="project_support", display_name="Eveland"';
 
     await expect(
       client.respondToAuthenticationChallenge(
@@ -347,7 +348,7 @@ describe("Eveland browser identity client", () => {
       ),
     ).rejects.toMatchObject({ code: "identity_redirecting" });
     expect(redirect).toHaveBeenCalledWith(
-      "https://eveland.example.com/identity/login?target=eve-chats&returnPath=%2Fchats%2Fchat_1%3Fretry%3D1",
+      "https://eveland.example.com/api/identity/login?target=eve-chats&returnPath=%2Fchats%2Fchat_1%3Fretry%3D1",
     );
   });
 
@@ -360,7 +361,7 @@ describe("Eveland browser identity client", () => {
       redirect,
     });
     const challenge =
-      'Bearer realm="eveland", authorization_uri="https://eveland.example.com/identity/login", project_id="project_support", display_name="Eveland"';
+      'Bearer realm="eveland", authorization_uri="https://eveland.example.com/api/identity/login", project_id="project_support", display_name="Eveland"';
 
     await expect(
       client.respondToAuthenticationChallenge(
@@ -399,7 +400,7 @@ describe("Eveland browser identity client", () => {
     ).resolves.toBeNull();
     await expect(
       client.respondToAuthenticationChallenge(
-        'Bearer realm="eveland", authorization_uri="https://attacker.example.com/identity/login", project_id="project_support", display_name="Eveland"',
+        'Bearer realm="eveland", authorization_uri="https://attacker.example.com/api/identity/login", project_id="project_support", display_name="Eveland"',
         "project_support",
         "/",
       ),

@@ -59,7 +59,7 @@ function abortableDelay(ms: number, signal: AbortSignal | null | undefined): Pro
 }
 
 const challenge =
-  'Bearer realm="eveland", authorization_uri="https://identity.example.com/identity/login", project_id="project_support", display_name="Eveland"';
+  'Bearer realm="eveland", authorization_uri="https://identity.example.com/api/identity/login", project_id="project_support", display_name="Eveland"';
 
 /**
  * Unlike the mocks in chat-ui.test.tsx, this one honors `init.signal` the way

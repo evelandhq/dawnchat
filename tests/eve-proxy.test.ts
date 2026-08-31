@@ -328,7 +328,7 @@ describe("per-chat Eve protocol proxy", () => {
 
   it("forwards an Eveland authentication challenge, then sends a Caller Token only on retry", async () => {
     const challenge =
-      'Bearer realm="eveland", authorization_uri="https://identity.example.com/identity/login", project_id="project_support", display_name="Eveland"';
+      'Bearer realm="eveland", authorization_uri="https://identity.example.com/api/identity/login", project_id="project_support", display_name="Eveland"';
     const server = await fakeServer({
       authenticationChallenge: {
         header: challenge,

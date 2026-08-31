@@ -31,6 +31,7 @@ import {
   callerTokenErrorResponse,
   getCallerTokenVerifier,
 } from "@/identity/server";
+import { resolveEvelandConfig } from "@/identity/config";
 
 const NDJSON_CONTENT_TYPE = "application/x-ndjson; charset=utf-8";
 
@@ -389,7 +390,7 @@ export async function resolveProxyChat(
       try {
         appIdentity = await getCallerTokenVerifier().verifyAppAuthorization(
           authorization,
-          process.env.NEXT_PUBLIC_EVELAND_IDENTITY_RETURN_TARGET ?? "eve-chats",
+          resolveEvelandConfig().returnTarget,
         );
       } catch (appError) {
         if (!candidate.evelandProjectId) throw appError;
@@ -446,7 +447,7 @@ export async function resolveProxyChat(
     } else if (!clientChat) {
       await getCallerTokenVerifier().verifyAppAuthorization(
         null,
-        process.env.NEXT_PUBLIC_EVELAND_IDENTITY_RETURN_TARGET ?? "eve-chats",
+        resolveEvelandConfig().returnTarget,
       );
     }
   } catch (error) {

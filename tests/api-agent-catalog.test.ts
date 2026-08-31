@@ -17,12 +17,15 @@ describe("Catalog Agent connection API", () => {
     testDb = await createTestDbHandle();
     setDbClientForTests(testDb.db);
     setCallerTokenVerifierForTests(testVerifier);
+    process.env.EVELAND_PUBLIC_ORIGIN = "https://frontdoor.example.com";
     process.env.EVELAND_IDENTITY_ISSUER = "https://identity.example.com";
-    delete process.env.EVELAND_IDENTITY_URL;
+    delete process.env.EVELAND_INTERNAL_ORIGIN;
   });
 
   afterEach(async () => {
-    delete process.env.EVELAND_IDENTITY_URL;
+    delete process.env.EVELAND_PUBLIC_ORIGIN;
+    delete process.env.EVELAND_IDENTITY_ISSUER;
+    delete process.env.EVELAND_INTERNAL_ORIGIN;
     vi.unstubAllGlobals();
     setDbClientForTests(null);
     setCallerTokenVerifierForTests(null);
@@ -100,7 +103,7 @@ describe("Catalog Agent connection API", () => {
     ]);
     expect(fetchCatalog).toHaveBeenCalledTimes(2);
     expect(fetchCatalog).toHaveBeenCalledWith(
-      "https://identity.example.com/agent-catalog",
+      "https://frontdoor.example.com/api/agent-catalog",
       expect.objectContaining({
         headers: { accept: "application/json" },
         redirect: "error",
@@ -149,8 +152,8 @@ describe("Catalog Agent connection API", () => {
     });
   });
 
-  it("reads the Catalog over EVELAND_IDENTITY_URL while still requiring the public issuer", async () => {
-    process.env.EVELAND_IDENTITY_URL = "http://host.docker.internal:4000/";
+  it("reads the Catalog over EVELAND_INTERNAL_ORIGIN while still requiring the stable issuer", async () => {
+    process.env.EVELAND_INTERNAL_ORIGIN = "http://eveland-frontdoor:17300/";
     const fetchCatalog = vi.fn<typeof globalThis.fetch>(async () =>
       Response.json({
         agents: [
@@ -173,7 +176,7 @@ describe("Catalog Agent connection API", () => {
 
     expect(response.status).toBe(201);
     expect(fetchCatalog).toHaveBeenCalledWith(
-      "http://host.docker.internal:4000/agent-catalog",
+      "http://eveland-frontdoor:17300/api/agent-catalog",
       expect.objectContaining({ redirect: "error" }),
     );
     await expect(createRepository(testDb.db).listAgentConnections()).resolves.toEqual([
