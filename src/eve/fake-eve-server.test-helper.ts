@@ -29,9 +29,16 @@ export interface FakeEveServerOptions {
   /**
    * Force the anonymous principal an Agent whose Eve channel configures no
    * authenticator resolves for every caller, credential or not. Defaults to
-   * "anonymous unless the request carries an Authorization header".
+   * "anonymous unless the request carries an authenticating header".
    */
   readonly anonymousPrincipal?: boolean;
+  /**
+   * Header name an Agent's own auth function authenticates, the way a custom
+   * `AuthFn` resolves `X-Agent-Key` into a named principal.
+   */
+  readonly authenticatedHeader?: string;
+  /** Hold a create open, so a concurrent one meets it in flight. */
+  readonly createSessionDelayMs?: number;
   /** Commit one operation-owned session, then make its first create response ambiguous. */
   readonly failFirstCreateResponseAfterCommit?: boolean;
   readonly streamEvents?: readonly unknown[];
@@ -123,6 +130,9 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
       }
 
       if (request.method === "POST" && url.pathname === "/eve/v1/session") {
+        if (options.createSessionDelayMs) {
+          await delay(options.createSessionDelayMs);
+        }
         if (
           options.authenticationChallenge &&
           request.headers.authorization !==
@@ -147,13 +157,17 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
         }
 
         const requestedOperationId = (body as { operationId?: unknown } | null)?.operationId;
+        const authenticated =
+          request.headers.authorization !== undefined ||
+          (options.authenticatedHeader !== undefined &&
+            request.headers[options.authenticatedHeader.toLowerCase()] !== undefined);
         // 0.45 derives an operation's replay-stable identity from the
         // authenticated principal, and refuses the field without one. 0.44
         // knows nothing about it and ignores it.
         if (
           generation === "0.45" &&
           requestedOperationId !== undefined &&
-          (options.anonymousPrincipal ?? request.headers.authorization === undefined)
+          (options.anonymousPrincipal ?? !authenticated)
         ) {
           writeJson(response, 400, {
             error: "operationId requires an authenticated principal.",
@@ -263,6 +277,10 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
     requests,
     close: () => closeServer(server),
   };
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function closeServer(server: Server): Promise<void> {

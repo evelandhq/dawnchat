@@ -1254,8 +1254,9 @@ function receivedMessageMatchesQueuedTurn(
 
 /**
  * What a failed create proves, or `null` when the failure carries no verdict
- * on it: a 401 is an Eveland challenge this thread answers by retrying with a
- * Caller Token, and only that retry settles the create.
+ * on it. A 401 is an Eveland challenge this thread answers by retrying with a
+ * Caller Token, and only that retry settles the create. A 409 means another
+ * request owns this chat's create — its outcome, not this one's, decides.
  *
  * Otherwise, a refusal the Agent issued itself rules a session out, while a
  * 5xx, a request timeout, or a transport failure with no status at all can
@@ -1265,7 +1266,7 @@ function initialCreateFromFailure(
   error: unknown,
 ): "unconfirmed" | "rejected" | null {
   if (!(error instanceof ClientError)) return "unconfirmed";
-  if (error.status === 401) return null;
+  if (error.status === 401 || error.status === 409) return null;
   return error.status < 500 && error.status !== 408 ? "rejected" : "unconfirmed";
 }
 

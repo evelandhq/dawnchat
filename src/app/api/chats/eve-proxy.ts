@@ -36,6 +36,14 @@ import {
 
 const NDJSON_CONTENT_TYPE = "application/x-ndjson; charset=utf-8";
 
+/**
+ * How long a create claim stays valid without being released. Eve's command
+ * hook wait means a create can legitimately take 30s before it answers, so
+ * this only has to outlast a real attempt: past it, the claim belongs to a
+ * handler that never came back.
+ */
+const CREATE_CLAIM_LEASE_MS = 90_000;
+
 /** Forwarded to the browser but never persisted; see `persistEvent`. */
 const STREAM_DELTA_EVENT_TYPES = new Set([
   "action.input.appended",
@@ -48,9 +56,9 @@ type ProxyContext = {
   repository: Repository;
   client: ReturnType<typeof createEveClientForConnection>;
   /**
-   * Present only when Eve can resolve an authenticated principal for this
-   * connection, which is the condition it requires before it will honour an
-   * `operationId` at all.
+   * Present when a credential Dawn holds could authenticate a principal for
+   * this connection, which is the condition Eve requires before it will
+   * honour an `operationId` at all.
    */
   sessionCreateOperationId?: string;
 };
@@ -223,19 +231,49 @@ async function proxyTurnRequest(
   // The browser never names the operation: a caller-chosen id could make one
   // chat's create adopt the session another chat committed.
   delete body.operationId;
-  const isCreate = sessionId === undefined;
-  if (isCreate && context.sessionCreateOperationId) {
+  if (sessionId !== undefined) {
+    return forwardTurn(request, context, sessionId, body);
+  }
+
+  if (context.sessionCreateOperationId) {
     body.operationId = context.sessionCreateOperationId;
   }
-  const currentSession = context.chat.sessionState;
-
-  if (isCreate) {
-    // Eve persists the workflow before it waits for the command hook, so a
-    // create that never answers — the 30s wait elapsing into a 500, a dropped
-    // connection, this handler dying — can still leave a session that runs
-    // later. The mark goes in before the request; only proof clears it.
-    await context.repository.markSessionCreateUnconfirmed(context.chat.id);
+  // Eve persists the workflow before it waits for the command hook, so a
+  // create that never answers — the 30s wait elapsing into a 500, a dropped
+  // connection, this handler dying — can still leave a session that runs
+  // later. Resolving the chat, finding it has no session, and recording the
+  // attempt are separate reads, so two requests could each pass that check
+  // against a stale row and both cross a boundary neither can take back. The
+  // claim collapses the check and the mark into one conditional write.
+  const claimed = await context.repository.claimSessionCreate(
+    context.chat.id,
+    new Date(Date.now() - CREATE_CLAIM_LEASE_MS),
+  );
+  if (!claimed) {
+    return errorResponse("A session create for this chat is already in progress", 409);
   }
+
+  try {
+    return await forwardTurn(request, context, undefined, body);
+  } finally {
+    // Only the claim is released here; the unconfirmed mark it left is for
+    // proof to clear, and outlives every failure this request can have.
+    await context.repository
+      .releaseSessionCreateClaim(context.chat.id)
+      .catch((error: unknown) => {
+        console.error(`Failed to release the create claim for ${context.chat.id}:`, error);
+      });
+  }
+}
+
+async function forwardTurn(
+  request: Request,
+  context: ProxyContext,
+  sessionId: string | undefined,
+  body: Record<string, unknown>,
+): Promise<Response> {
+  const isCreate = sessionId === undefined;
+  const currentSession = context.chat.sessionState;
 
   let remote: Response;
   try {
@@ -396,9 +434,13 @@ async function resolveProxyContext(
       chat,
       repository,
       client: createEveClientForConnection(agent, callerToken),
-      // A custom auth header is opaque to Dawn, and the browser session alone
-      // reaches Eve as an anonymous principal, which rejects an operationId.
-      ...((callerToken || agent.authType === "bearer")
+      // Any credential may authenticate a principal: a custom header is
+      // opaque to Dawn but not to the Agent's auth function, which can
+      // resolve it exactly like a bearer token. Only the browser session
+      // alone reaches Eve as an anonymous principal, and Eve refuses an
+      // operationId from one — a refusal `rejectsOperationId` falls back on
+      // when a credential turns out not to authenticate anything either.
+      ...((callerToken || agent.authType !== "none")
         ? { sessionCreateOperationId: createSessionOperationId(chat.id) }
         : {}),
     };
@@ -416,7 +458,12 @@ function isAmbiguousFailureStatus(status: number): boolean {
   return status >= 500 || status === 408;
 }
 
-/** Eve's 400 for an `operationId` it will not accept from this principal. */
+/**
+ * Eve's own refusal to accept an `operationId` from the principal it resolved:
+ * `operationId requires an authenticated principal.` A reworded refusal stops
+ * matching and surfaces as the deterministic 400 it is, which loses the
+ * fallback without risking a second session.
+ */
 async function rejectsOperationId(
   response: Response,
   body: Record<string, unknown>,
@@ -430,7 +477,9 @@ async function rejectsOperationId(
       value && typeof value === "object" && !Array.isArray(value)
         ? (value as { error?: unknown }).error
         : undefined;
-    return typeof error === "string" && error.toLowerCase().includes("operationid");
+    if (typeof error !== "string") return false;
+    const message = error.toLowerCase();
+    return message.includes("operationid") && message.includes("authenticated principal");
   } catch {
     return false;
   }

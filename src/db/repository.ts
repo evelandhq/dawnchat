@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { DatabaseError } from "pg";
 import { z } from "zod";
@@ -173,11 +173,18 @@ export type Repository = {
   updateChatSessionState(chatId: string, state: SessionState, status?: ChatStatus): Promise<Chat>;
   updateChatStatus(chatId: string, status: ChatStatus): Promise<Chat>;
   /**
-   * Records that a session-create request has been issued whose outcome this
-   * chat cannot see. Written before the request, so a handler that never
-   * returns still leaves the mark behind.
+   * Claims the one session create a chat may have in flight, and records in
+   * the same write that its outcome is not yet known. Returns `false` when
+   * another request holds the claim or the chat already has an active
+   * session — the caller must not reach the Agent.
+   *
+   * `staleBefore` expires a claim a handler never released, which is the only
+   * reason a claim is not simply held until it is released: a process that
+   * dies mid-create would otherwise lock the chat out for good.
    */
-  markSessionCreateUnconfirmed(chatId: string): Promise<Chat>;
+  claimSessionCreate(chatId: string, staleBefore: Date): Promise<boolean>;
+  /** Releases the claim, leaving the unconfirmed mark for proof to clear. */
+  releaseSessionCreateClaim(chatId: string): Promise<void>;
   /** Clears the mark after proof of what the Agent did with the request. */
   clearSessionCreateUnconfirmed(chatId: string): Promise<Chat>;
   /**
@@ -276,23 +283,6 @@ function isDuplicateAgentUrlError(error: unknown): boolean {
 }
 
 export function createRepository(db: RepositoryDb): Repository {
-  async function setSessionCreateUnconfirmedAt(
-    chatId: string,
-    at: Date | null,
-  ): Promise<Chat> {
-    const [updated] = await db
-      .update(chats)
-      .set({ sessionCreateUnconfirmedAt: at, updatedAt: new Date() })
-      .where(eq(chats.id, chatId))
-      .returning();
-
-    if (!updated) {
-      throw new Error(`Chat not found: ${chatId}`);
-    }
-
-    return mapChat(updated);
-  }
-
   return {
     async createAgentConnection(input) {
       const now = new Date();
@@ -775,6 +765,7 @@ export function createRepository(db: RepositoryDb): Repository {
           // A stored session ID is the proof an unconfirmed create was waiting
           // for, whichever attempt produced it.
           sessionCreateUnconfirmedAt: null,
+          sessionCreateClaimedAt: null,
           ...(status ? { status } : {}),
           updatedAt: new Date(),
         })
@@ -802,12 +793,51 @@ export function createRepository(db: RepositoryDb): Repository {
       return mapChat(updated);
     },
 
-    async markSessionCreateUnconfirmed(chatId) {
-      return setSessionCreateUnconfirmedAt(chatId, new Date());
+    async claimSessionCreate(chatId, staleBefore) {
+      const now = new Date();
+      const claimed = await db
+        .update(chats)
+        .set({
+          sessionCreateClaimedAt: now,
+          sessionCreateUnconfirmedAt: now,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(chats.id, chatId),
+            // The same condition the create route checks, applied here so a
+            // racing request cannot pass it against a stale read.
+            or(ne(chats.status, "active"), isNull(chats.sessionStateJson)),
+            or(
+              isNull(chats.sessionCreateClaimedAt),
+              lt(chats.sessionCreateClaimedAt, staleBefore),
+            ),
+          ),
+        )
+        .returning({ id: chats.id });
+
+      return claimed.length > 0;
+    },
+
+    async releaseSessionCreateClaim(chatId) {
+      await db
+        .update(chats)
+        .set({ sessionCreateClaimedAt: null, updatedAt: new Date() })
+        .where(eq(chats.id, chatId));
     },
 
     async clearSessionCreateUnconfirmed(chatId) {
-      return setSessionCreateUnconfirmedAt(chatId, null);
+      const [updated] = await db
+        .update(chats)
+        .set({ sessionCreateUnconfirmedAt: null, updatedAt: new Date() })
+        .where(eq(chats.id, chatId))
+        .returning();
+
+      if (!updated) {
+        throw new Error(`Chat not found: ${chatId}`);
+      }
+
+      return mapChat(updated);
     },
 
     async updatePendingInput(chatId, fn) {

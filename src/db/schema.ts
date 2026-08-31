@@ -62,6 +62,14 @@ export const chats = pgTable(
       withTimezone: true,
       mode: "date",
     }),
+    // Held by the one create request allowed across the upstream boundary,
+    // released as soon as it settles. A claim left behind by a handler that
+    // never returned expires on a lease, which is why this is separate from
+    // the unconfirmed mark above: that one may only be cleared by proof.
+    sessionCreateClaimedAt: timestamp("session_create_claimed_at", {
+      withTimezone: true,
+      mode: "date",
+    }),
     status: text("status", { enum: chatStatuses }).notNull().default("active"),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull(),

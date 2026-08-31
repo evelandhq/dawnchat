@@ -245,6 +245,135 @@ describe("per-chat Eve protocol proxy", () => {
     });
   });
 
+  it("lets only one concurrent create for a chat reach the Agent", async () => {
+    // An anonymous chat has no operationId to fall back on, so nothing but
+    // the claim stands between two concurrent creates and two sessions.
+    const server = await fakeServer({ createSessionDelayMs: 60 });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Public Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const session = resolveAppBrowserSession(
+      new Request("http://localhost/api/chats"),
+    );
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Concurrent create",
+      pendingUserMessage: "Run this once",
+      ownerClientId: session.clientId,
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const routes = await loadProxyRoutes();
+    const create = () =>
+      routes.createSession(
+        new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session`, {
+          method: "POST",
+          headers: {
+            cookie: session.setCookie!.split(";")[0]!,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ message: "Run this once" }),
+        }),
+        { params: Promise.resolve({ chatId: chat.id }) },
+      );
+
+    const [first, second] = await Promise.all([create(), create()]);
+
+    const statuses = [first.status, second.status].sort((a, b) => a - b);
+    expect(statuses).toEqual([202, 409]);
+    const refused = first.status === 409 ? first : second;
+    await expect(refused.json()).resolves.toEqual({
+      error: "A session create for this chat is already in progress",
+    });
+    const creates = server.requests.filter(
+      (request) => request.method === "POST" && request.path === "/eve/v1/session",
+    );
+    expect(creates).toHaveLength(1);
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      pendingUserMessage: null,
+      sessionCreateClaimedAt: null,
+      sessionCreateUnconfirmedAt: null,
+      sessionState: { sessionId: "ses_1", streamIndex: 0 },
+      status: "active",
+    });
+  });
+
+  it("names the same operation for a custom-header Agent across an ambiguous create", async () => {
+    // A custom auth function resolves `X-Agent-Key` into a named principal,
+    // so Eve honours an operationId for it exactly like a bearer token.
+    const server = await fakeServer({
+      authenticatedHeader: "x-agent-key",
+      failFirstCreateResponseAfterCommit: true,
+    });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Header Eve",
+      baseUrl: server.baseUrl,
+      authType: "header",
+      authConfigEncrypted: encryptAuthConfig({
+        headerName: "X-Agent-Key",
+        headerValue: "agent-key",
+      }),
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const session = resolveAppBrowserSession(
+      new Request("http://localhost/api/chats"),
+    );
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Header create",
+      pendingUserMessage: "Run this once",
+      ownerClientId: session.clientId,
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const routes = await loadProxyRoutes();
+    const create = () =>
+      routes.createSession(
+        new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session`, {
+          method: "POST",
+          headers: {
+            cookie: session.setCookie!.split(";")[0]!,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ message: "Run this once" }),
+        }),
+        { params: Promise.resolve({ chatId: chat.id }) },
+      );
+
+    const ambiguous = await create();
+
+    expect(ambiguous.status).toBe(500);
+    const marked = await repository.getChat(chat.id);
+    expect(marked?.sessionCreateUnconfirmedAt).toBeInstanceOf(Date);
+    expect(marked?.sessionCreateClaimedAt).toBeNull();
+
+    const recovered = await create();
+
+    expect(recovered.status).toBe(202);
+    const creates = server.requests.filter(
+      (request) => request.method === "POST" && request.path === "/eve/v1/session",
+    );
+    expect(creates).toHaveLength(2);
+    const operationIds = creates.map(
+      (request) => (request.body as { operationId?: unknown }).operationId,
+    );
+    expect(operationIds[0]).toEqual(expect.any(String));
+    expect(operationIds[1]).toBe(operationIds[0]);
+    // One committed operation, so the retry adopts its session instead of
+    // running the first message a second time.
+    await expect(recovered.json()).resolves.toMatchObject({ sessionId: "ses_1" });
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      pendingUserMessage: null,
+      sessionCreateClaimedAt: null,
+      sessionCreateUnconfirmedAt: null,
+      sessionState: { sessionId: "ses_1", streamIndex: 0 },
+      status: "active",
+    });
+  });
+
   it("keeps a create unconfirmed when the connection breaks before any answer", async () => {
     const server = await fakeServer();
     const repository = createRepository(testDb.db);
