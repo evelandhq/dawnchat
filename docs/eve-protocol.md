@@ -1,8 +1,7 @@
 # Eve protocol integration
 
-Dawn supports Eve Agents running versions 0.44.x through 0.45.x. This
-window uses stream version 23, the same HTTP route family, and durable sessions
-addressed by ID.
+Dawn supports Eve Agents running version 0.47.x. This window uses stream
+version 24 and durable sessions addressed by ID.
 
 ## Agent requirements
 
@@ -45,9 +44,11 @@ The proxy persists canonical Eve events with idempotency on
 redacted before browser delivery. The UI uses Eve's `defaultMessageReducer`
 projection to render text, reasoning, tools, files, and input requests.
 
-Transient stream deltas are not retained as permanent history. For older
-databases, [`scripts/cleanup-stream-deltas.ts`](../scripts/cleanup-stream-deltas.ts)
-can remove superseded deltas while preserving the projected chat response.
+Transient text, reasoning, and tool-input stream deltas are not retained as
+permanent history. For older databases,
+[`scripts/cleanup-stream-deltas.ts`](../scripts/cleanup-stream-deltas.ts) can
+remove superseded text and reasoning deltas while preserving the projected chat
+response.
 
 Human-in-the-loop state has additional proxy-side rules documented in
 [Human-in-the-loop handling](human-in-the-loop.md).

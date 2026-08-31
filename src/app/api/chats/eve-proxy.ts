@@ -35,7 +35,11 @@ import {
 const NDJSON_CONTENT_TYPE = "application/x-ndjson; charset=utf-8";
 
 /** Forwarded to the browser but never persisted; see `persistEvent`. */
-const STREAM_DELTA_EVENT_TYPES = new Set(["message.appended", "reasoning.appended"]);
+const STREAM_DELTA_EVENT_TYPES = new Set([
+  "action.input.appended",
+  "message.appended",
+  "reasoning.appended",
+]);
 
 type ProxyContext = {
   chat: Chat;
@@ -484,14 +488,14 @@ function createPersistedEventStream(input: {
       streamIndex: latestCursor,
     };
 
-    // Text and reasoning deltas are renderer traffic, not domain events: each
-    // carries the whole text so far, its completion supersedes the run, and a
-    // resume replays from Eve by cursor rather than from this store. They are
-    // forwarded and counted in the cursor, never persisted — the next stored
-    // event carries the cursor they advanced. A crash inside a delta run
-    // leaves the stored cursor behind the stream; the reconnect replays the
-    // gap from Eve and the (session, stream index) key absorbs the rows it
-    // already has.
+    // Incremental text, reasoning, and tool-input events are renderer traffic,
+    // not domain events. Completed text/reasoning or the validated
+    // `actions.requested` call supersedes each run, and a resume replays the
+    // missing deltas from Eve by cursor. Deltas are forwarded and counted in
+    // the cursor, never persisted — the next stored event carries the cursor
+    // they advanced. A crash inside a delta run leaves the stored cursor behind
+    // the stream; the reconnect replays the gap and the (session, stream index)
+    // key absorbs rows it already has.
     if (STREAM_DELTA_EVENT_TYPES.has(browserEvent.type)) {
       return { event: browserEvent, terminal: false };
     }

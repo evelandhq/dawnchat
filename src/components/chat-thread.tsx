@@ -68,7 +68,7 @@ type UpdateQueuedTurns = (
 ) => void;
 
 /**
- * Eve 0.44–0.45 send messages with `turnPolicy: "steer"` by default. Dawn uses
+ * Eve 0.47 sends messages with `turnPolicy: "steer"` by default. Dawn uses
  * queue for ordinary turns, including the local FIFO above the composer, and
  * opts into steer only when the user presses that queued message's Steer
  * action. A racing second tab therefore still waits instead of destroying the

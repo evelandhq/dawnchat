@@ -18,7 +18,7 @@ type UnstampedEvent<TEvent = MessageStreamEvent> = TEvent extends unknown
   : never;
 
 /**
- * Supported v23 events carry an emission time and sortable id. Fixtures spell
+ * Supported v24 events carry an emission time and sortable id. Fixtures spell
  * the payload; this adds the envelope the reducer deduplicates on.
  */
 function stampEvents(events: readonly UnstampedEvent[]): MessageStreamEvent[] {
@@ -191,6 +191,45 @@ describe("ChatThread with Eve and AI Elements", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /read_report/i }));
     expect(await screen.findByText('"Revenue increased."')).toBeInTheDocument();
+  });
+
+  it("renders streamed tool input before Eve validates the action", () => {
+    const events = stampEvents([
+      {
+        type: "message.completed",
+        data: {
+          message: "I will inspect the report.",
+          finishReason: "tool-calls",
+          sequence: 1,
+          stepIndex: 0,
+          turnId: "turn_1",
+        },
+      },
+      {
+        type: "action.input.appended",
+        data: {
+          callId: "call_1",
+          inputTextDelta: '{"page":1,"section":"reve',
+          inputTextOffset: 0,
+          sequence: 2,
+          stepIndex: 0,
+          toolName: "read_report",
+          turnId: "turn_1",
+        },
+      },
+    ]);
+
+    render(
+      <ChatThread
+        chat={chat({ sessionState: { sessionId: "ses_1", streamIndex: 2 } })}
+        events={events}
+        pendingInput={EMPTY_PENDING}
+      />,
+    );
+
+    expect(screen.getByText("I will inspect the report.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /read_report/i }));
+    expect(screen.getByText('{"page":1,"section":"reve', { exact: false })).toBeInTheDocument();
   });
 
   it("submits a structured HITL option through the Eve continuation route", async () => {
@@ -1579,7 +1618,7 @@ describe("ChatThread with Eve and AI Elements", () => {
       stampEvents([
         {
           type: "session.started",
-          data: { runtime: { agentId: "agt_1", eveVersion: "0.44.0" } },
+          data: { runtime: { agentId: "agt_1", eveVersion: "0.47.3" } },
         },
         { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
         {
@@ -2335,7 +2374,7 @@ describe("ChatThread with Eve and AI Elements", () => {
     const events = stampEvents([
       {
         type: "session.started",
-        data: { runtime: { agentId: "agt_1", eveVersion: "0.44.0" } },
+        data: { runtime: { agentId: "agt_1", eveVersion: "0.47.3" } },
       },
       { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
       {
