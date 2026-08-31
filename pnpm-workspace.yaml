@@ -8,9 +8,8 @@ allowBuilds:
   sharp: true
 minimumReleaseAgeExclude:
   # The client library is pinned to the newest verified release of the support
-  # window Eveland hosts: Eve 0.44.x through 0.45.x agents.
-  - eve@0.44.3 || 0.45.0
-  - '@ai-sdk/gateway@4.0.61'
+  # window Eveland hosts: Eve 0.47.x agents.
+  - eve@0.47.6
   - '@next/env@16.3.2'
   - '@next/swc-darwin-arm64@16.3.2'
   - '@next/swc-darwin-x64@16.3.2'
@@ -20,6 +19,5 @@ minimumReleaseAgeExclude:
   - '@next/swc-linux-x64-musl@16.3.2'
   - '@next/swc-win32-arm64-msvc@16.3.2'
   - '@next/swc-win32-x64-msvc@16.3.2'
-  - ai@7.0.76
   - next@16.3.2
   - shadcn@4.19.0
