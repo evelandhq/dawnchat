@@ -41,6 +41,7 @@ import {
   type QueuedTurn,
 } from "@/components/chat-steer-queue";
 import { EveMessageView, type InputRequestBatch } from "@/components/eve-message";
+import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import {
   formatEveErrorMessage,
@@ -83,9 +84,34 @@ export type ChatThreadSummary = {
   title: string;
   status: "active" | "completed" | "failed";
   sessionState: ClientSessionState | null;
+  /** A create request for this chat never proved what the Agent did with it. */
+  sessionCreateUnconfirmed?: boolean;
+  /** A create request holds this chat's claim and has not settled yet. */
+  sessionCreateInProgress?: boolean;
   createdAt: string;
   updatedAt: string;
 };
+
+/**
+ * Where the initial message's session creation stands.
+ *
+ * - `settled`: the chat has a session, or carries no initial message.
+ * - `pending`: an attempt is in flight — this page's own, or the one another
+ *   request holds this chat's create claim for — or none has run yet.
+ * - `unconfirmed`: an attempt ended without proving what Eve did with it. A
+ *   resend risks a second session replaying the same first message, so only
+ *   the user may ask for one.
+ * - `rejected`: an attempt ended with proof that no session exists, so the
+ *   composer is usable again.
+ */
+type InitialCreateState = "settled" | "pending" | "unconfirmed" | "rejected";
+
+/**
+ * How often a thread whose create another request owns re-reads the chat. The
+ * winner persists its session at some point inside its own attempt, and no
+ * event reaches this page when it does.
+ */
+const CREATE_WATCH_INTERVAL_MS = 1_000;
 
 /**
  * One input batch as this client tracks it. The proxy's ledger is the
@@ -123,6 +149,11 @@ type ChatThreadProps = {
   readOnly?: boolean;
   /** Called when a turn completes, so the app can re-read what it changed. */
   onTurnFinished?: () => void;
+  /**
+   * Called when the server says this chat's state is no longer what the thread
+   * was handed — another request owns its session create, or already made it.
+   */
+  onChatStale?: () => void;
 };
 
 export function ChatThread({
@@ -135,6 +166,7 @@ export function ChatThread({
   respondToAuthenticationChallenge,
   readOnly = false,
   onTurnFinished,
+  onChatStale,
 }: ChatThreadProps): React.ReactElement {
   const pendingSentRef = useRef(false);
   const challengeInFlightRef = useRef(false);
@@ -222,7 +254,10 @@ export function ChatThread({
 
   return (
     <ChatThreadSession
-      key={authentication.revision}
+      // The eve store reads its session once, at mount. A re-read that brings
+      // back a session this thread never had — the one a create it lost
+      // finally committed — has to reach the store as a fresh mount.
+      key={`${authentication.revision}:${chat.sessionState?.sessionId ?? ""}`}
       chat={chat}
       events={authentication.events}
       pendingInput={pendingInput}
@@ -235,6 +270,7 @@ export function ChatThread({
       }
       getCallerToken={getCallerToken}
       onAuthenticationError={handleAuthenticationError}
+      onChatStale={onChatStale}
       onTurnFinished={onTurnFinished}
       queuedTurns={queuedTurns}
       readOnly={readOnly}
@@ -255,6 +291,7 @@ function ChatThreadSession({
   getAccessToken,
   getCallerToken,
   onAuthenticationError,
+  onChatStale,
   onTurnFinished,
   queuedTurns,
   readOnly,
@@ -279,6 +316,10 @@ function ChatThreadSession({
   updateQueuedTurns: UpdateQueuedTurns;
 }): React.ReactElement {
   const agentRef = useRef<ReturnType<typeof useEveAgent> | null>(null);
+  // The parent re-creates this callback on every render, and a watch timer
+  // that restarted with it would never reach its own deadline.
+  const onChatStaleRef = useRef(onChatStale);
+  onChatStaleRef.current = onChatStale;
   const drainQueuedTurnRef = useRef<
     ((settledQueuedTurnId?: string) => void) | null
   >(null);
@@ -286,6 +327,12 @@ function ChatThreadSession({
   const retrySentRef = useRef(false);
   const retryRefetchedRef = useRef(false);
   const [localError, setLocalError] = useState<string | null>(null);
+  // What a create attempt in this page's lifetime settled at. `null` defers to
+  // the stored chat, which is all a fresh page load has.
+  const [liveInitialCreate, setLiveInitialCreate] = useState<Exclude<
+    InitialCreateState,
+    "settled"
+  > | null>(null);
   const [composerText, setComposerText] = useState("");
   // Refs mirror the states below so callbacks and same-batch dispatches read
   // the latest value instead of a stale render's.
@@ -454,6 +501,18 @@ function ChatThreadSession({
       void refetchPendingInput();
 
       const current = agentRef.current;
+      // A send that failed before this chat holds a session was a create, and
+      // the hook resolves `send` either way, so this is where its verdict is.
+      if (pendingUserMessage && !current?.session) {
+        const outcome = initialCreateFromFailure(error);
+        if (outcome) setLiveInitialCreate(outcome);
+      }
+      // A 409 means the chat this thread is looking at is behind the server's:
+      // another request owns its create, or has already made the session. The
+      // read it asks for is the first of however many the watch below needs.
+      if (error instanceof ClientError && error.status === 409 && !current?.session) {
+        onChatStaleRef.current?.();
+      }
       const retry = latestInputRef.current;
       const queuedTurnId = activeQueuedTurnIdRef.current ?? undefined;
       if (queuedTurnId) {
@@ -538,6 +597,32 @@ function ChatThreadSession({
   agentRef.current = agent;
   const isResuming = agent.status === "resuming";
   const isBusy = agent.status === "submitted" || agent.status === "streaming";
+  // A create another request holds the claim for is still running, whatever
+  // this page last saw of its own attempt, so it outranks both. Otherwise a
+  // stored chat can only say whether its last create is unconfirmed, while an
+  // attempt made in this page's lifetime is classified from its failure.
+  const createInProgress = Boolean(chat.sessionCreateInProgress) && !agent.session;
+  const initialCreate: InitialCreateState =
+    !pendingUserMessage || agent.session
+      ? "settled"
+      : createInProgress
+        ? "pending"
+        : (liveInitialCreate ??
+          (chat.sessionCreateUnconfirmed
+            ? "unconfirmed"
+            : chat.status === "failed"
+              ? "rejected"
+              : "pending"));
+  const createUnconfirmed = initialCreate === "unconfirmed";
+  // Retry is offered for every settled create failure, and while an attempt
+  // that left no verdict — a challenge nothing answered — sits in error. Not
+  // while another request is still making the create, though: that retry
+  // could only collide with it, and the watch below is what ends the wait.
+  const canRetryInitialMessage =
+    !createInProgress &&
+    (createUnconfirmed ||
+      initialCreate === "rejected" ||
+      (initialCreate === "pending" && agent.status === "error"));
   const pendingRequestIds = useMemo(() => {
     const ids = new Set<string>();
     for (const batch of pendingBatches) {
@@ -549,7 +634,12 @@ function ChatThreadSession({
     }
     return ids;
   }, [pendingBatches]);
-  const composerDisabled = readOnly || chat.status === "completed" || isResuming;
+  const composerDisabled =
+    readOnly ||
+    chat.status === "completed" ||
+    isResuming ||
+    initialCreate === "pending" ||
+    initialCreate === "unconfirmed";
   const projectedMessages = queuedTurns.some(
     (turn) => turn.status === "sending" || turn.status === "failed",
   )
@@ -690,11 +780,28 @@ function ChatThreadSession({
     updateQueuedTurns,
   ]);
 
+  // Watching, not asking once: the request that holds the claim persists its
+  // session at some point inside its own attempt, and nothing tells this page
+  // when. Each re-read that still finds the claim held schedules the next, so
+  // the watch ends with the claim — on a session to adopt, or on a mark only
+  // the user can settle.
+  useEffect(() => {
+    if (!createInProgress) return;
+    const timer = setTimeout(() => onChatStaleRef.current?.(), CREATE_WATCH_INTERVAL_MS);
+    return () => clearTimeout(timer);
+  }, [chat, createInProgress]);
+
+  // Only a create whose outcome is still open may be sent without the user
+  // asking: an unconfirmed one could duplicate a session Eve already runs, a
+  // rejected one belongs to the composer, and one another request is still
+  // making is not this page's to repeat.
   useEffect(() => {
     if (
       readOnly ||
       retryInput ||
       !pendingUserMessage ||
+      createInProgress ||
+      initialCreate !== "pending" ||
       pendingSentRef.current ||
       agent.status !== "ready"
     ) {
@@ -710,7 +817,15 @@ function ChatThreadSession({
       });
     }, 0);
     return () => clearTimeout(timer);
-  }, [agent, pendingUserMessage, readOnly, retryInput, pendingSentRef]);
+  }, [
+    agent,
+    createInProgress,
+    initialCreate,
+    pendingUserMessage,
+    readOnly,
+    retryInput,
+    pendingSentRef,
+  ]);
 
   useEffect(() => {
     if (
@@ -857,6 +972,31 @@ function ChatThreadSession({
       });
   };
 
+  /**
+   * Resends the initial message on the user's word. The proxy keeps naming the
+   * same create operation, so an Agent that already committed one answers with
+   * that session instead of starting a second.
+   */
+  const handleRetryPendingMessage = (): void => {
+    const current = agentRef.current;
+    if (
+      !pendingUserMessage ||
+      !current ||
+      (current.status !== "ready" && current.status !== "error")
+    ) {
+      return;
+    }
+    pendingSentRef.current = true;
+    setLiveInitialCreate("pending");
+    setLocalError(null);
+    void current
+      .send(pendingUserMessage, { turnPolicy: TURN_POLICY })
+      .catch((error: unknown) => {
+        pendingSentRef.current = false;
+        setLocalError(errorMessage(error));
+      });
+  };
+
   const displayedError =
     localError ??
     (agent.error
@@ -864,7 +1004,9 @@ function ChatThreadSession({
           agent.error.message,
           sessionFailureErrorId(agent.events.at(-1)),
         )
-      : null);
+      : createUnconfirmed
+        ? "The previous session creation result could not be confirmed."
+        : null);
 
   return (
     <TooltipProvider>
@@ -898,7 +1040,18 @@ function ChatThreadSession({
           {displayedError ? (
             <div className="mb-2 flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm">
               <AlertCircleIcon className="mt-0.5 size-4 shrink-0 text-destructive" />
-              <p role="alert">{displayedError}</p>
+              <p className="min-w-0 flex-1" role="alert">{displayedError}</p>
+              {canRetryInitialMessage ? (
+                <Button
+                  disabled={isBusy || isResuming}
+                  onClick={handleRetryPendingMessage}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  Retry message
+                </Button>
+              ) : null}
             </div>
           ) : null}
           <PromptInput
@@ -1157,6 +1310,24 @@ function receivedMessageMatchesQueuedTurn(
       event.data.message.includes(file.filename?.trim() || "Attachment"),
     )
   );
+}
+
+/**
+ * What a failed create proves, or `null` when the failure carries no verdict
+ * on it. A 401 is an Eveland challenge this thread answers by retrying with a
+ * Caller Token, and only that retry settles the create. A 409 means another
+ * request owns this chat's create — its outcome, not this one's, decides.
+ *
+ * Otherwise, a refusal the Agent issued itself rules a session out, while a
+ * 5xx, a request timeout, or a transport failure with no status at all can
+ * each follow a workflow Eve has already persisted.
+ */
+function initialCreateFromFailure(
+  error: unknown,
+): "unconfirmed" | "rejected" | null {
+  if (!(error instanceof ClientError)) return "unconfirmed";
+  if (error.status === 401 || error.status === 409) return null;
+  return error.status < 500 && error.status !== 408 ? "rejected" : "unconfirmed";
 }
 
 function composerPlaceholder(status: ChatThreadSummary["status"]): string {

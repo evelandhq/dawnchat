@@ -71,6 +71,34 @@
       "when": 1787211629599,
       "tag": "0009_messy_wiccan",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1788157505894,
+      "tag": "0010_bright_enchantress",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1788173078718,
+      "tag": "0011_redundant_vision",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1788178724240,
+      "tag": "0012_narrow_hex",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1788229968631,
+      "tag": "0013_claim_expiry",
+      "breakpoints": true
     }
   ]
 }

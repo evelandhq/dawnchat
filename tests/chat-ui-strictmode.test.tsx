@@ -134,6 +134,55 @@ describe("ChatThread challenge retry under StrictMode (next dev parity)", () => 
     ]);
   });
 
+  // A create marked before the request that never came back leaves the chat
+  // active and unconfirmed, which is the shape that used to resend on sight.
+  it("never resends an unconfirmed first message on mount or remount", async () => {
+    const seenAuthorization: Array<string | null> = [];
+    const fetchMock = challengeFetchMock(seenAuthorization);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { unmount } = render(
+      <StrictMode>
+        <ChatThread
+          chat={chat({ sessionCreateUnconfirmed: true, sessionState: null })}
+          events={[]}
+          pendingInput={EMPTY_PENDING}
+          pendingUserMessage="Run this once"
+          getAccessToken={async () => "app-token"}
+          getCallerToken={async () => "caller-token"}
+          respondToAuthenticationChallenge={async () => "caller-token"}
+        />
+      </StrictMode>,
+    );
+
+    // Long enough for both StrictMode passes and the deferred mount send that
+    // a confirmed-pending chat would have made by now.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(seenAuthorization).toEqual([]);
+    expect(screen.getByLabelText("Message")).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Retry message" }),
+    ).toBeEnabled();
+
+    unmount();
+    render(
+      <StrictMode>
+        <ChatThread
+          chat={chat({ sessionCreateUnconfirmed: true, sessionState: null })}
+          events={[]}
+          pendingInput={EMPTY_PENDING}
+          pendingUserMessage="Run this once"
+          getAccessToken={async () => "app-token"}
+          getCallerToken={async () => "caller-token"}
+          respondToAuthenticationChallenge={async () => "caller-token"}
+        />
+      </StrictMode>,
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(seenAuthorization).toEqual([]);
+  });
+
   it("retries a challenged composer message under StrictMode", async () => {
     const seenAuthorization: Array<string | null> = [];
     vi.stubGlobal("fetch", challengeFetchMock(seenAuthorization));

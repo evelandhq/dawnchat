@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { GET as GET_CHAT } from "@/app/api/chats/[chatId]/route";
 import { POST as POST_CHAT } from "@/app/api/chats/route";
@@ -35,6 +35,7 @@ describe("chat bootstrap", () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     setDbClientForTests(null);
     setCallerTokenVerifierForTests(null);
     await testDb.close();
@@ -95,6 +96,57 @@ describe("chat bootstrap", () => {
     const payload = (await read.json()) as { chat: { evelandProjectId: string | null } };
     expect(payload.chat.evelandProjectId).toBe("project_support");
   });
+
+  // The database decides when a claim expires, so a reader on a drifted clock
+  // must not reach the opposite conclusion about the same row: it would stop
+  // watching a create the database still refuses to let anyone else take, or
+  // keep waiting on one it would.
+  for (const skew of [
+    { name: "ahead of", offsetMs: 120_000 },
+    { name: "behind", offsetMs: -120_000 },
+  ]) {
+    it(`reports a live create claim to a reader whose clock runs ${skew.name} the database`, async () => {
+      const { id: agentId } = await createAgent();
+      const response = await createChat(agentId, "Start managed chat");
+      const body = (await response.json()) as { chat: { id: string } };
+      const repository = createRepository(testDb.db);
+      await repository.claimSessionCreate(body.chat.id, 60_000);
+      vi.spyOn(Date, "now").mockReturnValue(Date.now() + skew.offsetMs);
+
+      const read = await GET_CHAT(
+        new Request(`http://localhost/api/chats/${body.chat.id}`, {
+          headers: { authorization: "Bearer caller-token" },
+        }),
+        { params: Promise.resolve({ chatId: body.chat.id }) },
+      );
+
+      const payload = (await read.json()) as {
+        chat: { sessionCreateInProgress: boolean };
+      };
+      expect(payload.chat.sessionCreateInProgress).toBe(true);
+    });
+
+    it(`reports an expired create claim to a reader whose clock runs ${skew.name} the database`, async () => {
+      const { id: agentId } = await createAgent();
+      const response = await createChat(agentId, "Start managed chat");
+      const body = (await response.json()) as { chat: { id: string } };
+      const repository = createRepository(testDb.db);
+      await repository.claimSessionCreate(body.chat.id, -1_000);
+      vi.spyOn(Date, "now").mockReturnValue(Date.now() + skew.offsetMs);
+
+      const read = await GET_CHAT(
+        new Request(`http://localhost/api/chats/${body.chat.id}`, {
+          headers: { authorization: "Bearer caller-token" },
+        }),
+        { params: Promise.resolve({ chatId: body.chat.id }) },
+      );
+
+      const payload = (await read.json()) as {
+        chat: { sessionCreateInProgress: boolean };
+      };
+      expect(payload.chat.sessionCreateInProgress).toBe(false);
+    });
+  }
 
   it("loads raw Eve events with the browser-safe session cursor", async () => {
     const { id: agentId } = await createAgent();

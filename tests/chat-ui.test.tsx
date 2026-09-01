@@ -57,6 +57,9 @@ function ndjson(events: readonly unknown[]): Response {
 
 const EMPTY_PENDING: PendingInputState = { batches: [] };
 
+/** Comfortably past the thread's own watch interval, so a live watch would fire. */
+const CREATE_WATCH_GRACE_MS = 2_500;
+
 /** Ledger fixture: what the proxy says Eve is still parked on. */
 function pendingBatches(
   ...batches: Array<{
@@ -1418,6 +1421,266 @@ describe("ChatThread with Eve and AI Elements", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Failed to create the session. Error ID: err_session_create_123",
     );
+    // A 500 leaves the create unproven: the composer stays closed and the
+    // first message waits for the user to ask for it again.
+    expect(
+      await screen.findByRole("button", { name: "Retry message" }),
+    ).toBeEnabled();
+    expect(screen.getByLabelText("Message")).toBeDisabled();
+    expect(
+      fetchMock.mock.calls.filter(([, init]) => init?.method === "POST"),
+    ).toHaveLength(1);
+  });
+
+  it("adopts the session an ambiguous create left behind on an explicit retry", async () => {
+    const posts: string[] = [];
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        if (isPendingInputCall([input])) return pendingInputResponse();
+        if (init?.method === "POST") {
+          posts.push(String(init.body));
+          if (posts.length === 1) {
+            return Response.json(
+              { error: "Failed to create the session.", ok: false },
+              { status: 500 },
+            );
+          }
+          return Response.json(
+            { sessionId: "ses_committed" },
+            { status: 202, headers: { "x-eve-session-id": "ses_committed" } },
+          );
+        }
+        return ndjson([
+          { type: "message.completed", data: { message: "Done", finishReason: "stop", sequence: 1, stepIndex: 0, turnId: "turn_1" } },
+          { type: "session.waiting", data: { wait: "next-user-message" } },
+        ]);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({ id: "chat_adopts_create", sessionState: null })}
+        events={[]}
+        pendingInput={EMPTY_PENDING}
+        pendingUserMessage="Run this once"
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Retry message" }));
+
+    await waitFor(() => expect(posts).toHaveLength(2));
+    expect(JSON.parse(posts[1]!)).toMatchObject({ message: "Run this once" });
+    // The adopted session reopens the composer and replays from its start.
+    await waitFor(() =>
+      expect(screen.getByLabelText("Message")).toBeEnabled(),
+    );
+    const streamCall = fetchMock.mock.calls.find(([input, init]) =>
+      init?.method !== "POST" && String(input).includes("ses_committed"),
+    );
+    // Nothing of the adopted session has been seen, so the replay starts at
+    // its first event — the eve client leaves index 0 implicit.
+    expect(String(streamCall?.[0])).not.toMatch(/startIndex=[1-9]/);
+    expect(await screen.findByText("Done")).toBeInTheDocument();
+    expect(posts).toHaveLength(2);
+  });
+
+  it("waits for an explicit retry when a stored create is still unconfirmed", async () => {
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        if (isPendingInputCall([input])) return pendingInputResponse();
+        if (init?.method === "POST") {
+          return Response.json(
+            { sessionId: "ses_recovered" },
+            {
+              status: 202,
+              headers: { "x-eve-session-id": "ses_recovered" },
+            },
+          );
+        }
+        return ndjson([
+          {
+            type: "session.waiting",
+            data: { wait: "next-user-message" },
+          },
+        ]);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({
+          id: "chat_ambiguous_create",
+          sessionCreateUnconfirmed: true,
+          sessionState: null,
+          status: "failed",
+        })}
+        events={[]}
+        pendingInput={EMPTY_PENDING}
+        pendingUserMessage="Run this once"
+      />,
+    );
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const turnCalls = () =>
+      fetchMock.mock.calls.filter(([, init]) => init?.method === "POST");
+    expect(turnCalls()).toHaveLength(0);
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "The previous session creation result could not be confirmed.",
+    );
+    expect(screen.getByLabelText("Message")).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry message" }));
+
+    await waitFor(() => expect(turnCalls()).toHaveLength(1));
+    expect(JSON.parse(String(turnCalls()[0]?.[1]?.body))).toMatchObject({
+      message: "Run this once",
+    });
+  });
+
+  it("adopts the session a create it lost commits after the first re-read", async () => {
+    // The chat as the server holds it: another request owns the create claim
+    // and has not persisted anything yet.
+    let stored: ChatThreadSummary & { pendingUserMessage: string | null } = {
+      ...chat({
+        id: "chat_deferred_winner",
+        sessionCreateInProgress: true,
+        sessionCreateUnconfirmed: true,
+        sessionState: null,
+      }),
+      pendingUserMessage: "Run this once",
+    };
+    const reads: number[] = [];
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        if (isPendingInputCall([input])) return pendingInputResponse();
+        if (init?.method === "POST") {
+          return Response.json({ error: "conflict", ok: false }, { status: 409 });
+        }
+        return ndjson([
+          { type: "message.completed", data: { message: "Done", finishReason: "stop", sequence: 1, stepIndex: 0, turnId: "turn_1" } },
+          { type: "session.waiting", data: { wait: "next-user-message" } },
+        ]);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    function Harness(): React.ReactElement {
+      const [snapshot, setSnapshot] = React.useState(stored);
+      return (
+        <ChatThread
+          chat={snapshot}
+          events={[]}
+          pendingInput={EMPTY_PENDING}
+          pendingUserMessage={snapshot.pendingUserMessage}
+          onChatStale={() => {
+            reads.push(reads.length);
+            setSnapshot({ ...stored });
+          }}
+        />
+      );
+    }
+
+    render(<Harness />);
+
+    // The winner owns this create, so nothing here sends and nothing here
+    // offers a retry that could only conflict with it.
+    await waitFor(() => expect(reads.length).toBeGreaterThan(1), { timeout: 4_000 });
+    expect(
+      fetchMock.mock.calls.filter(([, init]) => init?.method === "POST"),
+    ).toHaveLength(0);
+    expect(screen.getByLabelText("Message")).toBeDisabled();
+    expect(
+      screen.queryByRole("button", { name: "Retry message" }),
+    ).not.toBeInTheDocument();
+
+    // The winner commits, long after the first re-read went out.
+    stored = {
+      ...stored,
+      pendingUserMessage: null,
+      sessionCreateInProgress: false,
+      sessionCreateUnconfirmed: false,
+      sessionState: { sessionId: "ses_winner", streamIndex: 0 },
+    };
+
+    // Nothing tells this page; the watch has to find it and hand the session
+    // to a store that already read its own.
+    await waitFor(() => expect(screen.getByLabelText("Message")).toBeEnabled(), {
+      timeout: 4_000,
+    });
+    const settled = reads.length;
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, CREATE_WATCH_GRACE_MS));
+    });
+    // The claim is gone, so the watch is too.
+    expect(reads).toHaveLength(settled);
+
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "And now this" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    // The store read its session at mount, before there was one to read. The
+    // adopted session only reaches it as a fresh mount, and this is where the
+    // difference shows: the next turn continues ses_winner instead of asking
+    // for a second session of its own.
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter(([, init]) => init?.method === "POST"),
+      ).toHaveLength(1),
+    );
+    const [sent] = fetchMock.mock.calls.filter(
+      ([, init]) => init?.method === "POST",
+    );
+    expect(String(sent?.[0])).toContain("ses_winner");
+  }, 15_000);
+
+  it("reopens the composer when the Agent refused the create outright", async () => {
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        if (isPendingInputCall([input])) return pendingInputResponse();
+        if (init?.method === "POST") {
+          return Response.json(
+            { sessionId: "ses_composed" },
+            { status: 202, headers: { "x-eve-session-id": "ses_composed" } },
+          );
+        }
+        return ndjson([
+          { type: "session.waiting", data: { wait: "next-user-message" } },
+        ]);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({
+          id: "chat_refused_create",
+          sessionCreateUnconfirmed: false,
+          sessionState: null,
+          status: "failed",
+        })}
+        events={[]}
+        pendingInput={EMPTY_PENDING}
+        pendingUserMessage="Run this once"
+      />,
+    );
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    // No session can exist, so nothing is resent on its own, and the user
+    // edits and sends instead of retrying blind.
+    expect(
+      fetchMock.mock.calls.filter(([, init]) => init?.method === "POST"),
+    ).toHaveLength(0);
+    expect(screen.getByLabelText("Message")).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: "Retry message" }),
+    ).not.toBeInTheDocument();
   });
 
   it("shows the error id when an accepted session fails in the stream", async () => {

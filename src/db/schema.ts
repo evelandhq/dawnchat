@@ -55,6 +55,28 @@ export const chats = pgTable(
     // are derived from stored events on first touch and written back.
     pendingInputJson: text("pending_input_json"),
     pendingUserMessage: text("pending_user_message"),
+    // Set before every session-create request and cleared only by proof of
+    // what the Agent did with it. While set, a session may exist that this
+    // chat has no ID for, so nothing may resend the first message on its own.
+    sessionCreateUnconfirmedAt: timestamp("session_create_unconfirmed_at", {
+      withTimezone: true,
+      mode: "date",
+    }),
+    // Held by the one create request allowed across the upstream boundary,
+    // released as soon as it settles. A claim left behind by a handler that
+    // never returned expires at the deadline its own holder wrote, which is
+    // why this is separate from the unconfirmed mark above: that one may only
+    // be cleared by proof. A contender reads this deadline rather than
+    // deriving one from its own configuration, so a claimant configured to
+    // run longer is never mistaken for a dead one.
+    sessionCreateClaimExpiresAt: timestamp("session_create_claim_expires_at", {
+      withTimezone: true,
+      mode: "date",
+    }),
+    // Identifies the holder of the claim above. A request may only release or
+    // take over a claim it can name, so an attempt that lost its claim to an
+    // expiry cannot clear the one that replaced it.
+    sessionCreateClaimToken: text("session_create_claim_token"),
     status: text("status", { enum: chatStatuses }).notNull().default("active"),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull(),

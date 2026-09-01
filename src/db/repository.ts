@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { DatabaseError } from "pg";
 import { z } from "zod";
@@ -170,8 +170,73 @@ export type Repository = {
     perChatLimit: number,
   ): Promise<Map<string, EveEvent[]>>;
   clearPendingUserMessage(chatId: string): Promise<Chat>;
+  /**
+   * Records the session a continued turn ran on. A continuation holds no
+   * create claim, so this leaves the create columns alone: clearing them here
+   * would drop a claim another request is working under.
+   */
   updateChatSessionState(chatId: string, state: SessionState, status?: ChatStatus): Promise<Chat>;
   updateChatStatus(chatId: string, status: ChatStatus): Promise<Chat>;
+  /**
+   * Claims the one session create a chat may have in flight, and records in
+   * the same write that its outcome is not yet known. Returns the claim's
+   * token, or `null` when another request holds the claim or the chat already
+   * has a session — the caller must not then reach the Agent.
+   *
+   * The claim expires `leaseMs` from now by the database's clock, which is the
+   * only reason a claim is not simply held until it is released: a process
+   * that dies mid-create would otherwise lock the chat out for good. The
+   * deadline is stored rather than recomputed by whoever reads it, so a
+   * claimant that bounds its attempt more generously than a contender would is
+   * still read as alive. Callers must bound their attempt well inside their
+   * own lease, so an expired claim always means a handler that is gone.
+   */
+  claimSessionCreate(
+    chatId: string,
+    leaseMs: number,
+    replaceSessionId?: string,
+  ): Promise<string | null>;
+  /**
+   * Whether a terminal event is stored for this session — Eve's own word that
+   * it ended. A chat may only replace a session it can prove is over.
+   */
+  hasSessionEnded(chatId: string, sessionId: string): Promise<boolean>;
+  /**
+   * Stores the session a create committed and settles the claim that produced
+   * it. Returns `null` when `token` no longer holds the claim: a handler that
+   * woke past its own deadline may not overwrite the state of the request that
+   * replaced it, however late its own answer arrives.
+   */
+  commitSessionCreate(
+    chatId: string,
+    token: string,
+    state: SessionState,
+  ): Promise<Chat | null>;
+  /**
+   * Which of `chatIds` still have an unexpired create claim, decided by the
+   * database's clock — the same one the claim was written against. An app
+   * server comparing the stored deadline to its own clock would disagree with
+   * what a takeover actually does whenever the two have drifted.
+   */
+  liveSessionCreateClaims(chatIds: string[]): Promise<Set<string>>;
+  /**
+   * Records that the create `token` holds the claim for failed. Returns `null`
+   * when the claim has moved on, so a handler that woke past its own deadline
+   * cannot mark a chat failed over the session its successor committed. The
+   * unconfirmed mark is untouched either way: only proof clears that.
+   */
+  failSessionCreate(chatId: string, token: string): Promise<Chat | null>;
+  /**
+   * Releases the claim `token` names, leaving the unconfirmed mark for proof
+   * to clear. A token that no longer holds the claim releases nothing.
+   */
+  releaseSessionCreateClaim(chatId: string, token: string): Promise<void>;
+  /**
+   * Clears the mark after proof of what the Agent did with the request, for
+   * the holder of `token` only. Returns `null` when the claim has moved on:
+   * that proof was about a request nobody is waiting on any more.
+   */
+  clearSessionCreateUnconfirmed(chatId: string, token: string): Promise<Chat | null>;
   /**
    * Read-modify-write on the pending-input ledger under the same per-chat
    * advisory lock as `appendEvent`. `fn` returns the state to persist, or
@@ -772,6 +837,133 @@ export function createRepository(db: RepositoryDb): Repository {
       }
 
       return mapChat(updated);
+    },
+
+    async claimSessionCreate(chatId, leaseMs, replaceSessionId) {
+      const now = new Date();
+      const token = createId("claim");
+      const claimed = await db
+        .update(chats)
+        .set({
+          // Both the deadline and the test against it are the database's own
+          // clock, so neither a contender's configuration nor a skewed app
+          // server decides when someone else's claim is over.
+          sessionCreateClaimExpiresAt: sql`now() + make_interval(secs => ${leaseMs / 1000})`,
+          sessionCreateClaimToken: token,
+          sessionCreateUnconfirmedAt: now,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(chats.id, chatId),
+            // A chat creates a session only while it has none, or in place of
+            // exactly the one the caller decided may be replaced: a session
+            // this write does not recognise may still be running, and a
+            // second one would run beside it.
+            replaceSessionId === undefined
+              ? isNull(chats.sessionStateJson)
+              : or(
+                  isNull(chats.sessionStateJson),
+                  sql`(${chats.sessionStateJson}::json->>'sessionId') = ${replaceSessionId}`,
+                ),
+            or(
+              isNull(chats.sessionCreateClaimExpiresAt),
+              lt(chats.sessionCreateClaimExpiresAt, sql`now()`),
+            ),
+          ),
+        )
+        .returning({ id: chats.id });
+
+      return claimed.length > 0 ? token : null;
+    },
+
+    async hasSessionEnded(chatId, sessionId) {
+      const [row] = await db
+        .select({ id: events.id })
+        .from(events)
+        .where(
+          and(
+            eq(events.chatId, chatId),
+            eq(events.sessionId, sessionId),
+            inArray(events.type, ["session.failed", "session.completed"]),
+          ),
+        )
+        .limit(1);
+
+      return row !== undefined;
+    },
+
+    async commitSessionCreate(chatId, token, state) {
+      const [updated] = await db
+        .update(chats)
+        .set({
+          sessionStateJson: JSON.stringify(state),
+          status: "active",
+          // A stored session ID is the proof the unconfirmed mark was waiting
+          // for, and this claim has nothing left to do.
+          sessionCreateUnconfirmedAt: null,
+          sessionCreateClaimExpiresAt: null,
+          sessionCreateClaimToken: null,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(eq(chats.id, chatId), eq(chats.sessionCreateClaimToken, token)),
+        )
+        .returning();
+
+      return updated ? mapChat(updated) : null;
+    },
+
+    async liveSessionCreateClaims(chatIds) {
+      if (chatIds.length === 0) return new Set();
+      const rows = await db
+        .select({ id: chats.id })
+        .from(chats)
+        .where(
+          and(
+            inArray(chats.id, chatIds),
+            gt(chats.sessionCreateClaimExpiresAt, sql`now()`),
+          ),
+        );
+
+      return new Set(rows.map((row) => row.id));
+    },
+
+    async failSessionCreate(chatId, token) {
+      const [updated] = await db
+        .update(chats)
+        .set({ status: "failed", updatedAt: new Date() })
+        .where(
+          and(eq(chats.id, chatId), eq(chats.sessionCreateClaimToken, token)),
+        )
+        .returning();
+
+      return updated ? mapChat(updated) : null;
+    },
+
+    async releaseSessionCreateClaim(chatId, token) {
+      await db
+        .update(chats)
+        .set({
+          sessionCreateClaimExpiresAt: null,
+          sessionCreateClaimToken: null,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(eq(chats.id, chatId), eq(chats.sessionCreateClaimToken, token)),
+        );
+    },
+
+    async clearSessionCreateUnconfirmed(chatId, token) {
+      const [updated] = await db
+        .update(chats)
+        .set({ sessionCreateUnconfirmedAt: null, updatedAt: new Date() })
+        .where(
+          and(eq(chats.id, chatId), eq(chats.sessionCreateClaimToken, token)),
+        )
+        .returning();
+
+      return updated ? mapChat(updated) : null;
     },
 
     async updatePendingInput(chatId, fn) {
