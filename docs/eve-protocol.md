@@ -58,13 +58,30 @@ settles nothing until the Caller Token retry.
 One create at a time per chat. Resolving the chat, finding it has no session,
 and recording the attempt are separate reads, so the mark is written as a
 conditional claim naming its holder: a request that meets a live claim is
-refused with 409 rather than reaching the Agent, and only the holder named by
-a claim can release it. Each attempt is abandoned after `EVE_CREATE_TIMEOUT_MS`
-(45s by default, past Eve's own 30s wait), and a claim is takeable only at
-twice that age — so a claim that looks stale always belongs to a handler that
-is gone rather than one still working, and no attempt outlives its own claim.
-The unconfirmed mark an abandoned attempt leaves behind is what keeps the chat
-safe until a retry settles it.
+refused with 409 rather than reaching the Agent. Each attempt is abandoned
+after `EVE_CREATE_TIMEOUT_MS` (45s by default, past Eve's own 30s wait), and
+the claim it takes runs for twice that — a deadline the claimant writes and a
+contender only reads, both by the database's clock. Neither an instance
+configured for longer attempts nor a skewed clock can therefore make one
+process judge another's claim over: a claim that has expired always belongs to
+a handler that is gone, and no attempt outlives its own claim.
+
+The claim is also a fence, because a deadline alone cannot stop a process that
+resumes after one. Everything the create writes at the end — the session it
+committed, and the clearing of the mark on a refusal — names the token, so a
+handler whose claim was taken over stores nothing and answers 409 rather than
+overwriting the request that replaced it. Its session is not lost: the next
+create for that chat names the same operation and Eve answers with it.
+Continuations hold no claim and never touch these columns. The unconfirmed
+mark an abandoned attempt leaves behind is what keeps the chat safe until a
+retry settles it.
+
+A browser refused with 409 waits rather than retrying into the conflict. Its
+composer stays closed with no retry offered while the chat reports a create in
+progress, and it re-reads the chat until that claim is gone — the winner
+persists its session partway through its own attempt, and nothing tells the
+loser when. A re-read that brings back a session this view never had remounts
+the Eve store on it, since the store reads its session once, at mount.
 
 A chat that already holds a session creates no other, whatever its status: a
 turn that failed on the transport leaves the session it failed on running. Only

@@ -47,6 +47,13 @@ export type ChatResponse = {
    * retry may send it again.
    */
   sessionCreateUnconfirmed: boolean;
+  /**
+   * A create request holds this chat's claim and has not settled yet. Its
+   * outcome belongs to that request, so another reader waits for it rather
+   * than starting a second create or offering a retry that could only
+   * conflict.
+   */
+  sessionCreateInProgress: boolean;
   /** The proxy's pending-input ledger: batches Eve is still parked on. */
   pendingInput: PendingInputState;
   pendingUserMessage: UserContent | null;
@@ -277,6 +284,9 @@ function chatResponse(chat: Chat): ChatResponse {
         }
       : null,
     sessionCreateUnconfirmed: chat.sessionCreateUnconfirmedAt !== null,
+    sessionCreateInProgress:
+      chat.sessionCreateClaimExpiresAt !== null &&
+      chat.sessionCreateClaimExpiresAt.getTime() > Date.now(),
     pendingInput: chat.pendingInput ?? EMPTY_PENDING_INPUT,
     pendingUserMessage: deserializePendingUserContent(chat.pendingUserMessage),
     createdAt: chat.createdAt.toISOString(),

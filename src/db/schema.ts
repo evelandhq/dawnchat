@@ -64,9 +64,12 @@ export const chats = pgTable(
     }),
     // Held by the one create request allowed across the upstream boundary,
     // released as soon as it settles. A claim left behind by a handler that
-    // never returned expires on a lease, which is why this is separate from
-    // the unconfirmed mark above: that one may only be cleared by proof.
-    sessionCreateClaimedAt: timestamp("session_create_claimed_at", {
+    // never returned expires at the deadline its own holder wrote, which is
+    // why this is separate from the unconfirmed mark above: that one may only
+    // be cleared by proof. A contender reads this deadline rather than
+    // deriving one from its own configuration, so a claimant configured to
+    // run longer is never mistaken for a dead one.
+    sessionCreateClaimExpiresAt: timestamp("session_create_claim_expires_at", {
       withTimezone: true,
       mode: "date",
     }),

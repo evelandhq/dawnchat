@@ -54,9 +54,11 @@ function createAttemptTimeoutMs(): number {
 }
 
 /**
- * A claim older than this belongs to a handler that is gone, never to one
- * still working: the attempt it guards is aborted at half this age, so the
- * two windows cannot overlap and no attempt outlives its own claim.
+ * How long this process asks to hold a claim. The attempt it guards is
+ * abandoned at half of it, so the two windows cannot overlap and no attempt
+ * outlives its own claim. The lease is stored as a deadline rather than read
+ * back as an age, so a process configured for a longer attempt is not judged
+ * dead by one configured for a shorter one.
  */
 function createClaimLeaseMs(): number {
   return createAttemptTimeoutMs() * 2;
@@ -274,7 +276,7 @@ async function proxyTurnRequest(
   // claim collapses the check and the mark into one conditional write.
   const claim = await context.repository.claimSessionCreate(
     context.chat.id,
-    new Date(Date.now() - createClaimLeaseMs()),
+    createClaimLeaseMs(),
     replaceSessionId,
   );
   if (!claim) {
@@ -291,6 +293,7 @@ async function proxyTurnRequest(
       undefined,
       body,
       AbortSignal.any([request.signal, AbortSignal.timeout(createAttemptTimeoutMs())]),
+      claim,
     );
   } finally {
     // Only the claim is released, and only while this request still holds it:
@@ -310,6 +313,7 @@ async function forwardTurn(
   sessionId: string | undefined,
   body: Record<string, unknown>,
   signal: AbortSignal = request.signal,
+  claim?: string,
 ): Promise<Response> {
   const isCreate = sessionId === undefined;
   const currentSession = context.chat.sessionState;
@@ -339,10 +343,10 @@ async function forwardTurn(
   }
 
   if (!remote.ok) {
-    if (isCreate && !isAmbiguousFailureStatus(remote.status)) {
+    if (claim && isCreate && !isAmbiguousFailureStatus(remote.status)) {
       // The Agent refused the request itself, which is proof it created
       // nothing: this chat is safe to send from again.
-      await context.repository.clearSessionCreateUnconfirmed(context.chat.id);
+      await context.repository.clearSessionCreateUnconfirmed(context.chat.id, claim);
     }
     if (remote.status !== 401) {
       await context.repository.updateChatStatus(context.chat.id, "failed");
@@ -370,6 +374,24 @@ async function forwardTurn(
     sessionId: resolvedSessionId,
     streamIndex: isContinuing ? (currentSession?.streamIndex ?? 0) : 0,
   };
+  if (claim) {
+    // Nothing about this chat is this request's to write once its claim has
+    // moved on: whoever holds it now owns the outcome, and the session this
+    // one just created is reachable again through the same operation ID.
+    const committed = await context.repository.commitSessionCreate(
+      context.chat.id,
+      claim,
+      nextSession,
+    );
+    if (!committed) {
+      console.error(
+        `Discarded session ${resolvedSessionId} for ${context.chat.id}: the create claim was taken over`,
+      );
+      return errorResponse("A session create for this chat is already in progress", 409);
+    }
+  } else {
+    await context.repository.updateChatSessionState(context.chat.id, nextSession, "active");
+  }
   if (!isContinuing) {
     // Batches belong to a session; none survive its replacement.
     await context.repository
@@ -378,7 +400,6 @@ async function forwardTurn(
         console.error(`Failed to clear pending input for ${context.chat.id}:`, error);
       });
   }
-  await context.repository.updateChatSessionState(context.chat.id, nextSession, "active");
   await context.repository.clearPendingUserMessage(context.chat.id);
   await recordInputResponses(context, body);
 

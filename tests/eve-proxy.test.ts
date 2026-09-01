@@ -113,6 +113,7 @@ describe("per-chat Eve protocol proxy", () => {
 
   afterEach(async () => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
     setDbClientForTests(null);
     setCallerTokenVerifierForTests(null);
     await testDb.close();
@@ -294,7 +295,7 @@ describe("per-chat Eve protocol proxy", () => {
     expect(creates).toHaveLength(1);
     await expect(repository.getChat(chat.id)).resolves.toMatchObject({
       pendingUserMessage: null,
-      sessionCreateClaimedAt: null,
+      sessionCreateClaimExpiresAt: null,
       sessionCreateUnconfirmedAt: null,
       sessionState: { sessionId: "ses_1", streamIndex: 0 },
       status: "active",
@@ -348,7 +349,7 @@ describe("per-chat Eve protocol proxy", () => {
     expect(ambiguous.status).toBe(500);
     const marked = await repository.getChat(chat.id);
     expect(marked?.sessionCreateUnconfirmedAt).toBeInstanceOf(Date);
-    expect(marked?.sessionCreateClaimedAt).toBeNull();
+    expect(marked?.sessionCreateClaimExpiresAt).toBeNull();
 
     const recovered = await create();
 
@@ -367,7 +368,7 @@ describe("per-chat Eve protocol proxy", () => {
     await expect(recovered.json()).resolves.toMatchObject({ sessionId: "ses_1" });
     await expect(repository.getChat(chat.id)).resolves.toMatchObject({
       pendingUserMessage: null,
-      sessionCreateClaimedAt: null,
+      sessionCreateClaimExpiresAt: null,
       sessionCreateUnconfirmedAt: null,
       sessionState: { sessionId: "ses_1", streamIndex: 0 },
       status: "active",
@@ -473,13 +474,115 @@ describe("per-chat Eve protocol proxy", () => {
     const stored = await repository.getChat(chat.id);
     // The attempt is over, so its claim is gone; what it may have committed
     // upstream is not, so the mark stays.
-    expect(stored?.sessionCreateClaimedAt).toBeNull();
+    expect(stored?.sessionCreateClaimExpiresAt).toBeNull();
     expect(stored?.sessionCreateClaimToken).toBeNull();
     expect(stored?.sessionCreateUnconfirmedAt).toBeInstanceOf(Date);
     expect(stored).toMatchObject({
       pendingUserMessage: "Run this once",
       sessionState: null,
       status: "failed",
+    });
+  });
+
+  it("leaves a claim whose own deadline has not passed to its holder", async () => {
+    const server = await fakeServer();
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Long Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Held create",
+      pendingUserMessage: "Run this once",
+      ...chatIdentity,
+    });
+    // The holder's lease is far shorter than the lease this request would
+    // take for itself, which is all a rolling deployment needs. A contender
+    // that measured the claim against its own window would call this one over
+    // already; only the deadline the holder wrote decides.
+    const held = await repository.claimSessionCreate(chat.id, 2_000);
+    const routes = await loadProxyRoutes();
+
+    const response = await routes.createSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ message: "Run this once" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id }) },
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "A session create for this chat is already in progress",
+    });
+    const creates = server.requests.filter(
+      (request) => request.method === "POST" && request.path === "/eve/v1/session",
+    );
+    expect(creates).toHaveLength(0);
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      sessionCreateClaimToken: held,
+      sessionState: null,
+    });
+  });
+
+  it("discards a create whose claim was taken over before it could persist", async () => {
+    const server = await fakeServer({ createSessionDelayMs: 250 });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Slow Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Overtaken create",
+      pendingUserMessage: "Run this once",
+      ...chatIdentity,
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const routes = await loadProxyRoutes();
+
+    const inFlight = routes.createSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ message: "Run this once" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id }) },
+    );
+
+    // While the create waits upstream its claim goes to another request — the
+    // shape a process suspended past its own deadline leaves behind.
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const current = await repository.getChat(chat.id);
+      if (current?.sessionCreateClaimToken) break;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    await testDb.db
+      .update(chats)
+      .set({ sessionCreateClaimExpiresAt: new Date(Date.now() - 1_000) })
+      .where(eq(chats.id, chat.id));
+    const taken = await repository.claimSessionCreate(chat.id, 60_000);
+    expect(taken).not.toBeNull();
+
+    const response = await inFlight;
+
+    // Eve answered this request, but the chat is no longer its to write: the
+    // session it made is reachable again through the same operation id.
+    expect(response.status).toBe(409);
+    const stored = await repository.getChat(chat.id);
+    expect(stored?.sessionCreateClaimToken).toBe(taken);
+    expect(stored?.sessionCreateUnconfirmedAt).toBeInstanceOf(Date);
+    expect(stored).toMatchObject({
+      pendingUserMessage: "Run this once",
+      sessionState: null,
     });
   });
 

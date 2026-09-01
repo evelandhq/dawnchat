@@ -92,6 +92,13 @@
       "when": 1788178724240,
       "tag": "0012_narrow_hex",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1788229968631,
+      "tag": "0013_claim_expiry",
+      "breakpoints": true
     }
   ]
 }

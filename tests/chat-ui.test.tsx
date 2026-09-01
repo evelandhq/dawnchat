@@ -57,6 +57,9 @@ function ndjson(events: readonly unknown[]): Response {
 
 const EMPTY_PENDING: PendingInputState = { batches: [] };
 
+/** Comfortably past the thread's own watch interval, so a live watch would fire. */
+const CREATE_WATCH_GRACE_MS = 2_500;
+
 /** Ledger fixture: what the proxy says Eve is still parked on. */
 function pendingBatches(
   ...batches: Array<{
@@ -1537,6 +1540,103 @@ describe("ChatThread with Eve and AI Elements", () => {
       message: "Run this once",
     });
   });
+
+  it("adopts the session a create it lost commits after the first re-read", async () => {
+    // The chat as the server holds it: another request owns the create claim
+    // and has not persisted anything yet.
+    let stored: ChatThreadSummary & { pendingUserMessage: string | null } = {
+      ...chat({
+        id: "chat_deferred_winner",
+        sessionCreateInProgress: true,
+        sessionCreateUnconfirmed: true,
+        sessionState: null,
+      }),
+      pendingUserMessage: "Run this once",
+    };
+    const reads: number[] = [];
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        if (isPendingInputCall([input])) return pendingInputResponse();
+        if (init?.method === "POST") {
+          return Response.json({ error: "conflict", ok: false }, { status: 409 });
+        }
+        return ndjson([
+          { type: "message.completed", data: { message: "Done", finishReason: "stop", sequence: 1, stepIndex: 0, turnId: "turn_1" } },
+          { type: "session.waiting", data: { wait: "next-user-message" } },
+        ]);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    function Harness(): React.ReactElement {
+      const [snapshot, setSnapshot] = React.useState(stored);
+      return (
+        <ChatThread
+          chat={snapshot}
+          events={[]}
+          pendingInput={EMPTY_PENDING}
+          pendingUserMessage={snapshot.pendingUserMessage}
+          onChatStale={() => {
+            reads.push(reads.length);
+            setSnapshot({ ...stored });
+          }}
+        />
+      );
+    }
+
+    render(<Harness />);
+
+    // The winner owns this create, so nothing here sends and nothing here
+    // offers a retry that could only conflict with it.
+    await waitFor(() => expect(reads.length).toBeGreaterThan(1), { timeout: 4_000 });
+    expect(
+      fetchMock.mock.calls.filter(([, init]) => init?.method === "POST"),
+    ).toHaveLength(0);
+    expect(screen.getByLabelText("Message")).toBeDisabled();
+    expect(
+      screen.queryByRole("button", { name: "Retry message" }),
+    ).not.toBeInTheDocument();
+
+    // The winner commits, long after the first re-read went out.
+    stored = {
+      ...stored,
+      pendingUserMessage: null,
+      sessionCreateInProgress: false,
+      sessionCreateUnconfirmed: false,
+      sessionState: { sessionId: "ses_winner", streamIndex: 0 },
+    };
+
+    // Nothing tells this page; the watch has to find it and hand the session
+    // to a store that already read its own.
+    await waitFor(() => expect(screen.getByLabelText("Message")).toBeEnabled(), {
+      timeout: 4_000,
+    });
+    const settled = reads.length;
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, CREATE_WATCH_GRACE_MS));
+    });
+    // The claim is gone, so the watch is too.
+    expect(reads).toHaveLength(settled);
+
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "And now this" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    // The store read its session at mount, before there was one to read. The
+    // adopted session only reaches it as a fresh mount, and this is where the
+    // difference shows: the next turn continues ses_winner instead of asking
+    // for a second session of its own.
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter(([, init]) => init?.method === "POST"),
+      ).toHaveLength(1),
+    );
+    const [sent] = fetchMock.mock.calls.filter(
+      ([, init]) => init?.method === "POST",
+    );
+    expect(String(sent?.[0])).toContain("ses_winner");
+  }, 15_000);
 
   it("reopens the composer when the Agent refused the create outright", async () => {
     const fetchMock = vi.fn(

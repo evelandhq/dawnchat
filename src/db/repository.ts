@@ -170,6 +170,11 @@ export type Repository = {
     perChatLimit: number,
   ): Promise<Map<string, EveEvent[]>>;
   clearPendingUserMessage(chatId: string): Promise<Chat>;
+  /**
+   * Records the session a continued turn ran on. A continuation holds no
+   * create claim, so this leaves the create columns alone: clearing them here
+   * would drop a claim another request is working under.
+   */
   updateChatSessionState(chatId: string, state: SessionState, status?: ChatStatus): Promise<Chat>;
   updateChatStatus(chatId: string, status: ChatStatus): Promise<Chat>;
   /**
@@ -178,15 +183,17 @@ export type Repository = {
    * token, or `null` when another request holds the claim or the chat already
    * has a session — the caller must not then reach the Agent.
    *
-   * `staleBefore` expires a claim a handler never released, which is the only
-   * reason a claim is not simply held until it is released: a process that
-   * dies mid-create would otherwise lock the chat out for good. Callers must
-   * bound their attempt well inside that window, so an expired claim always
-   * means a handler that is gone rather than one still working.
+   * The claim expires `leaseMs` from now by the database's clock, which is the
+   * only reason a claim is not simply held until it is released: a process
+   * that dies mid-create would otherwise lock the chat out for good. The
+   * deadline is stored rather than recomputed by whoever reads it, so a
+   * claimant that bounds its attempt more generously than a contender would is
+   * still read as alive. Callers must bound their attempt well inside their
+   * own lease, so an expired claim always means a handler that is gone.
    */
   claimSessionCreate(
     chatId: string,
-    staleBefore: Date,
+    leaseMs: number,
     replaceSessionId?: string,
   ): Promise<string | null>;
   /**
@@ -195,12 +202,27 @@ export type Repository = {
    */
   hasSessionEnded(chatId: string, sessionId: string): Promise<boolean>;
   /**
+   * Stores the session a create committed and settles the claim that produced
+   * it. Returns `null` when `token` no longer holds the claim: a handler that
+   * woke past its own deadline may not overwrite the state of the request that
+   * replaced it, however late its own answer arrives.
+   */
+  commitSessionCreate(
+    chatId: string,
+    token: string,
+    state: SessionState,
+  ): Promise<Chat | null>;
+  /**
    * Releases the claim `token` names, leaving the unconfirmed mark for proof
    * to clear. A token that no longer holds the claim releases nothing.
    */
   releaseSessionCreateClaim(chatId: string, token: string): Promise<void>;
-  /** Clears the mark after proof of what the Agent did with the request. */
-  clearSessionCreateUnconfirmed(chatId: string): Promise<Chat>;
+  /**
+   * Clears the mark after proof of what the Agent did with the request, for
+   * the holder of `token` only. Returns `null` when the claim has moved on:
+   * that proof was about a request nobody is waiting on any more.
+   */
+  clearSessionCreateUnconfirmed(chatId: string, token: string): Promise<Chat | null>;
   /**
    * Read-modify-write on the pending-input ledger under the same per-chat
    * advisory lock as `appendEvent`. `fn` returns the state to persist, or
@@ -776,11 +798,6 @@ export function createRepository(db: RepositoryDb): Repository {
         .update(chats)
         .set({
           sessionStateJson: JSON.stringify(state),
-          // A stored session ID is the proof an unconfirmed create was waiting
-          // for, whichever attempt produced it.
-          sessionCreateUnconfirmedAt: null,
-          sessionCreateClaimedAt: null,
-          sessionCreateClaimToken: null,
           ...(status ? { status } : {}),
           updatedAt: new Date(),
         })
@@ -808,13 +825,16 @@ export function createRepository(db: RepositoryDb): Repository {
       return mapChat(updated);
     },
 
-    async claimSessionCreate(chatId, staleBefore, replaceSessionId) {
+    async claimSessionCreate(chatId, leaseMs, replaceSessionId) {
       const now = new Date();
       const token = createId("claim");
       const claimed = await db
         .update(chats)
         .set({
-          sessionCreateClaimedAt: now,
+          // Both the deadline and the test against it are the database's own
+          // clock, so neither a contender's configuration nor a skewed app
+          // server decides when someone else's claim is over.
+          sessionCreateClaimExpiresAt: sql`now() + make_interval(secs => ${leaseMs / 1000})`,
           sessionCreateClaimToken: token,
           sessionCreateUnconfirmedAt: now,
           updatedAt: now,
@@ -833,8 +853,8 @@ export function createRepository(db: RepositoryDb): Repository {
                   sql`(${chats.sessionStateJson}::json->>'sessionId') = ${replaceSessionId}`,
                 ),
             or(
-              isNull(chats.sessionCreateClaimedAt),
-              lt(chats.sessionCreateClaimedAt, staleBefore),
+              isNull(chats.sessionCreateClaimExpiresAt),
+              lt(chats.sessionCreateClaimExpiresAt, sql`now()`),
             ),
           ),
         )
@@ -859,11 +879,32 @@ export function createRepository(db: RepositoryDb): Repository {
       return row !== undefined;
     },
 
+    async commitSessionCreate(chatId, token, state) {
+      const [updated] = await db
+        .update(chats)
+        .set({
+          sessionStateJson: JSON.stringify(state),
+          status: "active",
+          // A stored session ID is the proof the unconfirmed mark was waiting
+          // for, and this claim has nothing left to do.
+          sessionCreateUnconfirmedAt: null,
+          sessionCreateClaimExpiresAt: null,
+          sessionCreateClaimToken: null,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(eq(chats.id, chatId), eq(chats.sessionCreateClaimToken, token)),
+        )
+        .returning();
+
+      return updated ? mapChat(updated) : null;
+    },
+
     async releaseSessionCreateClaim(chatId, token) {
       await db
         .update(chats)
         .set({
-          sessionCreateClaimedAt: null,
+          sessionCreateClaimExpiresAt: null,
           sessionCreateClaimToken: null,
           updatedAt: new Date(),
         })
@@ -872,18 +913,16 @@ export function createRepository(db: RepositoryDb): Repository {
         );
     },
 
-    async clearSessionCreateUnconfirmed(chatId) {
+    async clearSessionCreateUnconfirmed(chatId, token) {
       const [updated] = await db
         .update(chats)
         .set({ sessionCreateUnconfirmedAt: null, updatedAt: new Date() })
-        .where(eq(chats.id, chatId))
+        .where(
+          and(eq(chats.id, chatId), eq(chats.sessionCreateClaimToken, token)),
+        )
         .returning();
 
-      if (!updated) {
-        throw new Error(`Chat not found: ${chatId}`);
-      }
-
-      return mapChat(updated);
+      return updated ? mapChat(updated) : null;
     },
 
     async updatePendingInput(chatId, fn) {

@@ -86,6 +86,8 @@ export type ChatThreadSummary = {
   sessionState: ClientSessionState | null;
   /** A create request for this chat never proved what the Agent did with it. */
   sessionCreateUnconfirmed?: boolean;
+  /** A create request holds this chat's claim and has not settled yet. */
+  sessionCreateInProgress?: boolean;
   createdAt: string;
   updatedAt: string;
 };
@@ -94,7 +96,8 @@ export type ChatThreadSummary = {
  * Where the initial message's session creation stands.
  *
  * - `settled`: the chat has a session, or carries no initial message.
- * - `pending`: an attempt is in flight, or none has run in this page yet.
+ * - `pending`: an attempt is in flight — this page's own, or the one another
+ *   request holds this chat's create claim for — or none has run yet.
  * - `unconfirmed`: an attempt ended without proving what Eve did with it. A
  *   resend risks a second session replaying the same first message, so only
  *   the user may ask for one.
@@ -102,6 +105,13 @@ export type ChatThreadSummary = {
  *   composer is usable again.
  */
 type InitialCreateState = "settled" | "pending" | "unconfirmed" | "rejected";
+
+/**
+ * How often a thread whose create another request owns re-reads the chat. The
+ * winner persists its session at some point inside its own attempt, and no
+ * event reaches this page when it does.
+ */
+const CREATE_WATCH_INTERVAL_MS = 1_000;
 
 /**
  * One input batch as this client tracks it. The proxy's ledger is the
@@ -244,7 +254,10 @@ export function ChatThread({
 
   return (
     <ChatThreadSession
-      key={authentication.revision}
+      // The eve store reads its session once, at mount. A re-read that brings
+      // back a session this thread never had — the one a create it lost
+      // finally committed — has to reach the store as a fresh mount.
+      key={`${authentication.revision}:${chat.sessionState?.sessionId ?? ""}`}
       chat={chat}
       events={authentication.events}
       pendingInput={pendingInput}
@@ -303,11 +316,14 @@ function ChatThreadSession({
   updateQueuedTurns: UpdateQueuedTurns;
 }): React.ReactElement {
   const agentRef = useRef<ReturnType<typeof useEveAgent> | null>(null);
+  // The parent re-creates this callback on every render, and a watch timer
+  // that restarted with it would never reach its own deadline.
+  const onChatStaleRef = useRef(onChatStale);
+  onChatStaleRef.current = onChatStale;
   const drainQueuedTurnRef = useRef<
     ((settledQueuedTurnId?: string) => void) | null
   >(null);
   const latestInputRef = useRef<TurnPayload | null>(null);
-  const staleReportedRef = useRef(false);
   const retrySentRef = useRef(false);
   const retryRefetchedRef = useRef(false);
   const [localError, setLocalError] = useState<string | null>(null);
@@ -492,17 +508,10 @@ function ChatThreadSession({
         if (outcome) setLiveInitialCreate(outcome);
       }
       // A 409 means the chat this thread is looking at is behind the server's:
-      // another request owns its create, or has already made the session. Ask
-      // once for a fresh read rather than leaving the composer closed until
-      // the user reloads the page.
-      if (
-        error instanceof ClientError &&
-        error.status === 409 &&
-        !current?.session &&
-        !staleReportedRef.current
-      ) {
-        staleReportedRef.current = true;
-        onChatStale?.();
+      // another request owns its create, or has already made the session. The
+      // read it asks for is the first of however many the watch below needs.
+      if (error instanceof ClientError && error.status === 409 && !current?.session) {
+        onChatStaleRef.current?.();
       }
       const retry = latestInputRef.current;
       const queuedTurnId = activeQueuedTurnIdRef.current ?? undefined;
@@ -588,24 +597,32 @@ function ChatThreadSession({
   agentRef.current = agent;
   const isResuming = agent.status === "resuming";
   const isBusy = agent.status === "submitted" || agent.status === "streaming";
-  // A stored chat can only say whether its last create is still unconfirmed;
-  // an attempt made in this page's lifetime is classified from its failure.
+  // A create another request holds the claim for is still running, whatever
+  // this page last saw of its own attempt, so it outranks both. Otherwise a
+  // stored chat can only say whether its last create is unconfirmed, while an
+  // attempt made in this page's lifetime is classified from its failure.
+  const createInProgress = Boolean(chat.sessionCreateInProgress) && !agent.session;
   const initialCreate: InitialCreateState =
     !pendingUserMessage || agent.session
       ? "settled"
-      : (liveInitialCreate ??
-        (chat.sessionCreateUnconfirmed
-          ? "unconfirmed"
-          : chat.status === "failed"
-            ? "rejected"
-            : "pending"));
+      : createInProgress
+        ? "pending"
+        : (liveInitialCreate ??
+          (chat.sessionCreateUnconfirmed
+            ? "unconfirmed"
+            : chat.status === "failed"
+              ? "rejected"
+              : "pending"));
   const createUnconfirmed = initialCreate === "unconfirmed";
   // Retry is offered for every settled create failure, and while an attempt
-  // that left no verdict — a challenge nothing answered — sits in error.
+  // that left no verdict — a challenge nothing answered — sits in error. Not
+  // while another request is still making the create, though: that retry
+  // could only collide with it, and the watch below is what ends the wait.
   const canRetryInitialMessage =
-    createUnconfirmed ||
-    initialCreate === "rejected" ||
-    (initialCreate === "pending" && agent.status === "error");
+    !createInProgress &&
+    (createUnconfirmed ||
+      initialCreate === "rejected" ||
+      (initialCreate === "pending" && agent.status === "error"));
   const pendingRequestIds = useMemo(() => {
     const ids = new Set<string>();
     for (const batch of pendingBatches) {
@@ -763,14 +780,27 @@ function ChatThreadSession({
     updateQueuedTurns,
   ]);
 
+  // Watching, not asking once: the request that holds the claim persists its
+  // session at some point inside its own attempt, and nothing tells this page
+  // when. Each re-read that still finds the claim held schedules the next, so
+  // the watch ends with the claim — on a session to adopt, or on a mark only
+  // the user can settle.
+  useEffect(() => {
+    if (!createInProgress) return;
+    const timer = setTimeout(() => onChatStaleRef.current?.(), CREATE_WATCH_INTERVAL_MS);
+    return () => clearTimeout(timer);
+  }, [chat, createInProgress]);
+
   // Only a create whose outcome is still open may be sent without the user
-  // asking: an unconfirmed one could duplicate a session Eve already runs, and
-  // a rejected one belongs to the composer.
+  // asking: an unconfirmed one could duplicate a session Eve already runs, a
+  // rejected one belongs to the composer, and one another request is still
+  // making is not this page's to repeat.
   useEffect(() => {
     if (
       readOnly ||
       retryInput ||
       !pendingUserMessage ||
+      createInProgress ||
       initialCreate !== "pending" ||
       pendingSentRef.current ||
       agent.status !== "ready"
@@ -787,7 +817,15 @@ function ChatThreadSession({
       });
     }, 0);
     return () => clearTimeout(timer);
-  }, [agent, initialCreate, pendingUserMessage, readOnly, retryInput, pendingSentRef]);
+  }, [
+    agent,
+    createInProgress,
+    initialCreate,
+    pendingUserMessage,
+    readOnly,
+    retryInput,
+    pendingSentRef,
+  ]);
 
   useEffect(() => {
     if (
