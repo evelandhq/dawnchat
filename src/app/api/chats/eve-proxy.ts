@@ -317,12 +317,22 @@ async function forwardTurn(
 ): Promise<Response> {
   const isCreate = sessionId === undefined;
   const currentSession = context.chat.sessionState;
+  // A create's failure is only this request's to record while it still holds
+  // the claim. A successor that already committed a session must not be left
+  // reading as failed, and a continuation owns no claim to check.
+  const recordFailure = async (): Promise<void> => {
+    if (claim) {
+      await context.repository.failSessionCreate(context.chat.id, claim);
+      return;
+    }
+    await context.repository.updateChatStatus(context.chat.id, "failed");
+  };
 
   let remote: Response;
   try {
     remote = await postTurn(context, sessionId, body, signal);
   } catch {
-    await context.repository.updateChatStatus(context.chat.id, "failed");
+    await recordFailure();
     return errorResponse("Unable to reach Eve agent", 502);
   }
 
@@ -337,7 +347,7 @@ async function forwardTurn(
     try {
       remote = await postTurn(context, sessionId, body, signal);
     } catch {
-      await context.repository.updateChatStatus(context.chat.id, "failed");
+      await recordFailure();
       return errorResponse("Unable to reach Eve agent", 502);
     }
   }
@@ -349,7 +359,7 @@ async function forwardTurn(
       await context.repository.clearSessionCreateUnconfirmed(context.chat.id, claim);
     }
     if (remote.status !== 401) {
-      await context.repository.updateChatStatus(context.chat.id, "failed");
+      await recordFailure();
     }
     return forwardErrorResponse(remote, context.chat.id);
   }
@@ -358,14 +368,14 @@ async function forwardTurn(
   // ID leaves a create unconfirmed rather than refuted.
   const payload = await readResponseObject(remote);
   if (payload instanceof Response) {
-    await context.repository.updateChatStatus(context.chat.id, "failed");
+    await recordFailure();
     return payload;
   }
 
   const resolvedSessionId =
     stringValue(payload.sessionId) ?? remote.headers.get("x-eve-session-id")?.trim() ?? sessionId;
   if (!resolvedSessionId) {
-    await context.repository.updateChatStatus(context.chat.id, "failed");
+    await recordFailure();
     return errorResponse("Eve response did not include a session id", 502);
   }
 

@@ -67,12 +67,13 @@ process judge another's claim over: a claim that has expired always belongs to
 a handler that is gone, and no attempt outlives its own claim.
 
 The claim is also a fence, because a deadline alone cannot stop a process that
-resumes after one. Everything the create writes at the end — the session it
-committed, and the clearing of the mark on a refusal — names the token, so a
-handler whose claim was taken over stores nothing and answers 409 rather than
-overwriting the request that replaced it. Its session is not lost: the next
-create for that chat names the same operation and Eve answers with it.
-Continuations hold no claim and never touch these columns. The unconfirmed
+resumes after one. Every write a create ends with names the token — the
+session it committed, the failed status it records, the clearing of the mark
+on a refusal — so a handler whose claim was taken over stores nothing and
+answers 409 rather than overwriting the request that replaced it, and cannot
+leave a successor's session reading as failed. Its own session is not lost:
+the next create for that chat names the same operation and Eve answers with
+it. Continuations hold no claim and never touch these columns. The unconfirmed
 mark an abandoned attempt leaves behind is what keeps the chat safe until a
 retry settles it.
 
@@ -80,8 +81,11 @@ A browser refused with 409 waits rather than retrying into the conflict. Its
 composer stays closed with no retry offered while the chat reports a create in
 progress, and it re-reads the chat until that claim is gone — the winner
 persists its session partway through its own attempt, and nothing tells the
-loser when. A re-read that brings back a session this view never had remounts
-the Eve store on it, since the store reads its session once, at mount.
+loser when. Whether a claim is still live is decided in the database on every
+read, never by comparing the stored deadline to an app server's clock, so a
+reader and a takeover cannot disagree about the same row. A re-read that
+brings back a session this view never had remounts the Eve store on it, since
+the store reads its session once, at mount.
 
 A chat that already holds a session creates no other, whatever its status: a
 turn that failed on the transport leaves the session it failed on running. Only

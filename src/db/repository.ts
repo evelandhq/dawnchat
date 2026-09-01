@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { DatabaseError } from "pg";
 import { z } from "zod";
@@ -212,6 +212,20 @@ export type Repository = {
     token: string,
     state: SessionState,
   ): Promise<Chat | null>;
+  /**
+   * Which of `chatIds` still have an unexpired create claim, decided by the
+   * database's clock — the same one the claim was written against. An app
+   * server comparing the stored deadline to its own clock would disagree with
+   * what a takeover actually does whenever the two have drifted.
+   */
+  liveSessionCreateClaims(chatIds: string[]): Promise<Set<string>>;
+  /**
+   * Records that the create `token` holds the claim for failed. Returns `null`
+   * when the claim has moved on, so a handler that woke past its own deadline
+   * cannot mark a chat failed over the session its successor committed. The
+   * unconfirmed mark is untouched either way: only proof clears that.
+   */
+  failSessionCreate(chatId: string, token: string): Promise<Chat | null>;
   /**
    * Releases the claim `token` names, leaving the unconfirmed mark for proof
    * to clear. A token that no longer holds the claim releases nothing.
@@ -892,6 +906,33 @@ export function createRepository(db: RepositoryDb): Repository {
           sessionCreateClaimToken: null,
           updatedAt: new Date(),
         })
+        .where(
+          and(eq(chats.id, chatId), eq(chats.sessionCreateClaimToken, token)),
+        )
+        .returning();
+
+      return updated ? mapChat(updated) : null;
+    },
+
+    async liveSessionCreateClaims(chatIds) {
+      if (chatIds.length === 0) return new Set();
+      const rows = await db
+        .select({ id: chats.id })
+        .from(chats)
+        .where(
+          and(
+            inArray(chats.id, chatIds),
+            gt(chats.sessionCreateClaimExpiresAt, sql`now()`),
+          ),
+        );
+
+      return new Set(rows.map((row) => row.id));
+    },
+
+    async failSessionCreate(chatId, token) {
+      const [updated] = await db
+        .update(chats)
+        .set({ status: "failed", updatedAt: new Date() })
         .where(
           and(eq(chats.id, chatId), eq(chats.sessionCreateClaimToken, token)),
         )

@@ -93,16 +93,22 @@ export async function listChats(request: Request): Promise<Response> {
         )
       : [];
     const chats = uniqueChats([...identityChats, ...clientChats]);
-    const [agents, messageTails] = await Promise.all([
+    const [agents, messageTails, liveClaims] = await Promise.all([
       repository.listAgentConnections(),
       repository.listMessageTailEvents(
         chats.map((chat) => chat.id),
         CHAT_PREVIEW_EVENT_LIMIT,
       ),
+      repository.liveSessionCreateClaims(chats.map((chat) => chat.id)),
     ]);
     const agentNames = new Map(agents.map((agent) => [agent.id, agent.name]));
     const summaries = chats.map((chat) =>
-      chatSummaryResponse(chat, agentNames, messageTails.get(chat.id) ?? []),
+      chatSummaryResponse(
+        chat,
+        agentNames,
+        messageTails.get(chat.id) ?? [],
+        liveClaims.has(chat.id),
+      ),
     );
     return applyAppBrowserSession(
       jsonResponse({ chats: summaries }),
@@ -169,7 +175,8 @@ export async function createChatWithFirstMessage(
       evelandProjectId: agent.evelandProjectId,
     });
     return applyAppBrowserSession(
-      jsonResponse({ chat: chatResponse(chat) }, { status: 201 }),
+      // A chat this request just created cannot be under a create claim yet.
+      jsonResponse({ chat: chatResponse(chat, false) }, { status: 201 }),
       access.session,
     );
   } catch (error) {
@@ -205,11 +212,14 @@ export async function getChatWithEvents(
     if (!agent) {
       return jsonResponse({ error: "Chat not found" }, { status: 404 });
     }
-    const pendingInput = await ensurePendingInput(repository, chat, events);
+    const [pendingInput, liveClaims] = await Promise.all([
+      ensurePendingInput(repository, chat, events),
+      repository.liveSessionCreateClaims([chat.id]),
+    ]);
     return applyAppBrowserSession(
       jsonResponse({
         chat: {
-          ...chatResponse(chat),
+          ...chatResponse(chat, liveClaims.has(chat.id)),
           pendingInput,
           agentName: agent.name,
         },
@@ -270,7 +280,7 @@ async function ensurePendingInput(
   return persisted ?? derived;
 }
 
-function chatResponse(chat: Chat): ChatResponse {
+function chatResponse(chat: Chat, createInProgress: boolean): ChatResponse {
   return {
     id: chat.id,
     agentConnectionId: chat.agentConnectionId,
@@ -284,9 +294,7 @@ function chatResponse(chat: Chat): ChatResponse {
         }
       : null,
     sessionCreateUnconfirmed: chat.sessionCreateUnconfirmedAt !== null,
-    sessionCreateInProgress:
-      chat.sessionCreateClaimExpiresAt !== null &&
-      chat.sessionCreateClaimExpiresAt.getTime() > Date.now(),
+    sessionCreateInProgress: createInProgress,
     pendingInput: chat.pendingInput ?? EMPTY_PENDING_INPUT,
     pendingUserMessage: deserializePendingUserContent(chat.pendingUserMessage),
     createdAt: chat.createdAt.toISOString(),
@@ -303,6 +311,7 @@ function chatSummaryResponse(
   chat: Chat,
   agentNames: Map<string, string>,
   messageTail: EveEvent[],
+  createInProgress: boolean,
 ): ChatSummaryResponse {
   const agentName = agentNames.get(chat.agentConnectionId);
   if (agentName === undefined) {
@@ -326,7 +335,7 @@ function chatSummaryResponse(
     sessionState: _sessionState,
     pendingInput: _pendingInput,
     ...summary
-  } = chatResponse(chat);
+  } = chatResponse(chat, createInProgress);
   return {
     ...summary,
     agentName,

@@ -120,6 +120,29 @@ describe("per-chat Eve protocol proxy", () => {
     await Promise.all(servers.splice(0).map((server) => server.close()));
   });
 
+  /**
+   * Waits for the in-flight create to hold its claim, then expires and re-takes
+   * it — what a request meets when the handler before it stalled past its own
+   * deadline. Returns the successor's token.
+   */
+  async function takeOverCreateClaim(
+    repository: ReturnType<typeof createRepository>,
+    chatId: string,
+  ): Promise<string> {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const current = await repository.getChat(chatId);
+      if (current?.sessionCreateClaimToken) break;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    await testDb.db
+      .update(chats)
+      .set({ sessionCreateClaimExpiresAt: new Date(Date.now() - 1_000) })
+      .where(eq(chats.id, chatId));
+    const token = await repository.claimSessionCreate(chatId, 60_000);
+    if (!token) throw new Error(`No create claim to take over for ${chatId}`);
+    return token;
+  }
+
   async function fakeServer(options?: Parameters<typeof startFakeEveServer>[0]): Promise<FakeEveServer> {
     const server = await startFakeEveServer(options);
     servers.push(server);
@@ -560,17 +583,7 @@ describe("per-chat Eve protocol proxy", () => {
 
     // While the create waits upstream its claim goes to another request — the
     // shape a process suspended past its own deadline leaves behind.
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      const current = await repository.getChat(chat.id);
-      if (current?.sessionCreateClaimToken) break;
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    }
-    await testDb.db
-      .update(chats)
-      .set({ sessionCreateClaimExpiresAt: new Date(Date.now() - 1_000) })
-      .where(eq(chats.id, chat.id));
-    const taken = await repository.claimSessionCreate(chat.id, 60_000);
-    expect(taken).not.toBeNull();
+    const taken = await takeOverCreateClaim(repository, chat.id);
 
     const response = await inFlight;
 
@@ -585,6 +598,94 @@ describe("per-chat Eve protocol proxy", () => {
       sessionState: null,
     });
   });
+
+  // Every create failure branch funnels into one write, reached here through
+  // each upstream shape that can produce it. The operation-id fallback's own
+  // transport failure shares the first case's call, one retry later.
+  for (const ending of [
+    {
+      name: "a broken connection",
+      options: { createSessionDelayMs: 250 },
+      abort: true,
+      status: 502,
+    },
+    {
+      name: "an ambiguous refusal",
+      options: { createSessionDelayMs: 250, failCreateSession: true },
+      abort: false,
+      status: 500,
+    },
+    {
+      name: "an answer it cannot read",
+      options: {
+        createSessionDelayMs: 250,
+        failCreateSession: true,
+        failCreateSessionStatus: 200,
+        failCreateSessionBody: "not an object",
+      },
+      abort: false,
+      status: 502,
+    },
+    {
+      name: "an answer naming no session",
+      options: {
+        createSessionDelayMs: 250,
+        failCreateSession: true,
+        failCreateSessionStatus: 200,
+        failCreateSessionBody: { ok: true },
+      },
+      abort: false,
+      status: 502,
+    },
+  ]) {
+    it(`leaves a successor's session active when a displaced create ends in ${ending.name}`, async () => {
+      const server = await fakeServer(ending.options);
+      const repository = createRepository(testDb.db);
+      const agent = await repository.createAgentConnection({
+        name: "Late Eve",
+        baseUrl: server.baseUrl,
+        authType: "none",
+        evelandProjectId: "project_support",
+      });
+      await repository.updateAgentHealth(agent.id, { status: "healthy" });
+      const chat = await repository.createChat({
+        agentConnectionId: agent.id,
+        title: "Late failure",
+        pendingUserMessage: "Run this once",
+        ...chatIdentity,
+      });
+      vi.spyOn(console, "error").mockImplementation(() => undefined);
+      const routes = await loadProxyRoutes();
+      const aborter = new AbortController();
+
+      const inFlight = routes.createSession(
+        new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session`, {
+          method: "POST",
+          headers: callerHeaders({ "content-type": "application/json" }),
+          body: JSON.stringify({ message: "Run this once" }),
+          signal: aborter.signal,
+        }),
+        { params: Promise.resolve({ chatId: chat.id }) },
+      );
+
+      // The successor takes the claim and commits its own session before the
+      // displaced request learns how its own attempt ended.
+      const taken = await takeOverCreateClaim(repository, chat.id);
+      await repository.commitSessionCreate(chat.id, taken, {
+        sessionId: "ses_from_successor",
+        streamIndex: 0,
+      });
+      if (ending.abort) aborter.abort();
+
+      const response = await inFlight;
+
+      expect(response.status).toBe(ending.status);
+      await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+        sessionState: { sessionId: "ses_from_successor", streamIndex: 0 },
+        status: "active",
+      });
+    });
+  }
 
   it("forwards an operation-id 400 that is not Eve's principal refusal", async () => {
     const server = await fakeServer({
