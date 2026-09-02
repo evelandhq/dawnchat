@@ -10,7 +10,7 @@ export interface CapturedEveRequest {
 }
 
 /** Eve versions currently hosted by Eveland and supported by Dawn. */
-export const SUPPORTED_EVE_GENERATIONS = ["0.47"] as const;
+export const SUPPORTED_EVE_GENERATIONS = ["0.47", "0.49"] as const;
 export type FakeEveGeneration = (typeof SUPPORTED_EVE_GENERATIONS)[number];
 
 export interface FakeEveServerOptions {
@@ -24,6 +24,8 @@ export interface FakeEveServerOptions {
   readonly generation?: FakeEveGeneration;
   readonly redirectHealthTo?: string;
   readonly failCreateSession?: boolean;
+  /** Reject this many continuation attempts while Eve activates the session. */
+  readonly continueSessionNotActiveCount?: number;
   readonly streamEvents?: readonly unknown[];
   /** Emit stream events without ending the response, like a live Agent. */
   readonly holdStreamOpen?: boolean;
@@ -75,13 +77,14 @@ function writeNdjson(
 }
 
 export async function startFakeEveServer(options: FakeEveServerOptions = {}): Promise<FakeEveServer> {
-  const generation = options.generation ?? "0.47";
+  const generation = options.generation ?? "0.49";
   if (!SUPPORTED_EVE_GENERATIONS.includes(generation)) {
     throw new Error(`Unsupported fake Eve generation: ${generation}`);
   }
 
   const requests: CapturedEveRequest[] = [];
   let nextSessionId = 1;
+  let remainingSessionNotActiveResponses = options.continueSessionNotActiveCount ?? 0;
 
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
@@ -151,6 +154,15 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
           writeJson(response, 400, {
             ok: false,
             error: "Session-ID routes do not accept 'continuationToken'.",
+          });
+          return;
+        }
+        if (remainingSessionNotActiveResponses > 0) {
+          remainingSessionNotActiveResponses -= 1;
+          writeJson(response, 409, {
+            ok: false,
+            code: "session_not_active",
+            error: "The session is no longer active.",
           });
           return;
         }

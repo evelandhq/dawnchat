@@ -34,6 +34,7 @@ import {
 import { resolveEvelandConfig } from "@/identity/config";
 
 const NDJSON_CONTENT_TYPE = "application/x-ndjson; charset=utf-8";
+const SESSION_NOT_ACTIVE_RETRY_DELAYS_MS = [250, 500, 1_000] as const;
 
 /** Forwarded to the browser but never persisted; see `persistEvent`. */
 const STREAM_DELTA_EVENT_TYPES = new Set([
@@ -317,11 +318,65 @@ async function postTurn(
   const path = sessionId
     ? `/eve/v1/session/${encodeURIComponent(sessionId)}`
     : "/eve/v1/session";
-  return context.client.fetch(path, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-    signal,
+  const requestBody = JSON.stringify(body);
+  const retrySessionActivation =
+    sessionId !== undefined && "message" in body && !("inputResponses" in body);
+
+  for (let retryIndex = 0; ; retryIndex += 1) {
+    const response = await context.client.fetch(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: requestBody,
+      signal,
+    });
+    const retryDelay = SESSION_NOT_ACTIVE_RETRY_DELAYS_MS[retryIndex];
+    if (
+      !retrySessionActivation ||
+      retryDelay === undefined ||
+      !(await isSessionNotActiveResponse(response))
+    ) {
+      return response;
+    }
+    await waitForSessionRetry(retryDelay, signal);
+  }
+}
+
+async function isSessionNotActiveResponse(response: Response): Promise<boolean> {
+  if (response.status !== 409) {
+    return false;
+  }
+  try {
+    const body = (await response.clone().json()) as unknown;
+    return (
+      typeof body === "object" &&
+      body !== null &&
+      !Array.isArray(body) &&
+      (body as { code?: unknown }).code === "session_not_active"
+    );
+  } catch {
+    return false;
+  }
+}
+
+function waitForSessionRetry(delayMs: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    return Promise.reject(
+      signal.reason ?? new DOMException("The operation was aborted", "AbortError"),
+    );
+  }
+
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timeout);
+      reject(
+        signal.reason ?? new DOMException("The operation was aborted", "AbortError"),
+      );
+    };
+    const timeout = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    signal.addEventListener("abort", onAbort, { once: true });
   });
 }
 

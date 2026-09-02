@@ -7,9 +7,9 @@ allowBuilds:
   # Native image dependency used by Next.js image optimization when present.
   sharp: true
 minimumReleaseAgeExclude:
-  # The client library is pinned to the newest verified release of the support
-  # window Eveland hosts: Eve 0.47.x agents.
-  - eve@0.47.6
+  # The client library is pinned to the newest verified release while Dawn
+  # remains compatible with Eveland's Eve 0.47.x and 0.49.x agents.
+  - eve@0.49.0
   - '@next/env@16.3.2'
   - '@next/swc-darwin-arm64@16.3.2'
   - '@next/swc-darwin-x64@16.3.2'

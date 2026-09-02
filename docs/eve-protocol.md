@@ -1,7 +1,8 @@
 # Eve protocol integration
 
-Dawn supports Eve Agents running version 0.47.x. This window uses stream
-version 24 and durable sessions addressed by ID.
+Dawn supports Eve Agents running version 0.47.x or 0.49.x. Both generations
+use stream version 24 and durable sessions addressed by ID. Version 0.48.x is
+not part of Dawn's tested compatibility window.
 
 ## Agent requirements
 
@@ -30,6 +31,11 @@ The first turn creates a durable Eve session. Later turns continue it using the
 stored `sessionId` and `streamIndex`; obsolete stored tokens are ignored. If the
 remote durable session is deleted, locally persisted display events do not
 reconstruct its model context.
+
+Eve 0.49 can briefly reject a normal follow-up with `session_not_active` while
+the session becomes ready. Dawn retries that message three times with the same
+250/500/1000 ms backoff as Eve's client. HITL responses are not retried because
+replaying an answer can change its meaning after Eve has begun processing it.
 
 Every message is sent with `turnPolicy: "queue"`. This avoids Eve's supported
 window default of steering, where a message arriving during a turn cancels and
