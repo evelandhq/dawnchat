@@ -7,7 +7,11 @@ import { createRepository } from "@/db/repository";
 import { chats } from "@/db/schema";
 import { defaultMessageReducer, type MessageStreamEvent } from "eve/client";
 
-import { startFakeEveServer, type FakeEveServer } from "@/eve/fake-eve-server.test-helper";
+import {
+  startFakeEveServer,
+  SUPPORTED_EVE_GENERATIONS,
+  type FakeEveServer,
+} from "@/eve/fake-eve-server.test-helper";
 import {
   CallerTokenError,
   setCallerTokenVerifierForTests,
@@ -861,11 +865,58 @@ describe("per-chat Eve protocol proxy", () => {
     });
   });
 
-  it("addresses a supported follow-up by session id alone", async () => {
-    const server = await fakeServer({ generation: "0.47" });
+  it.each(SUPPORTED_EVE_GENERATIONS)(
+    "addresses an Eve %s follow-up by session id alone",
+    async (generation) => {
+      const server = await fakeServer({ generation });
+      const repository = createRepository(testDb.db);
+      const agent = await repository.createAgentConnection({
+        name: "Current Eve",
+        baseUrl: server.baseUrl,
+        authType: "none",
+        evelandProjectId: "project_support",
+      });
+      await repository.updateAgentHealth(agent.id, { status: "healthy" });
+      const chat = await repository.createChat({
+        agentConnectionId: agent.id,
+        title: "Fixed session",
+        ...chatIdentity,
+      });
+      await repository.updateChatSessionState(chat.id, {
+        sessionId: "ses_1",
+        streamIndex: 4,
+      });
+      const routes = await loadProxyRoutes();
+
+      const response = await routes.continueSession(
+        new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1`, {
+          method: "POST",
+          headers: callerHeaders({ "content-type": "application/json" }),
+          body: JSON.stringify({
+            continuationToken: "untrusted-browser-token",
+            message: "Keep going",
+          }),
+        }),
+        { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+      );
+
+      expect(response.status).toBe(202);
+      expect(server.requests).toHaveLength(1);
+      expect(server.requests[0].body).toEqual({ message: "Keep going" });
+      await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+        sessionState: { sessionId: "ses_1", streamIndex: 4 },
+      });
+    },
+  );
+
+  it("retries an Eve 0.49 message while its session becomes active", async () => {
+    const server = await fakeServer({
+      generation: "0.49",
+      continueSessionNotActiveCount: 3,
+    });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
-      name: "Current Eve",
+      name: "Starting Eve",
       baseUrl: server.baseUrl,
       authType: "none",
       evelandProjectId: "project_support",
@@ -873,7 +924,93 @@ describe("per-chat Eve protocol proxy", () => {
     await repository.updateAgentHealth(agent.id, { status: "healthy" });
     const chat = await repository.createChat({
       agentConnectionId: agent.id,
-      title: "Fixed session",
+      title: "Early follow-up",
+      ...chatIdentity,
+    });
+    await repository.updateChatSessionState(chat.id, {
+      sessionId: "ses_1",
+      streamIndex: 4,
+    });
+    const routes = await loadProxyRoutes();
+
+    const response = await routes.continueSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ message: "Keep going" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+
+    expect(response.status).toBe(202);
+    expect(server.requests).toHaveLength(4);
+    expect(server.requests.map((request) => request.body)).toEqual([
+      { message: "Keep going" },
+      { message: "Keep going" },
+      { message: "Keep going" },
+      { message: "Keep going" },
+    ]);
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      status: "active",
+    });
+  });
+
+  it("stops retrying an Eve 0.49 message after three retries", async () => {
+    const server = await fakeServer({
+      generation: "0.49",
+      continueSessionNotActiveCount: 4,
+    });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Inactive Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Inactive follow-up",
+      ...chatIdentity,
+    });
+    await repository.updateChatSessionState(chat.id, {
+      sessionId: "ses_1",
+      streamIndex: 4,
+    });
+    const routes = await loadProxyRoutes();
+
+    const response = await routes.continueSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ message: "Still there?" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+
+    expect(response.status).toBe(409);
+    expect(server.requests).toHaveLength(4);
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      status: "failed",
+    });
+  });
+
+  it("does not retry HITL answers when an Eve 0.49 session is inactive", async () => {
+    const server = await fakeServer({
+      generation: "0.49",
+      continueSessionNotActiveCount: 1,
+    });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Answering Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Inactive answer",
       ...chatIdentity,
     });
     await repository.updateChatSessionState(chat.id, {
@@ -887,19 +1024,14 @@ describe("per-chat Eve protocol proxy", () => {
         method: "POST",
         headers: callerHeaders({ "content-type": "application/json" }),
         body: JSON.stringify({
-          continuationToken: "untrusted-browser-token",
-          message: "Keep going",
+          inputResponses: [{ requestId: "call_metric", optionId: "gmv_payors" }],
         }),
       }),
       { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
     );
 
-    expect(response.status).toBe(202);
+    expect(response.status).toBe(409);
     expect(server.requests).toHaveLength(1);
-    expect(server.requests[0].body).toEqual({ message: "Keep going" });
-    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
-      sessionState: { sessionId: "ses_1", streamIndex: 4 },
-    });
   });
 
   it("records forwarded HITL answers so a replay can show what was picked", async () => {
@@ -1230,7 +1362,7 @@ describe("per-chat Eve protocol proxy", () => {
     });
   });
 
-  it("settles every terminal outcome carried by Eve 0.47 input.resolved", async () => {
+  it("settles every terminal outcome carried by supported Eve input.resolved events", async () => {
     const streamEvents = [
       {
         type: "input.requested",
@@ -1468,7 +1600,7 @@ describe("per-chat Eve protocol proxy", () => {
       pendingInput: parked,
     });
 
-    // Eve 0.47 steering can race before its durable turn id is known. An
+    // Eve steering can race before its durable turn id is known. An
     // accepted, unattributed cancel must wait for the stream's turn.cancelled
     // event to clear the exact turn instead of hiding every unrelated park.
     const runningChat = await setUpChat("accepted");

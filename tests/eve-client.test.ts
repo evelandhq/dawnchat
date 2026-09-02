@@ -84,8 +84,8 @@ describe("Eve client connector", () => {
     ]);
   });
 
-  it("supports only the Eve 0.47 protocol generation", () => {
-    expect(SUPPORTED_EVE_GENERATIONS).toEqual(["0.47"]);
+  it("supports the Eve 0.47 and 0.49 protocol generations", () => {
+    expect(SUPPORTED_EVE_GENERATIONS).toEqual(["0.47", "0.49"]);
   });
 
   it.each(SUPPORTED_EVE_GENERATIONS)(

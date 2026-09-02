@@ -51,8 +51,8 @@ importers:
         specifier: ^8.6.0
         version: 8.6.0(react@19.2.8)
       eve:
-        specifier: 0.47.6
-        version: 0.47.6(ai@7.0.85(zod@4.5.4))(dotenv@17.4.2)(drizzle-orm@0.45.2(@types/pg@8.23.1)(pg@8.23.0))(jiti@2.7.0)(lru-cache@11.5.2)(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.12))
+        specifier: 0.49.0
+        version: 0.49.0(ai@7.0.85(zod@4.5.4))(dotenv@17.4.2)(drizzle-orm@0.45.2(@types/pg@8.23.1)(pg@8.23.0))(jiti@2.7.0)(lru-cache@11.5.2)(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.12))
       lucide-react:
         specifier: latest
         version: 1.37.0(react@19.2.8)
@@ -3298,8 +3298,8 @@ packages:
     resolution: {integrity: sha512-aIL5Fx7mawVa300al2BnEE4iNvo1qETxLrPI/o05L7z6go7fCw1J6EQmbK4FmJ2AS7kgVF/KEZWufBfdClMcPg==}
     engines: {node: '>= 0.6'}
 
-  eve@0.47.6:
-    resolution: {integrity: sha512-k7tXAMBadjOW0LBHeEV3WDoyeufwTzIxAmInuCf7QFVFoh0CrYI0UJcD0zVnVQdDc0X1fVVj79Q76Twwh6QvTw==}
+  eve@0.49.0:
+    resolution: {integrity: sha512-ij2RJtGs0RNO+1jKtneHfx/atP9LbjlBmyj8SHVoEsFGPgexOOrl1vlvxzIsI2/LY136VBhJ+Lak+dmPjMtpWA==}
     engines: {node: '>=24'}
     hasBin: true
     peerDependencies:
@@ -8279,7 +8279,7 @@ snapshots:
 
   etag@1.8.1: {}
 
-  eve@0.47.6(ai@7.0.85(zod@4.5.4))(dotenv@17.4.2)(drizzle-orm@0.45.2(@types/pg@8.23.1)(pg@8.23.0))(jiti@2.7.0)(lru-cache@11.5.2)(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.12)):
+  eve@0.49.0(ai@7.0.85(zod@4.5.4))(dotenv@17.4.2)(drizzle-orm@0.45.2(@types/pg@8.23.1)(pg@8.23.0))(jiti@2.7.0)(lru-cache@11.5.2)(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.12)):
     dependencies:
       ai: 7.0.85(zod@4.5.4)
       nitro: 3.0.260610-beta(dotenv@17.4.2)(drizzle-orm@0.45.2(@types/pg@8.23.1)(pg@8.23.0))(jiti@2.7.0)(lru-cache@11.5.2)(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.12))
