@@ -5,6 +5,7 @@ import {
 } from "eve/client";
 
 import { planChatCleanup } from "../scripts/cleanup-stream-deltas";
+import { collapseStreamedDeltas } from "@/eve/stream-projection";
 
 type SeededRow = {
   id: string;
@@ -26,8 +27,12 @@ function row(payload: { type: string; data: Record<string, unknown> }): SeededRo
 function project(rows: readonly SeededRow[]) {
   const reducer = defaultMessageReducer();
   let data = reducer.initial();
-  for (const item of rows) {
-    data = reducer.reduce(data, JSON.parse(item.payload_json) as MessageStreamEvent);
+  const events = rows.map((item) => ({
+    type: item.type,
+    payload: JSON.parse(item.payload_json),
+  }));
+  for (const event of collapseStreamedDeltas(events)) {
+    data = reducer.reduce(data, event.payload as MessageStreamEvent);
   }
   return data;
 }
@@ -36,7 +41,12 @@ function textRun(turnId: string, stepIndex: number, final: string, complete = tr
   const deltas = [...final].map((_, index) =>
     row({
       type: "message.appended",
-      data: { messageSoFar: final.slice(0, index + 1), stepIndex, turnId },
+      data: {
+        messageDelta: final[index],
+        messageSoFar: final.slice(0, index + 1),
+        stepIndex,
+        turnId,
+      },
     }),
   );
   return complete

@@ -1,8 +1,9 @@
 # Eve protocol integration
 
-Dawn supports Eve Agents running version 0.47.x or 0.49.x. Both generations
-use stream version 24 and durable sessions addressed by ID. Version 0.48.x is
-not part of Dawn's tested compatibility window.
+Dawn supports Eve Agents running version 0.49.x or 0.50.x. Version 0.49.x uses
+stream version 24; version 0.50.x uses stream version 25. Both generations use
+durable sessions addressed by ID. Versions 0.48.x and earlier are not part of
+Dawn's tested compatibility window.
 
 ## Agent requirements
 
@@ -32,10 +33,11 @@ stored `sessionId` and `streamIndex`; obsolete stored tokens are ignored. If the
 remote durable session is deleted, locally persisted display events do not
 reconstruct its model context.
 
-Eve 0.49 can briefly reject a normal follow-up with `session_not_active` while
-the session becomes ready. Dawn retries that message three times with the same
-250/500/1000 ms backoff as Eve's client. HITL responses are not retried because
-replaying an answer can change its meaning after Eve has begun processing it.
+Eve 0.49 and 0.50 can briefly reject a normal follow-up with
+`session_not_active` while the session becomes ready. Dawn retries that message
+three times with the same 250/500/1000 ms backoff as Eve's client. HITL
+responses are not retried because replaying an answer can change its meaning
+after Eve has begun processing it.
 
 Every message is sent with `turnPolicy: "queue"`. This avoids Eve's supported
 window default of steering, where a message arriving during a turn cancels and
@@ -49,6 +51,12 @@ The proxy persists canonical Eve events with idempotency on
 `(chat, session, stream index)`. Channel-local waiting capabilities are
 redacted before browser delivery. The UI uses Eve's `defaultMessageReducer`
 projection to render text, reasoning, tools, files, and input requests.
+
+The Eve 0.50 client normalizes upstream version 24 and 25 streams to the
+version 25 event shape. Dawn's same-origin proxy therefore always declares
+stream version 25 to browser clients. Historical version 24 cumulative text
+and reasoning snapshots are converted into equivalent version 25 deltas while
+they are read; native version 25 deltas remain additive and are never collapsed.
 
 Transient text, reasoning, and tool-input stream deltas are not retained as
 permanent history. For older databases,

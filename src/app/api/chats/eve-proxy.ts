@@ -34,6 +34,8 @@ import {
 import { resolveEvelandConfig } from "@/identity/config";
 
 const NDJSON_CONTENT_TYPE = "application/x-ndjson; charset=utf-8";
+const NDJSON_STREAM_FORMAT = "ndjson";
+const NORMALIZED_STREAM_VERSION = "25";
 const SESSION_NOT_ACTIVE_RETRY_DELAYS_MS = [250, 500, 1_000] as const;
 
 /** Forwarded to the browser but never persisted; see `persistEvent`. */
@@ -198,6 +200,8 @@ export async function proxyEveSessionStream(
   const headers = new Headers({
     "cache-control": "no-store",
     "content-type": NDJSON_CONTENT_TYPE,
+    "x-eve-stream-format": NDJSON_STREAM_FORMAT,
+    "x-eve-stream-version": NORMALIZED_STREAM_VERSION,
   });
 
   return new Response(persisted, { status: 200, headers });

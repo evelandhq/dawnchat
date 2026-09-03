@@ -35,7 +35,10 @@ function ndjson(events: readonly unknown[]): Response {
     `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
     {
       status: 200,
-      headers: { "content-type": "application/x-ndjson; charset=utf-8" },
+      headers: {
+        "content-type": "application/x-ndjson; charset=utf-8",
+        "x-eve-stream-version": "25",
+      },
     },
   );
 }

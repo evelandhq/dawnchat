@@ -48,10 +48,15 @@ function chat(overrides: Partial<ChatThreadSummary & { sessionState: ClientSessi
   };
 }
 
+const NDJSON_HEADERS = {
+  "content-type": "application/x-ndjson; charset=utf-8",
+  "x-eve-stream-version": "25",
+} as const;
+
 function ndjson(events: readonly unknown[]): Response {
   return new Response(`${events.map((event) => JSON.stringify(event)).join("\n")}\n`, {
     status: 200,
-    headers: { "content-type": "application/x-ndjson; charset=utf-8" },
+    headers: NDJSON_HEADERS,
   });
 }
 
@@ -210,7 +215,6 @@ describe("ChatThread with Eve and AI Elements", () => {
         data: {
           callId: "call_1",
           inputTextDelta: '{"page":1,"section":"reve',
-          inputTextOffset: 0,
           sequence: 2,
           stepIndex: 0,
           toolName: "read_report",
@@ -1103,7 +1107,6 @@ describe("ChatThread with Eve and AI Elements", () => {
                 type: "message.appended",
                 data: {
                   messageDelta: "Working",
-                  messageSoFar: "Working",
                   sequence: 2,
                   stepIndex: 0,
                   turnId: "turn_1",
@@ -1118,7 +1121,7 @@ describe("ChatThread with Eve and AI Elements", () => {
           },
         });
         return new Response(body, {
-          headers: { "content-type": "application/x-ndjson; charset=utf-8" },
+          headers: NDJSON_HEADERS,
         });
       },
     );
@@ -1186,7 +1189,7 @@ describe("ChatThread with Eve and AI Elements", () => {
           },
         });
         return new Response(body, {
-          headers: { "content-type": "application/x-ndjson; charset=utf-8" },
+          headers: NDJSON_HEADERS,
         });
       },
     );
@@ -1618,7 +1621,7 @@ describe("ChatThread with Eve and AI Elements", () => {
       stampEvents([
         {
           type: "session.started",
-          data: { runtime: { agentId: "agt_1", eveVersion: "0.47.3" } },
+          data: { runtime: { agentId: "agt_1", eveVersion: "0.49.3" } },
         },
         { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
         {
@@ -1727,7 +1730,6 @@ describe("ChatThread with Eve and AI Elements", () => {
                 type: "message.appended",
                 data: {
                   messageDelta: "Working",
-                  messageSoFar: "Working",
                   sequence: 3,
                   stepIndex: 0,
                   turnId: "turn_1",
@@ -1739,7 +1741,7 @@ describe("ChatThread with Eve and AI Elements", () => {
           },
         });
         return new Response(body, {
-          headers: { "content-type": "application/x-ndjson; charset=utf-8" },
+          headers: NDJSON_HEADERS,
         });
       },
     );
@@ -1810,7 +1812,7 @@ describe("ChatThread with Eve and AI Elements", () => {
           },
         });
         return new Response(body, {
-          headers: { "content-type": "application/x-ndjson; charset=utf-8" },
+          headers: NDJSON_HEADERS,
         });
       },
     );
@@ -1915,7 +1917,7 @@ describe("ChatThread with Eve and AI Elements", () => {
             },
           });
           return new Response(body, {
-            headers: { "content-type": "application/x-ndjson; charset=utf-8" },
+            headers: NDJSON_HEADERS,
           });
         }
         return ndjson([
@@ -2007,7 +2009,7 @@ describe("ChatThread with Eve and AI Elements", () => {
             },
           });
           return new Response(body, {
-            headers: { "content-type": "application/x-ndjson; charset=utf-8" },
+            headers: NDJSON_HEADERS,
           });
         }
 
@@ -2100,7 +2102,7 @@ describe("ChatThread with Eve and AI Elements", () => {
             },
           });
           return new Response(body, {
-            headers: { "content-type": "application/x-ndjson; charset=utf-8" },
+            headers: NDJSON_HEADERS,
           });
         }
         return ndjson([
@@ -2201,7 +2203,7 @@ describe("ChatThread with Eve and AI Elements", () => {
             },
           });
           return new Response(body, {
-            headers: { "content-type": "application/x-ndjson; charset=utf-8" },
+            headers: NDJSON_HEADERS,
           });
         }
         return ndjson([
@@ -2374,7 +2376,7 @@ describe("ChatThread with Eve and AI Elements", () => {
     const events = stampEvents([
       {
         type: "session.started",
-        data: { runtime: { agentId: "agt_1", eveVersion: "0.47.3" } },
+        data: { runtime: { agentId: "agt_1", eveVersion: "0.49.3" } },
       },
       { type: "turn.started", data: { sequence: 1, turnId: "turn_1" } },
       {
@@ -2456,7 +2458,7 @@ describe("ChatThread with Eve and AI Elements", () => {
             );
           },
         }),
-        { headers: { "content-type": "application/x-ndjson; charset=utf-8" } },
+        { headers: NDJSON_HEADERS },
       );
     });
     vi.stubGlobal("fetch", fetchMock);

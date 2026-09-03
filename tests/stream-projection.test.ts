@@ -31,6 +31,7 @@ function textRun(
     stored({
       type: "message.appended",
       data: {
+        messageDelta: final[index],
         messageSoFar: final.slice(0, index + 1),
         stepIndex,
         turnId,
@@ -74,7 +75,16 @@ describe("collapseStreamedDeltas", () => {
     const deltas = collapsed.filter((event) => event.type === "message.appended");
 
     expect(deltas).toHaveLength(1);
-    expect(deltas[0]).toEqual(events.at(-1));
+    expect(deltas[0]).toEqual(
+      stored({
+        type: "message.appended",
+        data: {
+          messageDelta: "Partial answer",
+          stepIndex: 0,
+          turnId: "turn_1",
+        },
+      }),
+    );
     expect(project(collapsed)).toEqual(project(events));
   });
 
@@ -99,6 +109,7 @@ describe("collapseStreamedDeltas", () => {
         stored({
           type: "reasoning.appended",
           data: {
+            reasoningDelta: "Thinking"[index],
             reasoningSoFar: "Thinking".slice(0, index + 1),
             stepIndex: 0,
             turnId: "turn_1",
@@ -172,5 +183,22 @@ describe("collapseStreamedDeltas", () => {
     ];
 
     expect(collapseStreamedDeltas(events)).toEqual(events);
+  });
+
+  it("preserves every current delta when a v25 run is persisted", () => {
+    const events = [
+      stored({ type: "step.started", data: { stepIndex: 0, turnId: "turn_1" } }),
+      stored({
+        type: "message.appended",
+        data: { messageDelta: "Part", stepIndex: 0, turnId: "turn_1" },
+      }),
+      stored({
+        type: "message.appended",
+        data: { messageDelta: "ial", stepIndex: 0, turnId: "turn_1" },
+      }),
+    ];
+
+    expect(collapseStreamedDeltas(events)).toEqual(events);
+    expect(project(collapseStreamedDeltas(events))).toEqual(project(events));
   });
 });

@@ -16,7 +16,7 @@ describe("chat architecture", () => {
 
     expect(packageJson.dependencies).not.toHaveProperty("@assistant-ui/react");
     expect(packageJson.dependencies).not.toHaveProperty("@assistant-ui/react-markdown");
-    expect(packageJson.dependencies?.eve).toMatch(/^0\.49\./);
+    expect(packageJson.dependencies?.eve).toMatch(/^0\.50\./);
     expect(existsSync(resolve(root, "src/components/assistant-ui"))).toBe(false);
     expect(existsSync(resolve(root, "src/app/api/chats/[chatId]/messages/route.ts"))).toBe(false);
     expect(chatApi).not.toMatch(/sendChatMessage|sendEveTurn|streamEveTurn/);
