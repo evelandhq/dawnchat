@@ -10,7 +10,7 @@ export interface CapturedEveRequest {
 }
 
 /** Eve versions currently hosted by Eveland and supported by Dawn. */
-export const SUPPORTED_EVE_GENERATIONS = ["0.49", "0.50"] as const;
+export const SUPPORTED_EVE_GENERATIONS = ["0.49", "0.50", "0.51"] as const;
 export type FakeEveGeneration = (typeof SUPPORTED_EVE_GENERATIONS)[number];
 
 export interface FakeEveServerOptions {
@@ -75,7 +75,7 @@ function writeNdjson(
 }
 
 export async function startFakeEveServer(options: FakeEveServerOptions = {}): Promise<FakeEveServer> {
-  const generation = options.generation ?? "0.50";
+  const generation = options.generation ?? "0.51";
   if (!SUPPORTED_EVE_GENERATIONS.includes(generation)) {
     throw new Error(`Unsupported fake Eve generation: ${generation}`);
   }
@@ -174,7 +174,7 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
           response,
           options.streamEvents ?? defaultStreamEvents(generation),
           options.holdStreamOpen ?? false,
-          generation === "0.50" ? 25 : 24,
+          generation === "0.49" ? 24 : 25,
         );
         return;
       }
@@ -217,7 +217,7 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
 function defaultStreamEvents(generation: FakeEveGeneration): readonly unknown[] {
   const appendData = {
     messageDelta: "Hello",
-    ...(generation === "0.50" ? {} : { messageSoFar: "Hello" }),
+    ...(generation === "0.49" ? { messageSoFar: "Hello" } : {}),
     sequence: 1,
     stepIndex: 0,
     turnId: "turn_1",
