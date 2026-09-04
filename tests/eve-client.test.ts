@@ -84,13 +84,14 @@ describe("Eve client connector", () => {
     ]);
   });
 
-  it("supports only the Eve 0.49 and 0.50 protocol generations", () => {
-    expect(SUPPORTED_EVE_GENERATIONS).toEqual(["0.49", "0.50"]);
+  it("supports only the Eve 0.49, 0.50, and 0.51 protocol generations", () => {
+    expect(SUPPORTED_EVE_GENERATIONS).toEqual(["0.49", "0.50", "0.51"]);
   });
 
   it.each([
     { generation: "0.49", streamVersion: "24" },
     { generation: "0.50", streamVersion: "25" },
+    { generation: "0.51", streamVersion: "25" },
   ] as const)(
     "models Eve $generation with stream version $streamVersion",
     async ({ generation, streamVersion }) => {
@@ -105,11 +106,11 @@ describe("Eve client connector", () => {
         .map((line) => JSON.parse(line) as { type: string; data: Record<string, unknown> });
       const append = events.find((event) => event.type === "message.appended");
       expect(append?.data).toEqual(
-        generation === "0.50"
-          ? expect.objectContaining({ messageDelta: "Hello" })
-          : expect.objectContaining({ messageDelta: "Hello", messageSoFar: "Hello" }),
+        generation === "0.49"
+          ? expect.objectContaining({ messageDelta: "Hello", messageSoFar: "Hello" })
+          : expect.objectContaining({ messageDelta: "Hello" }),
       );
-      if (generation === "0.50") {
+      if (generation !== "0.49") {
         expect(append?.data).not.toHaveProperty("messageSoFar");
       }
     },

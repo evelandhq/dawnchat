@@ -50,6 +50,38 @@ function textRun(
 }
 
 describe("collapseStreamedDeltas", () => {
+  it("projects Eve 0.51 workflow tools as dynamic tool parts", () => {
+    const projected = project([
+      stored({ type: "step.started", data: { stepIndex: 0, turnId: "turn_1" } }),
+      stored({
+        type: "actions.requested",
+        data: {
+          actions: [
+            {
+              callId: "call_1",
+              input: { topic: "Eve 0.51" },
+              kind: "workflow-tool-call",
+              toolName: "research",
+            },
+          ],
+          stepIndex: 0,
+          turnId: "turn_1",
+        },
+      }),
+    ]);
+
+    expect(projected.messages[0]?.parts).toEqual([
+      { type: "step-start" },
+      expect.objectContaining({
+        input: { topic: "Eve 0.51" },
+        state: "input-available",
+        toolCallId: "call_1",
+        toolName: "research",
+        type: "dynamic-tool",
+      }),
+    ]);
+  });
+
   it("drops every delta of a finished run", () => {
     const events = [
       stored({ type: "message.received", data: { message: "Hi", turnId: "turn_1" } }),
