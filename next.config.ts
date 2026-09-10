@@ -1,10 +1,8 @@
 import type { NextConfig } from "next";
 
-const identityBaseUrl = (
-  process.env.EVELAND_IDENTITY_URL ||
-  process.env.NEXT_PUBLIC_EVELAND_IDENTITY_URL ||
-  "http://localhost:4000"
-).replace(/\/$/, "");
+import { resolveEvelandConfig } from "./src/identity/config";
+
+const { internalOrigin } = resolveEvelandConfig();
 
 const nextConfig: NextConfig = {
   typedRoutes: true,
@@ -13,8 +11,8 @@ const nextConfig: NextConfig = {
   async rewrites() {
     return [
       {
-        source: "/identity/:path*",
-        destination: `${identityBaseUrl}/identity/:path*`,
+        source: "/api/identity/:path*",
+        destination: `${internalOrigin}/api/identity/:path*`,
       },
     ];
   },

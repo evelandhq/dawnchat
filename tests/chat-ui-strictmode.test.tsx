@@ -30,12 +30,21 @@ function chat(
   };
 }
 
+// Default identity for single-delivery fixtures; cross-delivery tests supply their own.
+function wireEvent(event: unknown): unknown {
+  const value = event as { meta?: { deliveryIds?: readonly string[] } };
+  return { ...value, meta: { ...value.meta, deliveryIds: value.meta?.deliveryIds ?? ["delivery_test"] } };
+}
+
 function ndjson(events: readonly unknown[]): Response {
   return new Response(
-    `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
+    `${events.map((event) => JSON.stringify(wireEvent(event))).join("\n")}\n`,
     {
       status: 200,
-      headers: { "content-type": "application/x-ndjson; charset=utf-8" },
+      headers: {
+        "content-type": "application/x-ndjson; charset=utf-8",
+        "x-eve-stream-version": "25",
+      },
     },
   );
 }
@@ -59,7 +68,7 @@ function abortableDelay(ms: number, signal: AbortSignal | null | undefined): Pro
 }
 
 const challenge =
-  'Bearer realm="eveland", authorization_uri="https://identity.example.com/identity/login", project_id="project_support", display_name="Eveland"';
+  'Bearer realm="eveland", authorization_uri="https://identity.example.com/api/identity/login", project_id="project_support", display_name="Eveland"';
 
 /**
  * Unlike the mocks in chat-ui.test.tsx, this one honors `init.signal` the way
@@ -91,7 +100,7 @@ function challengeFetchMock(seenAuthorization: Array<string | null>) {
         );
       }
       return Response.json(
-        { sessionId: "ses_authenticated" },
+        { sessionId: "ses_authenticated", deliveryId: "delivery_test" },
         { headers: { "x-eve-session-id": "ses_authenticated" } },
       );
     }

@@ -23,14 +23,16 @@ corepack pnpm dev
 
 Replace the `AUTH_SECRET` placeholder in `.env.local` with a stable local
 secret. Update the Eveland Identity URLs if Eveland is not running at
-`http://localhost:4000`. Open [http://localhost:3010](http://localhost:3010).
+`http://localhost:17300`. Open [http://localhost:3010](http://localhost:3010).
 
 For a login-enabled Eveland instance, configure Eveland System > Identity:
 
 1. enable an Identity Provider and its exact Realm;
 2. register `http://localhost:3010` as the `eve-chats` return target (the
    compatibility key retained after the Dawn rename); and
-3. deploy a chat-enabled Project with the standard Eve channel on its Stable
+3. include `http://localhost:3010` in
+   `EVELAND_IDENTITY_ALLOWED_ORIGINS`; and
+4. deploy a chat-enabled Project with the standard Eve channel on its Stable
    route.
 
 The Project then appears automatically on `/agents`. An Eveland instance that
@@ -79,6 +81,6 @@ Catalog. Configure its base URL and, if required, bearer or custom-header
 authentication. Dawn normalizes external base URLs and permits only one
 active connection for each normalized URL.
 
-The Agent must implement the routes described in
+The Agent deployment must run Eve 0.52.3 or newer (0.52.5 recommended) and implement the routes described in
 [Eve protocol integration](eve-protocol.md). Health checks call the Agent
 server-side; secrets are encrypted at rest and never returned to the browser.

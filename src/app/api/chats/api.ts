@@ -31,6 +31,7 @@ import {
   getCallerTokenVerifier,
   type AppIdentity,
 } from "@/identity/server";
+import { resolveEvelandConfig } from "@/identity/config";
 
 export type ChatResponse = {
   id: string;
@@ -318,7 +319,7 @@ function chatSummaryResponse(
     throw new Error(`Agent connection not found for chat ${chat.id}`);
   }
   const reducer = defaultMessageReducer();
-  const projection = messageTail.reduce(
+  const projection = collapseStreamedDeltas(messageTail).reduce(
     (data, event) => reducer.reduce(data, event.payload as MessageStreamEvent),
     reducer.initial(),
   );
@@ -357,7 +358,7 @@ async function resolveChatAccess(request: Request): Promise<{
   }
   const identity = await getCallerTokenVerifier().verifyAppAuthorization(
     authorization,
-    process.env.NEXT_PUBLIC_EVELAND_IDENTITY_RETURN_TARGET ?? "eve-chats",
+    resolveEvelandConfig().returnTarget,
   );
   return { identity, session };
 }

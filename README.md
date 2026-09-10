@@ -15,7 +15,7 @@ Requirements: Node.js 24 or newer, Corepack, and Docker with Compose support.
 ```sh
 corepack pnpm install
 cp .env.example .env.local
-# Edit AUTH_SECRET and the Eveland Identity endpoints in .env.local.
+# Edit AUTH_SECRET and EVELAND_PUBLIC_ORIGIN in .env.local.
 corepack pnpm db:up
 corepack pnpm db:migrate
 corepack pnpm dev

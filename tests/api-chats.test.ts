@@ -286,6 +286,38 @@ describe("Chat API", () => {
     });
   });
 
+  it("normalizes a retained Eve v24 snapshot in the chat preview", async () => {
+    const agent = await createAgent();
+    const createdResponse = await postChats({ agentId: agent.id, message: "Start" });
+    const created = (await createdResponse.json()) as { chat: { id: string } };
+    const repository = createRepository(testDb.db);
+    await repository.appendEvent({
+      chatId: created.chat.id,
+      eventIndex: 1,
+      type: "message.appended",
+      payload: {
+        type: "message.appended",
+        data: {
+          messageDelta: "l",
+          messageSoFar: "Partial",
+          stepIndex: 0,
+          turnId: "turn_1",
+        },
+      },
+    });
+
+    const response = await GET(
+      new Request("http://localhost/api/chats", {
+        headers: { authorization: "Bearer app-user-1" },
+      }),
+    );
+
+    const body = (await response.json()) as {
+      chats: { lastMessage: string | null }[];
+    };
+    expect(body.chats[0]?.lastMessage).toBe("Partial");
+  });
+
   it("previews the newest message text without replaying a long event stream", async () => {
     const agent = await createAgent();
     const createdResponse = await postChats({ agentId: agent.id, message: "Start" });

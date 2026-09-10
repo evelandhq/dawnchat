@@ -2,15 +2,17 @@ import { turnIdFromEvent } from "@/eve/proxy-contract";
 
 /**
  * Compatibility for chats persisted before the proxy stopped storing deltas:
- * their streams hold a run of `*.appended` events that each carry the whole
- * text so far, storing the same message about N times over.
+ * their v24 streams hold a run of `*.appended` events that each carry the
+ * whole text so far, storing the same message about N times over.
  *
- * The message projection replaces a streaming part with the next value for the
- * same run, so only the last delta of a run can affect the result, and a
- * completed run drops its deltas entirely. Collapsing them here leaves the
- * browser's projection identical while it reads a fraction of the bytes. New
+ * Under v24 semantics, only the last cumulative snapshot of an unfinished run
+ * affects the result, and a completed run needs none of its snapshots.
+ * Collapsing those events here leaves the browser's projection identical while
+ * it reads a fraction of the bytes. The retained cumulative event is normalized
+ * into one v25 delta containing the whole run. Current delta-only events are
+ * never collapsed because each one is required to reconstruct its run. New
  * chats never store deltas (see `persistEvent` in eve-proxy), so this filter
- * passes their streams through untouched.
+ * normally passes them through.
  */
 const DELTA_COMPLETIONS: Record<string, string> = {
   "message.appended": "message.completed",
@@ -41,18 +43,56 @@ export function collapseStreamedDeltas<T extends EventLike>(
       else supersededRuns.add(key);
       return;
     }
-    if (DELTA_COMPLETIONS[event.type]) {
+    if (
+      DELTA_COMPLETIONS[event.type] &&
+      legacySnapshot(event.type, event.payload) !== undefined
+    ) {
       lastDeltaIndex.set(runKey(event.type, event.payload), index);
     }
   });
 
-  return events.filter((event, index) => {
-    if (!DELTA_COMPLETIONS[event.type]) return true;
+  return events.flatMap((event, index) => {
+    const snapshot = legacySnapshot(event.type, event.payload);
+    if (!DELTA_COMPLETIONS[event.type] || snapshot === undefined) return [event];
     const key = runKey(event.type, event.payload);
     // A run Eve finished needs none of its deltas; an unfinished one needs only
-    // its newest, which already carries every earlier delta's text.
-    return !supersededRuns.has(key) && lastDeltaIndex.get(key) === index;
+    // its newest cumulative snapshot, normalized into one current delta.
+    return !supersededRuns.has(key) && lastDeltaIndex.get(key) === index
+      ? [normalizeLegacyDelta(event, snapshot)]
+      : [];
   });
+}
+
+function legacySnapshot(type: string, payload: unknown): string | undefined {
+  if (!payload || typeof payload !== "object") return undefined;
+  const data = (payload as { data?: unknown }).data;
+  if (!data || typeof data !== "object") return undefined;
+  const field = type === "message.appended"
+    ? "messageSoFar"
+    : type === "reasoning.appended"
+      ? "reasoningSoFar"
+      : undefined;
+  if (!field) return undefined;
+  const snapshot = (data as Record<string, unknown>)[field];
+  return typeof snapshot === "string" ? snapshot : undefined;
+}
+
+function normalizeLegacyDelta<T extends EventLike>(event: T, snapshot: string): T {
+  const payload = event.payload as {
+    data: Record<string, unknown>;
+  } & Record<string, unknown>;
+  if (event.type === "message.appended") {
+    const { messageSoFar: _messageSoFar, ...data } = payload.data;
+    return {
+      ...event,
+      payload: { ...payload, data: { ...data, messageDelta: snapshot } },
+    };
+  }
+  const { reasoningSoFar: _reasoningSoFar, ...data } = payload.data;
+  return {
+    ...event,
+    payload: { ...payload, data: { ...data, reasoningDelta: snapshot } },
+  };
 }
 
 function retractsText(payload: unknown): boolean {

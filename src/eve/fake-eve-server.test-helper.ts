@@ -9,9 +9,10 @@ export interface CapturedEveRequest {
   body: unknown;
 }
 
-/** Eve versions currently hosted by Eveland and supported by Dawn. */
-export const SUPPORTED_EVE_GENERATIONS = ["0.47"] as const;
-export type FakeEveGeneration = (typeof SUPPORTED_EVE_GENERATIONS)[number];
+/** Minimum supported chat release and newest verified release. */
+export const SUPPORTED_EVE_GENERATIONS = ["0.52.3", "0.52.5"] as const;
+// Legacy fixtures remain available for history and compatibility rejection tests.
+export type FakeEveGeneration = (typeof SUPPORTED_EVE_GENERATIONS)[number] | "0.49" | "0.50" | "0.51" | "0.52.2";
 
 export interface FakeEveServerOptions {
   readonly authenticationChallenge?: {
@@ -22,8 +23,11 @@ export interface FakeEveServerOptions {
   };
   /** Defaults to the newest verified generation. */
   readonly generation?: FakeEveGeneration;
+  readonly deliveryId?: string;
   readonly redirectHealthTo?: string;
   readonly failCreateSession?: boolean;
+  /** Reject this many continuation attempts while Eve activates the session. */
+  readonly continueSessionNotActiveCount?: number;
   /** Status for `failCreateSession`; defaults to an ambiguous 500. */
   readonly failCreateSessionStatus?: number;
   /** Body for `failCreateSession`, for refusals Dawn has to tell apart. */
@@ -46,13 +50,13 @@ export interface FakeEveServerOptions {
   /** Commit one operation-owned session, then make its first create response ambiguous. */
   readonly failFirstCreateResponseAfterCommit?: boolean;
   readonly streamEvents?: readonly unknown[];
+  /** Legacy stream fixtures deliberately replay overlapping events. */
+  readonly respectStreamCursor?: boolean;
   /** Emit stream events without ending the response, like a live Agent. */
   readonly holdStreamOpen?: boolean;
   /** Eve answers `no_active_turn` when a cancel arrives between turns. */
   readonly cancelStatus?: "accepted" | "no_active_turn";
 }
-
-const SUPPORTED_STREAM_VERSION = 24;
 
 export interface FakeEveServer {
   readonly baseUrl: string;
@@ -96,13 +100,14 @@ function writeNdjson(
 }
 
 export async function startFakeEveServer(options: FakeEveServerOptions = {}): Promise<FakeEveServer> {
-  const generation = options.generation ?? "0.47";
-  if (!SUPPORTED_EVE_GENERATIONS.includes(generation)) {
+  const generation = options.generation ?? "0.52.5";
+  if (![...SUPPORTED_EVE_GENERATIONS, "0.49", "0.50", "0.51", "0.52.2"].includes(generation)) {
     throw new Error(`Unsupported fake Eve generation: ${generation}`);
   }
 
   const requests: CapturedEveRequest[] = [];
   let nextSessionId = 1;
+  let remainingSessionNotActiveResponses = options.continueSessionNotActiveCount ?? 0;
   const sessionsByOperationId = new Map<string, string>();
   const failedCreateResponses = new Set<string>();
 
@@ -231,7 +236,20 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
           });
           return;
         }
-        writeJson(response, 202, { ok: true, sessionId, status: "accepted" });
+        if (remainingSessionNotActiveResponses > 0) {
+          remainingSessionNotActiveResponses -= 1;
+          writeJson(response, 409, {
+            ok: false,
+            code: "session_not_active",
+            error: "The session is no longer active.",
+          });
+          return;
+        }
+        writeJson(response, 202, {
+          ok: true, sessionId, status: "accepted",
+          ...(generation === "0.52.3" || generation === "0.52.5"
+            ? { deliveryId: options.deliveryId ?? "delivery_test" } : {}),
+        });
         return;
       }
 
@@ -239,19 +257,11 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
       if (request.method === "GET" && streamMatch) {
         writeNdjson(
           response,
-          options.streamEvents ?? [
-            {
-              type: "message.appended",
-              data: { messageDelta: "Hello", messageSoFar: "Hello", sequence: 1, stepIndex: 0, turnId: "turn_1" },
-            },
-            {
-              type: "message.completed",
-              data: { message: "Hello", finishReason: "stop", sequence: 2, stepIndex: 0, turnId: "turn_1" },
-            },
-            { type: "session.waiting", data: { wait: "next-user-message" } },
-          ],
+          (options.streamEvents ?? defaultStreamEvents(generation)).slice(
+            options.respectStreamCursor ? Number(url.searchParams.get("startIndex") ?? 0) : 0,
+          ),
           options.holdStreamOpen ?? false,
-          SUPPORTED_STREAM_VERSION,
+          generation === "0.49" ? 24 : 25,
         );
         return;
       }
@@ -289,6 +299,30 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
     requests,
     close: () => closeServer(server),
   };
+}
+
+function defaultStreamEvents(generation: FakeEveGeneration): readonly unknown[] {
+  const appendData = {
+    messageDelta: "Hello",
+    ...(generation === "0.49" ? { messageSoFar: "Hello" } : {}),
+    sequence: 1,
+    stepIndex: 0,
+    turnId: "turn_1",
+  };
+  return [
+    { type: "message.appended", data: appendData },
+    {
+      type: "message.completed",
+      data: {
+        message: "Hello",
+        finishReason: "stop",
+        sequence: 2,
+        stepIndex: 0,
+        turnId: "turn_1",
+      },
+    },
+    { type: "session.waiting", data: { wait: "next-user-message" } },
+  ];
 }
 
 function delay(ms: number): Promise<void> {
