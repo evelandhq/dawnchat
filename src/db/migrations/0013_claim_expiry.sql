@@ -1,1 +1,0 @@
-ALTER TABLE "chats" RENAME COLUMN "session_create_claimed_at" TO "session_create_claim_expires_at";

@@ -1,5 +1,5 @@
 {
-  "id": "31dd9719-9552-4602-a7f5-49b91cc95c5d",
+  "id": "4266eb12-53a0-421a-b436-174283738ca7",
   "prevId": "4148bb7f-0c0e-4411-b10d-9e9cfad1e9d7",
   "version": "7",
   "dialect": "postgresql",
@@ -214,6 +214,24 @@
         },
         "session_create_unconfirmed_at": {
           "name": "session_create_unconfirmed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "session_create_claim_expires_at": {
+          "name": "session_create_claim_expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "session_create_claim_token": {
+          "name": "session_create_claim_token",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "session_ended_at": {
+          "name": "session_ended_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false

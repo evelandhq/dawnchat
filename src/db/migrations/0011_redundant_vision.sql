@@ -1,1 +1,0 @@
-ALTER TABLE "chats" ADD COLUMN "session_create_claimed_at" timestamp with time zone;

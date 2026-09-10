@@ -48,17 +48,21 @@ import {
   sessionFailureErrorId,
 } from "@/eve/error-observability";
 import {
+  isAmbiguousSessionCreateStatus,
   isRequiredKind,
   pendingRequestsFromEvent,
   resolvedInputRequestIds,
+  SESSION_CREATE_NOT_ATTEMPTED_CODE,
   type ChatEvent,
   type PendingInputRequest,
   type PendingInputState,
 } from "@/eve/proxy-contract";
+import { EvelandIdentityError } from "@/identity/client";
 import {
   CHAT_ATTACHMENT_MAX_FILES,
   CHAT_ATTACHMENT_MAX_FILE_SIZE,
   promptMessageToUserContent,
+  userContentText,
 } from "@/lib/chat-messages";
 
 /** One outbound turn: a user message, or a reply to pending HITL requests. */
@@ -171,6 +175,10 @@ export function ChatThread({
   const pendingSentRef = useRef(false);
   const challengeInFlightRef = useRef(false);
   const authenticationAttemptedRef = useRef(false);
+  // The draft lives above the session boundary: a re-read that remounts the
+  // store below — an adopted session, or one Eve reported gone — must not
+  // take the message the user was typing with it.
+  const [composerText, setComposerText] = useState("");
   const [queuedTurnState, setQueuedTurnState] = useState<{
     chatId: string | null;
     turns: QueuedTurn[];
@@ -270,6 +278,8 @@ export function ChatThread({
       // finally committed — has to reach the store as a fresh mount.
       key={`${authentication.revision}:${chat.sessionState?.sessionId ?? ""}`}
       chat={chat}
+      composerText={composerText}
+      setComposerText={setComposerText}
       events={useAuthenticationSnapshot ? authentication.events : events}
       pendingInput={pendingInput}
       initialPendingBatches={
@@ -296,6 +306,8 @@ export function ChatThread({
 
 function ChatThreadSession({
   chat,
+  composerText,
+  setComposerText,
   events,
   initialPendingBatches,
   initialSession,
@@ -312,6 +324,8 @@ function ChatThreadSession({
   retryQueuedTurnId,
   updateQueuedTurns,
 }: ChatThreadProps & {
+  composerText: string;
+  setComposerText: React.Dispatch<React.SetStateAction<string>>;
   initialPendingBatches: ClientPendingBatch[];
   initialSession?: ClientSessionState;
   pendingSentRef: React.MutableRefObject<boolean>;
@@ -346,7 +360,6 @@ function ChatThreadSession({
     InitialCreateState,
     "settled"
   > | null>(null);
-  const [composerText, setComposerText] = useState("");
   // Refs mirror the states below so callbacks and same-batch dispatches read
   // the latest value instead of a stale render's.
   const draftResponsesRef = useRef<ReadonlyMap<string, InputResponse>>(new Map());
@@ -523,10 +536,23 @@ function ChatThreadSession({
       // A 409 means the chat this thread is looking at is behind the server's:
       // another request owns its create, or has already made the session. The
       // read it asks for is the first of however many the watch below needs.
-      if (error instanceof ClientError && error.status === 409 && !current?.session) {
+      // Eve refusing to continue the session this store holds is the same
+      // kind of news: the proxy recorded that session as over, and the
+      // re-read hands this thread a store with no session, whose next send
+      // creates one in its place.
+      const retry = latestInputRef.current;
+      if (
+        error instanceof ClientError &&
+        error.status === 409 &&
+        (!current?.session || error.code === "session_not_active")
+      ) {
+        // The remount that re-read brings takes the store's failed delivery
+        // with it, so the message goes back to the composer, which outlives
+        // the store. Attachments do not survive the round trip.
+        const text = retry?.message !== undefined ? userContentText(retry.message) : "";
+        if (text) setComposerText((draft) => draft || text);
         onChatStaleRef.current?.();
       }
-      const retry = latestInputRef.current;
       const queuedTurnId = activeQueuedTurnIdRef.current ?? undefined;
       if (queuedTurnId) {
         failQueuedTurn(queuedTurnId, error);
@@ -1019,7 +1045,11 @@ function ChatThreadSession({
         )
       : createUnconfirmed
         ? "The previous session creation result could not be confirmed."
-        : null);
+        : initialCreate === "rejected"
+          // A stored refusal: the message is still shown, still unsent, and
+          // the only way it goes anywhere is the retry beside this.
+          ? "The Agent did not accept this message."
+          : null);
 
   return (
     <TooltipProvider>
@@ -1338,9 +1368,14 @@ function receivedMessageMatchesQueuedTurn(
 function initialCreateFromFailure(
   error: unknown,
 ): "unconfirmed" | "rejected" | null {
+  // An identity failure happens while the request's headers are still being
+  // resolved, before anything leaves the browser: no verdict, and no reason
+  // to lock the composer behind one.
+  if (error instanceof EvelandIdentityError) return null;
   if (!(error instanceof ClientError)) return "unconfirmed";
+  if (error.code === SESSION_CREATE_NOT_ATTEMPTED_CODE) return "rejected";
   if (error.status === 401 || error.status === 409) return null;
-  return error.status < 500 && error.status !== 408 ? "rejected" : "unconfirmed";
+  return isAmbiguousSessionCreateStatus(error.status) ? "unconfirmed" : "rejected";
 }
 
 function composerPlaceholder(status: ChatThreadSummary["status"]): string {

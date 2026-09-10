@@ -1,1 +1,0 @@
-ALTER TABLE "chats" ADD COLUMN "session_create_claim_token" text;

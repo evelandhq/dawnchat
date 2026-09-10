@@ -77,6 +77,14 @@ export const chats = pgTable(
     // take over a claim it can name, so an attempt that lost its claim to an
     // expiry cannot clear the one that replaced it.
     sessionCreateClaimToken: text("session_create_claim_token"),
+    // Set when the stored session is known to be over: Eve's stream reported
+    // it ended, or Eve answered a request naming it with "no longer active"
+    // or "not found". Only then may a create replace it. Cleared when a new
+    // session is committed.
+    sessionEndedAt: timestamp("session_ended_at", {
+      withTimezone: true,
+      mode: "date",
+    }),
     status: text("status", { enum: chatStatuses }).notNull().default("active"),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull(),

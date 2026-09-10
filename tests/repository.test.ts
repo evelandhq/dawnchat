@@ -32,27 +32,28 @@ describe("repository", () => {
       pendingUserMessage: "Run this once",
     });
     const first = await repository.claimSessionCreate(chat.id, 60_000);
-    expect(first).toMatch(/^claim_[a-f0-9]{16}$/);
+    expect(first?.token).toMatch(/^claim_[a-f0-9]{16}$/);
+    expect(first?.inheritedUnconfirmed).toBe(false);
     // A live claim is nobody else's to take, however short the lease the
     // contender would have asked for.
     await expect(repository.claimSessionCreate(chat.id, 1)).resolves.toBeNull();
 
     // A claim whose own deadline has passed is what a handler that is gone
     // leaves behind.
-    await repository.releaseSessionCreateClaim(chat.id, first!);
+    await repository.releaseSessionCreateClaim(chat.id, first!.token);
     const expired = await repository.claimSessionCreate(chat.id, -1_000);
-    expect(expired).not.toBe(first);
+    expect(expired?.token).not.toBe(first!.token);
     const second = await repository.claimSessionCreate(chat.id, 60_000);
-    expect(second).not.toBe(expired);
+    expect(second?.token).not.toBe(expired!.token);
 
     // The displaced holder must not be able to drop the claim that replaced
     // its own, which would admit a third create.
-    await repository.releaseSessionCreateClaim(chat.id, expired!);
+    await repository.releaseSessionCreateClaim(chat.id, expired!.token);
     const stillClaimed = await repository.getChat(chat.id);
-    expect(stillClaimed?.sessionCreateClaimToken).toBe(second);
+    expect(stillClaimed?.sessionCreateClaimToken).toBe(second!.token);
     expect(stillClaimed?.sessionCreateClaimExpiresAt).toBeInstanceOf(Date);
 
-    await repository.releaseSessionCreateClaim(chat.id, second!);
+    await repository.releaseSessionCreateClaim(chat.id, second!.token);
     const released = await repository.getChat(chat.id);
     expect(released?.sessionCreateClaimToken).toBeNull();
     expect(released?.sessionCreateClaimExpiresAt).toBeNull();
@@ -75,25 +76,26 @@ describe("repository", () => {
 
     const displaced = await repository.claimSessionCreate(chat.id, -1_000);
     const holder = await repository.claimSessionCreate(chat.id, 60_000);
-    expect(holder).not.toBe(displaced);
+    expect(holder?.token).not.toBe(displaced!.token);
 
     // The displaced handler's answer arrives after the takeover. Neither what
     // it learned nor what it created is the chat's state any more.
     await expect(
-      repository.commitSessionCreate(chat.id, displaced!, {
+      repository.commitSessionCreate(chat.id, displaced!.token, {
         sessionId: "ses_late",
         streamIndex: 0,
       }),
     ).resolves.toBeNull();
     await expect(
-      repository.clearSessionCreateUnconfirmed(chat.id, displaced!),
+      repository.failSessionCreate(chat.id, displaced!.token, { clearUnconfirmed: true }),
     ).resolves.toBeNull();
     const untouched = await repository.getChat(chat.id);
     expect(untouched?.sessionState).toBeNull();
-    expect(untouched?.sessionCreateClaimToken).toBe(holder);
+    expect(untouched?.sessionCreateClaimToken).toBe(holder!.token);
     expect(untouched?.sessionCreateUnconfirmedAt).toBeInstanceOf(Date);
+    expect(untouched?.status).toBe("active");
 
-    const committed = await repository.commitSessionCreate(chat.id, holder!, {
+    const committed = await repository.commitSessionCreate(chat.id, holder!.token, {
       sessionId: "ses_holder",
       streamIndex: 0,
     });
@@ -103,6 +105,126 @@ describe("repository", () => {
     });
     expect(committed?.sessionCreateClaimToken).toBeNull();
     expect(committed?.sessionCreateUnconfirmedAt).toBeNull();
+  });
+
+  it("keeps the mark an earlier attempt left when a later claim is taken", async () => {
+    const repository = createRepository(db);
+    const agent = await repository.createAgentConnection({
+      name: "Marked Agent",
+      baseUrl: "https://marked.example.com",
+      authType: "none",
+    });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Marked",
+      pendingUserMessage: "Run this once",
+    });
+
+    // The first attempt ends without a verdict: its mark stays behind.
+    const first = await repository.claimSessionCreate(chat.id, 60_000);
+    await repository.failSessionCreate(chat.id, first!.token);
+    const marked = await repository.getChat(chat.id);
+    const markedAt = marked?.sessionCreateUnconfirmedAt;
+    expect(markedAt).toBeInstanceOf(Date);
+    expect(marked?.sessionCreateClaimToken).toBeNull();
+    expect(marked?.status).toBe("failed");
+
+    // The retry finds that mark and reports it as not its own to clear; the
+    // timestamp it carries is the first attempt's, not the retry's.
+    const retry = await repository.claimSessionCreate(chat.id, 60_000);
+    expect(retry?.inheritedUnconfirmed).toBe(true);
+    expect((await repository.getChat(chat.id))?.sessionCreateUnconfirmedAt).toEqual(markedAt);
+
+    // A refusal of the retry settles only the retry.
+    await repository.failSessionCreate(chat.id, retry!.token, { clearUnconfirmed: false });
+    const still = await repository.getChat(chat.id);
+    expect(still?.sessionCreateUnconfirmedAt).toEqual(markedAt);
+    expect(still?.sessionCreateClaimToken).toBeNull();
+
+    // Only a session commits the mark away.
+    const last = await repository.claimSessionCreate(chat.id, 60_000);
+    const committed = await repository.commitSessionCreate(chat.id, last!.token, {
+      sessionId: "ses_committed",
+      streamIndex: 0,
+    });
+    expect(committed?.sessionCreateUnconfirmedAt).toBeNull();
+    expect(committed?.sessionEndedAt).toBeNull();
+  });
+
+  it("records the stored session as ended only while the chat still holds it", async () => {
+    const repository = createRepository(db);
+    const agent = await repository.createAgentConnection({
+      name: "Ended Agent",
+      baseUrl: "https://ended.example.com",
+      authType: "none",
+    });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Ended",
+      pendingUserMessage: "Run this once",
+    });
+    const claim = await repository.claimSessionCreate(chat.id, 60_000);
+    await repository.commitSessionCreate(chat.id, claim!.token, {
+      sessionId: "ses_gone",
+      streamIndex: 0,
+    });
+
+    // News about a session the chat never held records nothing.
+    await repository.markSessionEnded(chat.id, "ses_other");
+    await expect(repository.hasSessionEnded(chat.id, "ses_gone")).resolves.toBe(false);
+    expect((await repository.getChat(chat.id))?.sessionEndedAt).toBeNull();
+
+    await repository.markSessionEnded(chat.id, "ses_gone");
+    const ended = await repository.getChat(chat.id);
+    expect(ended?.sessionEndedAt).toBeInstanceOf(Date);
+    expect(ended?.status).toBe("failed");
+    expect(ended?.sessionState).toEqual({ sessionId: "ses_gone", streamIndex: 0 });
+    await expect(repository.hasSessionEnded(chat.id, "ses_gone")).resolves.toBe(true);
+
+    // The replacement names exactly the ended session, and starts clean.
+    await expect(repository.claimSessionCreate(chat.id, 60_000)).resolves.toBeNull();
+    const replacement = await repository.claimSessionCreate(chat.id, 60_000, "ses_gone");
+    const committed = await repository.commitSessionCreate(chat.id, replacement!.token, {
+      sessionId: "ses_next",
+      streamIndex: 0,
+    });
+    expect(committed?.sessionEndedAt).toBeNull();
+    expect(committed?.status).toBe("active");
+  });
+
+  it("marks the session ended when its stream stores a terminal event", async () => {
+    const repository = createRepository(db);
+    const agent = await repository.createAgentConnection({
+      name: "Terminal Agent",
+      baseUrl: "https://terminal.example.com",
+      authType: "none",
+    });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Terminal",
+      pendingUserMessage: "Run this once",
+    });
+    const claim = await repository.claimSessionCreate(chat.id, 60_000);
+    await repository.commitSessionCreate(chat.id, claim!.token, {
+      sessionId: "ses_terminal",
+      streamIndex: 0,
+    });
+
+    await repository.appendEvent({
+      chatId: chat.id,
+      sessionId: "ses_terminal",
+      streamIndex: 0,
+      type: "session.failed",
+      payload: { type: "session.failed", data: { error: "boom" } },
+      sessionState: {
+        state: { sessionId: "ses_terminal", streamIndex: 1 },
+        status: "failed",
+      },
+    });
+
+    const stored = await repository.getChat(chat.id);
+    expect(stored?.sessionEndedAt).toBeInstanceOf(Date);
+    expect(stored?.status).toBe("failed");
   });
 
   it("creates and lists agent connections", async () => {

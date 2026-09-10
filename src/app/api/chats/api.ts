@@ -40,7 +40,11 @@ export type ChatResponse = {
   status: Chat["status"];
   /** The Eveland Project behind a managed chat; the browser derives its Caller Token flow from it. */
   evelandProjectId: string | null;
-  /** The browser-safe, ID-addressed Eve session cursor. */
+  /**
+   * The browser-safe, ID-addressed Eve session cursor. `null` once Eve has
+   * said the stored session is over: there is nothing left to continue, and
+   * the next message creates a session in its place.
+   */
   sessionState: ClientSessionState | null;
   /**
    * A session-create request was issued for this chat and never proved what
@@ -288,7 +292,7 @@ function chatResponse(chat: Chat, createInProgress: boolean): ChatResponse {
     title: chat.title,
     status: chat.status,
     evelandProjectId: chat.evelandProjectId,
-    sessionState: chat.sessionState
+    sessionState: chat.sessionState && chat.sessionEndedAt === null
       ? {
           sessionId: chat.sessionState.sessionId,
           streamIndex: chat.sessionState.streamIndex ?? 0,

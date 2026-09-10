@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { UserContent } from "ai";
 import { CircleAlert } from "lucide-react";
 
@@ -45,6 +45,11 @@ export function AuthenticatedChatThread({
   const returnPath = `/chats/${chatId}`;
   const { refresh: refreshChatList } = useChatList();
   const [attempt, setAttempt] = useState(0);
+  // Whether the Catalog lists this chat's Agent, once a load has asked. A
+  // re-read the thread requests while it waits on another request's create
+  // is about the chat row, not the Catalog, and must not consult Eveland
+  // again on every tick.
+  const knownAvailableRef = useRef<boolean | null>(null);
   const [state, setState] = useState<
     | { kind: "loading" }
     | {
@@ -81,19 +86,24 @@ export function AuthenticatedChatThread({
         // Only a managed chat consults the Catalog — getCatalog starts login
         // on 401, which an anonymous chat must never do.
         const evelandProjectId = data.chat.evelandProjectId;
-        const catalog = evelandProjectId ? await getCatalog(returnPath) : null;
+        let available = knownAvailableRef.current;
+        if (available === null) {
+          const catalog = evelandProjectId ? await getCatalog(returnPath) : null;
+          available =
+            !evelandProjectId ||
+            Boolean(
+              catalog?.agents.some(
+                (agent) => agent.projectId === evelandProjectId,
+              ),
+            );
+        }
         if (active) {
+          knownAvailableRef.current = available;
           setState({
             kind: "ready",
             data,
             authenticated: session.authenticated,
-            available:
-              !evelandProjectId ||
-              Boolean(
-                catalog?.agents.some(
-                  (agent) => agent.projectId === evelandProjectId,
-                ),
-              ),
+            available,
           });
         }
       } catch (error) {
@@ -106,13 +116,26 @@ export function AuthenticatedChatThread({
         }
         if (error instanceof EvelandIdentityError && error.status === 403) {
           setState({ kind: "forbidden", message: error.message });
-        } else {
-          setState({
+          return;
+        }
+        setState((current) => {
+          // A re-read that fails leaves the thread it was for on screen: the
+          // chat it last showed is still the chat, and replacing it with an
+          // error would unmount the composer mid-draft over one bad response.
+          // The thread re-arms its watch from a fresh chat object, so the
+          // next tick still comes.
+          if (current.kind === "ready") {
+            return {
+              ...current,
+              data: { ...current.data, chat: { ...current.data.chat } },
+            };
+          }
+          return {
             kind: "error",
             message:
               error instanceof Error ? error.message : "Unable to load this chat.",
-          });
-        }
+          };
+        });
       }
     })();
     return () => {
@@ -175,6 +198,7 @@ export function AuthenticatedChatThread({
               type="button"
               variant="outline"
               onClick={() => {
+                knownAvailableRef.current = null;
                 setState({ kind: "loading" });
                 setAttempt((current) => current + 1);
               }}

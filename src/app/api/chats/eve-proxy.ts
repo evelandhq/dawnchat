@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
 
-import type { MessageStreamEvent } from "eve/client";
+import { ClientError, type MessageStreamEvent } from "eve/client";
 
 import { resolveAppBrowserSession } from "@/app-session";
 import {
   createRepository,
   type Chat,
   type Repository,
+  type SessionCreateClaim,
   type SessionState,
 } from "@/db/repository";
 import { getDbClient } from "@/db/provider";
@@ -20,9 +21,11 @@ import {
   clearPendingBatchesForTurn,
   EMPTY_PENDING_INPUT,
   inputRespondedEvent,
+  isAmbiguousSessionCreateStatus,
   pendingRequestsFromEvent,
   readInputResponses,
   resolvedInputRequestIds,
+  SESSION_CREATE_NOT_ATTEMPTED_CODE,
   settlePendingInput,
   turnIdFromEvent,
   withoutContinuationToken,
@@ -96,16 +99,24 @@ export async function proxyCreateEveSession(request: Request, chatId: string): P
   if (resolved.chat.status === "completed") {
     return errorResponse("Chat is completed", 409);
   }
-  // A stored session is replaceable only once Eve's own stream says it ended.
-  // A `failed` status alone does not: a turn that failed on the transport
-  // leaves the session it failed on running, and a second one would run
-  // beside it.
+  // A stored session is replaceable only once Eve itself has said it is over:
+  // its stream reported the end, or it answered a request naming the session
+  // with "no longer active" or "not found". A `failed` status alone does
+  // not: a turn that failed on the transport leaves the session it failed on
+  // running, and a second one would run beside it.
   const storedSessionId = resolved.chat.sessionState?.sessionId;
-  if (
-    storedSessionId &&
-    !(await resolved.repository.hasSessionEnded(resolved.chat.id, storedSessionId))
-  ) {
-    return errorResponse("Chat already has an Eve session", 409);
+  if (storedSessionId) {
+    let ended: boolean;
+    try {
+      ended =
+        resolved.chat.sessionEndedAt !== null ||
+        (await resolved.repository.hasSessionEnded(resolved.chat.id, storedSessionId));
+    } catch (error) {
+      return createNotAttemptedResponse(resolved.chat.id, error);
+    }
+    if (!ended) {
+      return errorResponse("Chat already has an Eve session", 409);
+    }
   }
 
   return proxyTurnRequest(request, resolved, undefined, storedSessionId);
@@ -227,7 +238,16 @@ export async function proxyEveSessionStream(
   let first: IteratorResult<MessageStreamEvent>;
   try {
     first = await iterator.next();
-  } catch {
+  } catch (error) {
+    if (error instanceof ClientError && error.status === 404) {
+      // Eve does not know the session any more, and its client already spent
+      // its reconnect attempts asking. Recorded so a create may replace it.
+      await resolved.repository
+        .markSessionEnded(resolved.chat.id, sessionId)
+        .catch((markError: unknown) => {
+          console.error(`Failed to record the ended session for ${chatId}:`, markError);
+        });
+    }
     return errorResponse("Unable to reach Eve agent", 502);
   }
 
@@ -280,15 +300,23 @@ async function proxyTurnRequest(
   // attempt are separate reads, so two requests could each pass that check
   // against a stale row and both cross a boundary neither can take back. The
   // claim collapses the check and the mark into one conditional write.
-  const claim = await context.repository.claimSessionCreate(
-    context.chat.id,
-    createClaimLeaseMs(),
-    replaceSessionId,
-  );
+  let claim: SessionCreateClaim | null;
+  try {
+    claim = await context.repository.claimSessionCreate(
+      context.chat.id,
+      createClaimLeaseMs(),
+      replaceSessionId,
+    );
+  } catch (error) {
+    // Nothing reached the Agent, and no mark was written: the browser may
+    // treat this like any refusal rather than lock the composer behind it.
+    return createNotAttemptedResponse(context.chat.id, error);
+  }
   if (!claim) {
     return errorResponse("A session create for this chat is already in progress", 409);
   }
 
+  const settlement = { settled: false };
   try {
     // The attempt is bounded so it cannot still be running when its claim
     // becomes takeable. Both attempts of an operation-id fallback share this
@@ -299,18 +327,42 @@ async function proxyTurnRequest(
       undefined,
       body,
       AbortSignal.any([request.signal, AbortSignal.timeout(createAttemptTimeoutMs())]),
-      claim,
+      { ...claim, settlement },
     );
   } finally {
-    // Only the claim is released, and only while this request still holds it:
-    // the unconfirmed mark it left is for proof to clear, and a claim that has
-    // already passed to another request is not this one's to drop.
-    await context.repository
-      .releaseSessionCreateClaim(context.chat.id, claim)
-      .catch((error: unknown) => {
-        console.error(`Failed to release the create claim for ${context.chat.id}:`, error);
-      });
+    // Every outcome `forwardTurn` reaches releases the claim in the write that
+    // records it. This covers the request dying on the way there — a throw
+    // before any outcome — and only while this request still holds the claim:
+    // the unconfirmed mark it left is for proof to clear, and a claim that
+    // has already passed to another request is not this one's to drop.
+    if (!settlement.settled) {
+      await context.repository
+        .releaseSessionCreateClaim(context.chat.id, claim.token)
+        .catch((error: unknown) => {
+          console.error(`Failed to release the create claim for ${context.chat.id}:`, error);
+        });
+    }
   }
+}
+
+/**
+ * The claim a create runs under, plus whether it has been settled: every
+ * outcome writes and releases in one statement, and this is how the request's
+ * own `finally` knows there is nothing left for it to release.
+ */
+type HeldCreateClaim = SessionCreateClaim & {
+  settlement: { settled: boolean };
+};
+
+function createNotAttemptedResponse(chatId: string, error: unknown): Response {
+  console.error(`Unable to record a session create for ${chatId}:`, error);
+  return Response.json(
+    {
+      code: SESSION_CREATE_NOT_ATTEMPTED_CODE,
+      error: "Unable to start the Eve session right now",
+    },
+    { status: 503, headers: { "cache-control": "no-store" } },
+  );
 }
 
 async function forwardTurn(
@@ -319,16 +371,24 @@ async function forwardTurn(
   sessionId: string | undefined,
   body: Record<string, unknown>,
   signal: AbortSignal = request.signal,
-  claim?: string,
+  claim?: HeldCreateClaim,
 ): Promise<Response> {
   const isCreate = sessionId === undefined;
   const currentSession = context.chat.sessionState;
   // A create's failure is only this request's to record while it still holds
   // the claim. A successor that already committed a session must not be left
   // reading as failed, and a continuation owns no claim to check.
-  const recordFailure = async (): Promise<void> => {
+  //
+  // Proof that the Agent created nothing — a refusal it issued itself —
+  // clears the unconfirmed mark only when this attempt set it. A mark left by
+  // an earlier, unanswered attempt is about that attempt, and a refusal of
+  // the retry says nothing about what the first request may have started.
+  const recordFailure = async (options: { refused?: boolean } = {}): Promise<void> => {
     if (claim) {
-      await context.repository.failSessionCreate(context.chat.id, claim);
+      await context.repository.failSessionCreate(context.chat.id, claim.token, {
+        clearUnconfirmed: Boolean(options.refused) && !claim.inheritedUnconfirmed,
+      });
+      claim.settlement.settled = true;
       return;
     }
     await context.repository.updateChatStatus(context.chat.id, "failed");
@@ -359,13 +419,28 @@ async function forwardTurn(
   }
 
   if (!remote.ok) {
-    if (claim && isCreate && !isAmbiguousFailureStatus(remote.status)) {
-      // The Agent refused the request itself, which is proof it created
-      // nothing: this chat is safe to send from again.
-      await context.repository.clearSessionCreateUnconfirmed(context.chat.id, claim);
+    const refused = isCreate && !isAmbiguousSessionCreateStatus(remote.status);
+    if (remote.status === 401 && claim) {
+      // An Eveland challenge is answered by retrying with a Caller Token, so
+      // it is not a failure to record — but it did refuse this attempt before
+      // any session work, which settles the mark this attempt set.
+      await context.repository.releaseSessionCreateClaim(context.chat.id, claim.token, {
+        clearUnconfirmed: !claim.inheritedUnconfirmed,
+      });
+      claim.settlement.settled = true;
+    } else if (remote.status !== 401) {
+      await recordFailure({ refused });
     }
-    if (remote.status !== 401) {
-      await recordFailure();
+    if (!isCreate && (await isSessionNotActiveResponse(remote))) {
+      // Eve's own word that the session it was asked to continue is gone —
+      // past the activation retries `postTurn` already spent on it. Recording
+      // that is what lets a create replace the session instead of leaving
+      // the chat stuck behind one nothing can reach.
+      await context.repository
+        .markSessionEnded(context.chat.id, sessionId)
+        .catch((error: unknown) => {
+          console.error(`Failed to record the ended session for ${context.chat.id}:`, error);
+        });
     }
     return forwardErrorResponse(remote, context.chat.id);
   }
@@ -396,9 +471,10 @@ async function forwardTurn(
     // one just created is reachable again through the same operation ID.
     const committed = await context.repository.commitSessionCreate(
       context.chat.id,
-      claim,
+      claim.token,
       nextSession,
     );
+    claim.settlement.settled = true;
     if (!committed) {
       console.error(
         `Discarded session ${resolvedSessionId} for ${context.chat.id}: the create claim was taken over`,
@@ -592,14 +668,6 @@ async function resolveProxyContext(
   }
 }
 
-/**
- * Whether a failed request leaves the Agent's side of it unknown. Only a
- * refusal the Agent issued itself proves nothing was created; a 5xx or a
- * request timeout can arrive after Eve has already persisted the workflow.
- */
-function isAmbiguousFailureStatus(status: number): boolean {
-  return status >= 500 || status === 408;
-}
 
 /**
  * Eve's own refusal to accept an `operationId` from the principal it resolved,

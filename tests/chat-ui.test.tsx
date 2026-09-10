@@ -1805,15 +1805,67 @@ describe("ChatThread with Eve and AI Elements", () => {
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    // No session can exist, so nothing is resent on its own, and the user
-    // edits and sends instead of retrying blind.
+    // No session can exist, so nothing is resent on its own. The message is
+    // still there and still unsent, so the user is told and offered the
+    // retry — or edits and sends something else from the open composer.
     expect(
       fetchMock.mock.calls.filter(([, init]) => init?.method === "POST"),
     ).toHaveLength(0);
+    expect(screen.getByText("Run this once")).toBeInTheDocument();
     expect(screen.getByLabelText("Message")).toBeEnabled();
-    expect(
-      screen.queryByRole("button", { name: "Retry message" }),
-    ).not.toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "The Agent did not accept this message.",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Retry message" }));
+
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter(([, init]) => init?.method === "POST"),
+      ).toHaveLength(1),
+    );
+    const [sent] = fetchMock.mock.calls.filter(([, init]) => init?.method === "POST");
+    expect(JSON.parse(String(sent?.[1]?.body))).toMatchObject({ message: "Run this once" });
+  });
+
+  it("asks for a re-read when Eve says the session is no longer active", async () => {
+    const onChatStale = vi.fn();
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        if (isPendingInputCall([input])) return pendingInputResponse();
+        if (init?.method === "POST") {
+          return Response.json(
+            { code: "session_not_active", error: "The session is no longer active." },
+            { status: 409 },
+          );
+        }
+        return ndjson([
+          { type: "session.waiting", data: { wait: "next-user-message" } },
+        ]);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({ id: "chat_lost_session" })}
+        events={[]}
+        pendingInput={EMPTY_PENDING}
+        onChatStale={onChatStale}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "Still there?" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    // The proxy recorded ses_1 as over; the re-read is how this thread gets
+    // a store without it, whose next send creates a session in its place.
+    // Eve's client spends its own activation retries (1.75s) before giving up.
+    await waitFor(() => expect(onChatStale).toHaveBeenCalled(), { timeout: 5_000 });
+    expect(screen.getByRole("alert")).toHaveTextContent("The session is no longer active.");
+    // The draft outlives the store that failed to send it.
+    expect(screen.getByLabelText("Message")).toHaveValue("Still there?");
   });
 
   it("shows the error id when an accepted session fails in the stream", async () => {

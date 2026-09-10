@@ -64,11 +64,22 @@ initial message. Nothing resends that message on its own: a mount, a React
 StrictMode remount, and a refresh all leave the composer closed behind an
 explicit **Retry message**.
 
-Only a refusal the Agent issued itself — any 4xx other than 401 — clears the
-mark, and the chat then reads as an ordinary failed send with its composer
-open again. A 401 is the Eveland challenge described in
-[Authentication and identity](authentication.md); it creates nothing and
-settles nothing until the Caller Token retry.
+Only a refusal the Agent issued itself — any 4xx — proves the attempt it
+refused created nothing, and that proof reaches exactly as far as that
+attempt: it clears the mark the attempt set, and the chat then reads as an
+ordinary failed send with its composer open again. A retry that finds a mark
+an earlier, unanswered attempt left inherits it rather than restarting it,
+and a refusal of the retry leaves it in place — the first request may still
+have started a session, and only a committed session settles that. A 401 is
+the Eveland challenge described in
+[Authentication and identity](authentication.md): it refuses the attempt
+before any session work, so it settles the attempt's own mark, but records no
+failure, since the Caller Token retry is the answer to it. The same rule
+decides both what the proxy records and what the browser shows, from one
+shared definition of which statuses are ambiguous. A create the proxy could
+not even record — its own database refusing the claim — answers 503 with
+`session_create_not_attempted`, which the browser reads as a refusal: nothing
+reached the Agent and no mark exists.
 
 One create at a time per chat. Resolving the chat, finding it has no session,
 and recording the attempt are separate reads, so the mark is written as a
@@ -108,10 +119,17 @@ the initial message as a continuation.
 
 A chat that already holds a session creates no other, whatever its status: a
 turn that failed on the transport leaves the session it failed on running. Only
-a session Eve's own stream reported as ended — a stored `session.failed` or
-`session.completed` — may be replaced, and the create that replaces it must
-name exactly that session, so a racing request cannot replace a session
-neither of them examined.
+a session Eve itself has said is over may be replaced: one whose stream
+reported `session.failed` or `session.completed`, one Eve answered a
+continuation for with `session_not_active` past the activation retries above,
+or one whose stream Eve no longer finds. Each is recorded against the stored
+session it is about, so a late answer about a session the chat has already
+replaced records nothing. The create that replaces an ended session must name
+exactly that session, so a racing request cannot replace a session neither of
+them examined. A chat whose session has ended reads back with no session: the
+browser asks for that re-read when Eve refuses its continuation, keeps the
+message it was sending as the draft, and its next send creates a session in
+the old one's place.
 
 Every create for one chat carries the same operation ID, derived server-side
 from the chat ID and never taken from the browser. Eve answers a repeat of an

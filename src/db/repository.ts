@@ -46,6 +46,27 @@ export type EveEvent = Omit<typeof events.$inferSelect, "payloadJson"> & {
   payload: unknown;
 };
 
+/** The claim one create request holds for a chat, from `claimSessionCreate`. */
+export type SessionCreateClaim = {
+  token: string;
+  /**
+   * The chat was already marked unconfirmed by an earlier attempt when this
+   * claim was taken. What this attempt learns settles this attempt only: an
+   * Agent refusing the retry outright says nothing about the request that
+   * went unanswered before it, so that mark is not this claim's to clear.
+   */
+  inheritedUnconfirmed: boolean;
+};
+
+/** What settling a create claim may record besides releasing it. */
+export type SessionCreateOutcome = {
+  /**
+   * The Agent refused this attempt itself, proof it created nothing. Clears
+   * the unconfirmed mark only when this attempt set it.
+   */
+  clearUnconfirmed?: boolean;
+};
+
 export type CreateAgentConnectionInput = {
   name: string;
   baseUrl: string;
@@ -195,12 +216,21 @@ export type Repository = {
     chatId: string,
     leaseMs: number,
     replaceSessionId?: string,
-  ): Promise<string | null>;
+  ): Promise<SessionCreateClaim | null>;
   /**
-   * Whether a terminal event is stored for this session — Eve's own word that
-   * it ended. A chat may only replace a session it can prove is over.
+   * Whether the session is over by Eve's own word: a stored terminal event
+   * from its stream, or Eve having answered a request naming it with "no
+   * longer active" or "not found" (see `markSessionEnded`). A chat may only
+   * replace a session it can prove is over.
    */
   hasSessionEnded(chatId: string, sessionId: string): Promise<boolean>;
+  /**
+   * Records Eve's answer that `sessionId` is gone, so a create may replace
+   * it. Fenced on the stored session: a late answer about a session the chat
+   * has already moved on from records nothing. A completed chat is left as it
+   * is; nothing is replaced there.
+   */
+  markSessionEnded(chatId: string, sessionId: string): Promise<void>;
   /**
    * Stores the session a create committed and settles the claim that produced
    * it. Returns `null` when `token` no longer holds the claim: a handler that
@@ -220,23 +250,31 @@ export type Repository = {
    */
   liveSessionCreateClaims(chatIds: string[]): Promise<Set<string>>;
   /**
-   * Records that the create `token` holds the claim for failed. Returns `null`
-   * when the claim has moved on, so a handler that woke past its own deadline
-   * cannot mark a chat failed over the session its successor committed. The
-   * unconfirmed mark is untouched either way: only proof clears that.
+   * Records the create `token` holds the claim for as failed and releases the
+   * claim in the same write. Returns `null` when the claim has moved on, so a
+   * handler that woke past its own deadline cannot mark a chat failed over the
+   * session its successor committed. The unconfirmed mark stays unless the
+   * caller has proof the attempt created nothing (`clearUnconfirmed`), and
+   * that proof only ever covers the mark this attempt set — see
+   * `SessionCreateClaim.inheritedUnconfirmed`.
    */
-  failSessionCreate(chatId: string, token: string): Promise<Chat | null>;
+  failSessionCreate(
+    chatId: string,
+    token: string,
+    outcome?: SessionCreateOutcome,
+  ): Promise<Chat | null>;
   /**
-   * Releases the claim `token` names, leaving the unconfirmed mark for proof
-   * to clear. A token that no longer holds the claim releases nothing.
+   * Releases the claim `token` names without recording a failure, for an
+   * attempt that settled nothing — an authentication challenge the caller
+   * answers by retrying. The unconfirmed mark is cleared only on the same
+   * proof `failSessionCreate` requires. A token that no longer holds the claim
+   * releases nothing.
    */
-  releaseSessionCreateClaim(chatId: string, token: string): Promise<void>;
-  /**
-   * Clears the mark after proof of what the Agent did with the request, for
-   * the holder of `token` only. Returns `null` when the claim has moved on:
-   * that proof was about a request nobody is waiting on any more.
-   */
-  clearSessionCreateUnconfirmed(chatId: string, token: string): Promise<Chat | null>;
+  releaseSessionCreateClaim(
+    chatId: string,
+    token: string,
+    outcome?: SessionCreateOutcome,
+  ): Promise<void>;
   /**
    * Read-modify-write on the pending-input ledger under the same per-chat
    * advisory lock as `appendEvent`. `fn` returns the state to persist, or
@@ -333,6 +371,32 @@ function isDuplicateAgentUrlError(error: unknown): boolean {
 }
 
 export function createRepository(db: RepositoryDb): Repository {
+  /**
+   * The one write every create outcome goes through. It is fenced on the
+   * claim token — the row changes only while `token` still holds the claim —
+   * and it releases the claim in the same statement, so a handler that woke
+   * past its own deadline stores nothing over the request that replaced it,
+   * and no outcome is ever recorded in one write and released in another.
+   */
+  async function updateHeldClaim(
+    chatId: string,
+    token: string,
+    set: Partial<typeof chats.$inferInsert>,
+  ): Promise<Chat | null> {
+    const [updated] = await db
+      .update(chats)
+      .set({
+        ...set,
+        sessionCreateClaimExpiresAt: null,
+        sessionCreateClaimToken: null,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(chats.id, chatId), eq(chats.sessionCreateClaimToken, token)))
+      .returning();
+
+    return updated ? mapChat(updated) : null;
+  }
+
   return {
     async createAgentConnection(input) {
       const now = new Date();
@@ -724,12 +788,15 @@ export function createRepository(db: RepositoryDb): Repository {
         }
 
         if (input.sessionState) {
+          const status = input.sessionState.status;
           await tx
             .update(chats)
             .set({
               sessionStateJson: JSON.stringify(input.sessionState.state),
-              ...(input.sessionState.status
-                ? { status: input.sessionState.status }
+              ...(status ? { status } : {}),
+              // A terminal event is Eve's stream saying the session is over.
+              ...(status === "completed" || status === "failed"
+                ? { sessionEndedAt: sql`coalesce(${chats.sessionEndedAt}, now())` }
                 : {}),
               updatedAt: new Date(),
             })
@@ -842,7 +909,7 @@ export function createRepository(db: RepositoryDb): Repository {
     async claimSessionCreate(chatId, leaseMs, replaceSessionId) {
       const now = new Date();
       const token = createId("claim");
-      const claimed = await db
+      const [claimed] = await db
         .update(chats)
         .set({
           // Both the deadline and the test against it are the database's own
@@ -850,7 +917,9 @@ export function createRepository(db: RepositoryDb): Repository {
           // server decides when someone else's claim is over.
           sessionCreateClaimExpiresAt: sql`now() + make_interval(secs => ${leaseMs / 1000})`,
           sessionCreateClaimToken: token,
-          sessionCreateUnconfirmedAt: now,
+          // A mark an earlier attempt left is still waiting for proof about
+          // that attempt; this one adds nothing to it and must not restart it.
+          sessionCreateUnconfirmedAt: sql`coalesce(${chats.sessionCreateUnconfirmedAt}, ${now.toISOString()}::timestamptz)`,
           updatedAt: now,
         })
         .where(
@@ -872,12 +941,31 @@ export function createRepository(db: RepositoryDb): Repository {
             ),
           ),
         )
-        .returning({ id: chats.id });
+        .returning({ unconfirmedAt: chats.sessionCreateUnconfirmedAt });
 
-      return claimed.length > 0 ? token : null;
+      if (!claimed) return null;
+      // The mark this write found is the one it kept; only a mark written by
+      // this write reads back as this attempt's own timestamp.
+      const inheritedUnconfirmed =
+        claimed.unconfirmedAt?.getTime() !== now.getTime();
+      return { token, inheritedUnconfirmed };
     },
 
     async hasSessionEnded(chatId, sessionId) {
+      const [marked] = await db
+        .select({ id: chats.id })
+        .from(chats)
+        .where(
+          and(
+            eq(chats.id, chatId),
+            sql`(${chats.sessionStateJson}::json->>'sessionId') = ${sessionId}`,
+            sql`${chats.sessionEndedAt} is not null`,
+          ),
+        )
+        .limit(1);
+      if (marked) return true;
+
+      // A terminal event persisted before the ended mark existed still counts.
       const [row] = await db
         .select({ id: events.id })
         .from(events)
@@ -893,25 +981,32 @@ export function createRepository(db: RepositoryDb): Repository {
       return row !== undefined;
     },
 
-    async commitSessionCreate(chatId, token, state) {
-      const [updated] = await db
+    async markSessionEnded(chatId, sessionId) {
+      await db
         .update(chats)
         .set({
-          sessionStateJson: JSON.stringify(state),
-          status: "active",
-          // A stored session ID is the proof the unconfirmed mark was waiting
-          // for, and this claim has nothing left to do.
-          sessionCreateUnconfirmedAt: null,
-          sessionCreateClaimExpiresAt: null,
-          sessionCreateClaimToken: null,
+          sessionEndedAt: sql`coalesce(${chats.sessionEndedAt}, now())`,
+          status: "failed",
           updatedAt: new Date(),
         })
         .where(
-          and(eq(chats.id, chatId), eq(chats.sessionCreateClaimToken, token)),
-        )
-        .returning();
+          and(
+            eq(chats.id, chatId),
+            sql`(${chats.sessionStateJson}::json->>'sessionId') = ${sessionId}`,
+            sql`${chats.status} <> 'completed'`,
+          ),
+        );
+    },
 
-      return updated ? mapChat(updated) : null;
+    async commitSessionCreate(chatId, token, state) {
+      return updateHeldClaim(chatId, token, {
+        sessionStateJson: JSON.stringify(state),
+        sessionEndedAt: null,
+        status: "active",
+        // A stored session ID is the proof the unconfirmed mark was waiting
+        // for, and this claim has nothing left to do.
+        sessionCreateUnconfirmedAt: null,
+      });
     },
 
     async liveSessionCreateClaims(chatIds) {
@@ -929,41 +1024,19 @@ export function createRepository(db: RepositoryDb): Repository {
       return new Set(rows.map((row) => row.id));
     },
 
-    async failSessionCreate(chatId, token) {
-      const [updated] = await db
-        .update(chats)
-        .set({ status: "failed", updatedAt: new Date() })
-        .where(
-          and(eq(chats.id, chatId), eq(chats.sessionCreateClaimToken, token)),
-        )
-        .returning();
-
-      return updated ? mapChat(updated) : null;
+    async failSessionCreate(chatId, token, outcome = {}) {
+      return updateHeldClaim(chatId, token, {
+        status: "failed",
+        ...(outcome.clearUnconfirmed ? { sessionCreateUnconfirmedAt: null } : {}),
+      });
     },
 
-    async releaseSessionCreateClaim(chatId, token) {
-      await db
-        .update(chats)
-        .set({
-          sessionCreateClaimExpiresAt: null,
-          sessionCreateClaimToken: null,
-          updatedAt: new Date(),
-        })
-        .where(
-          and(eq(chats.id, chatId), eq(chats.sessionCreateClaimToken, token)),
-        );
-    },
-
-    async clearSessionCreateUnconfirmed(chatId, token) {
-      const [updated] = await db
-        .update(chats)
-        .set({ sessionCreateUnconfirmedAt: null, updatedAt: new Date() })
-        .where(
-          and(eq(chats.id, chatId), eq(chats.sessionCreateClaimToken, token)),
-        )
-        .returning();
-
-      return updated ? mapChat(updated) : null;
+    async releaseSessionCreateClaim(chatId, token, outcome = {}) {
+      await updateHeldClaim(
+        chatId,
+        token,
+        outcome.clearUnconfirmed ? { sessionCreateUnconfirmedAt: null } : {},
+      );
     },
 
     async updatePendingInput(chatId, fn) {

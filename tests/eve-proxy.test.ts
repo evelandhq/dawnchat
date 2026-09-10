@@ -142,9 +142,9 @@ describe("per-chat Eve protocol proxy", () => {
       .update(chats)
       .set({ sessionCreateClaimExpiresAt: new Date(Date.now() - 1_000) })
       .where(eq(chats.id, chatId));
-    const token = await repository.claimSessionCreate(chatId, 60_000);
-    if (!token) throw new Error(`No create claim to take over for ${chatId}`);
-    return token;
+    const claim = await repository.claimSessionCreate(chatId, 60_000);
+    if (!claim) throw new Error(`No create claim to take over for ${chatId}`);
+    return claim.token;
   }
 
   async function fakeServer(options?: Parameters<typeof startFakeEveServer>[0]): Promise<FakeEveServer> {
@@ -467,6 +467,128 @@ describe("per-chat Eve protocol proxy", () => {
     });
   });
 
+  it("replaces a session Eve says is no longer active", async () => {
+    // Past the activation retries the proxy spends on it, Eve is still
+    // answering that the session is gone — a lost workflow, not a slow start.
+    const server = await fakeServer({
+      anonymousPrincipal: true,
+      continueSessionNotActiveCount: 10,
+    });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Restarted Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Lost session",
+      pendingUserMessage: "Run this once",
+      ...chatIdentity,
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const routes = await loadProxyRoutes();
+    const create = () =>
+      routes.createSession(
+        new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session`, {
+          method: "POST",
+          headers: callerHeaders({ "content-type": "application/json" }),
+          body: JSON.stringify({ message: "Run this once" }),
+        }),
+        { params: Promise.resolve({ chatId: chat.id }) },
+      );
+
+    expect((await create()).status).toBe(202);
+
+    const continued = await routes.continueSession(
+      new Request(
+        `http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1`,
+        {
+          method: "POST",
+          headers: callerHeaders({ "content-type": "application/json" }),
+          body: JSON.stringify({ message: "And again" }),
+        },
+      ),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+    expect(continued.status).toBe(409);
+    await expect(continued.json()).resolves.toMatchObject({
+      code: "session_not_active",
+    });
+    // Eve's own word on ses_1 is recorded; the session itself stays stored, so
+    // the create that replaces it has to name it.
+    const ended = await repository.getChat(chat.id);
+    expect(ended?.sessionEndedAt).toBeInstanceOf(Date);
+    expect(ended).toMatchObject({
+      sessionState: { sessionId: "ses_1", streamIndex: 0 },
+      status: "failed",
+    });
+
+    const replaced = await create();
+
+    expect(replaced.status).toBe(202);
+    await expect(replaced.json()).resolves.toMatchObject({ sessionId: "ses_2" });
+    const stored = await repository.getChat(chat.id);
+    expect(stored?.sessionEndedAt).toBeNull();
+    expect(stored).toMatchObject({
+      sessionState: { sessionId: "ses_2", streamIndex: 0 },
+      status: "active",
+    });
+  });
+
+  it("keeps an earlier attempt's unconfirmed mark when the Agent refuses the retry", async () => {
+    const server = await fakeServer({
+      failCreateSession: true,
+      failCreateSessionStatus: 403,
+    });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Rotated-key Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Retried create",
+      pendingUserMessage: "Run this once",
+      ...chatIdentity,
+    });
+    // What an earlier attempt that never got an answer leaves behind.
+    const markedAt = new Date(Date.now() - 60_000);
+    await testDb.db
+      .update(chats)
+      .set({ sessionCreateUnconfirmedAt: markedAt, status: "failed" })
+      .where(eq(chats.id, chat.id));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const routes = await loadProxyRoutes();
+
+    const response = await routes.createSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ message: "Run this once" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id }) },
+    );
+
+    expect(response.status).toBe(403);
+    // The refusal proves the retry created nothing. It proves nothing about
+    // the attempt before it, whose session may still be running the same
+    // first message, so that attempt's mark stays.
+    const stored = await repository.getChat(chat.id);
+    expect(stored?.sessionCreateUnconfirmedAt).toEqual(markedAt);
+    expect(stored).toMatchObject({
+      pendingUserMessage: "Run this once",
+      sessionCreateClaimToken: null,
+      sessionState: null,
+      status: "failed",
+    });
+  });
+
   it("abandons a create attempt before its claim can be taken over", async () => {
     // The claim lease is twice the attempt bound, so the attempt is always
     // gone before another request may consider the claim stale.
@@ -552,7 +674,7 @@ describe("per-chat Eve protocol proxy", () => {
     );
     expect(creates).toHaveLength(0);
     await expect(repository.getChat(chat.id)).resolves.toMatchObject({
-      sessionCreateClaimToken: held,
+      sessionCreateClaimToken: held!.token,
       sessionState: null,
     });
   });
