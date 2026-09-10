@@ -5,7 +5,7 @@ import { resolveAppBrowserSession } from "@/app-session";
 import { setDbClientForTests } from "@/db/provider";
 import { createRepository } from "@/db/repository";
 import { chats } from "@/db/schema";
-import { defaultMessageReducer, type MessageStreamEvent } from "eve/client";
+import { Client, defaultMessageReducer, type MessageStreamEvent } from "eve/client";
 
 import {
   startFakeEveServer,
@@ -814,6 +814,7 @@ describe("per-chat Eve protocol proxy", () => {
     const streamEvents = [
       {
         type: "message.completed",
+        meta: { id: "evt_done", at: "2026-09-10T00:00:00Z", deliveryIds: ["delivery_test"] },
         data: {
           message: "Done",
           finishReason: "stop",
@@ -824,10 +825,11 @@ describe("per-chat Eve protocol proxy", () => {
       },
       {
         type: "session.waiting",
+        meta: { id: "evt_wait", at: "2026-09-10T00:00:00Z", deliveryIds: ["delivery_test"] },
         data: { wait: "next-user-message", continuationToken: "eve:rotated" },
       },
     ] as const;
-    const server = await fakeServer({ generation: "0.49", streamEvents });
+    const server = await fakeServer({ generation: "0.52.5", streamEvents });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
       name: "Waiting Eve",
@@ -862,10 +864,11 @@ describe("per-chat Eve protocol proxy", () => {
     expect(forwardedEvents).toEqual([
       streamEvents[0],
       {
-        type: "session.waiting",
+        ...streamEvents[1],
         data: { wait: "next-user-message", continuationToken: "ses_1" },
       },
     ]);
+    expect((await repository.listEvents(chat.id)).map((event) => event.payload)).toEqual(forwardedEvents);
     await expect(repository.getChat(chat.id)).resolves.toMatchObject({
       sessionState: {
         sessionId: "ses_1",
@@ -888,6 +891,95 @@ describe("per-chat Eve protocol proxy", () => {
       body: { message: "And again" },
     });
   });
+
+  it("follows the accepted delivery across an older waiting boundary through the proxy", async () => {
+    const streamEvents = ["earlier", "accepted"].flatMap((deliveryId, index) => [
+      {
+        type: "message.completed",
+        data: { turnId: deliveryId, stepIndex: 0, sequence: index * 2, finishReason: "stop", message: deliveryId },
+        meta: { id: `${deliveryId}_message`, at: "2026-09-10T00:00:00Z", deliveryIds: [deliveryId] },
+      },
+      {
+        type: "session.waiting",
+        data: { wait: "next-user-message", continuationToken: "private-capability" },
+        meta: { id: `${deliveryId}_wait`, at: "2026-09-10T00:00:00Z", deliveryIds: [deliveryId] },
+      },
+    ]);
+    const server = await fakeServer({
+      deliveryId: "accepted", streamEvents, respectStreamCursor: true,
+    });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Current deployment", baseUrl: server.baseUrl, authType: "none",
+      evelandProjectId: "project_support",
+    });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id, title: "Old cursor", ...chatIdentity,
+    });
+    await repository.updateChatSessionState(chat.id, { sessionId: "ses_1", streamIndex: 0 });
+    const routes = await loadProxyRoutes();
+    const actualFetch = globalThis.fetch;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(String(input));
+      if (url.origin !== "http://dawn.test") return actualFetch(input, init);
+      const request = new Request(url, init);
+      const context = { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) };
+      return request.method === "POST"
+        ? routes.continueSession(request, context)
+        : routes.streamSession(request, context);
+    });
+    const client = new Client({
+      host: `http://dawn.test/api/chats/${chat.id}/agent`, auth: { bearer: "caller-token" },
+    });
+    const session = client.sessions.attach("ses_1", { streamIndex: 0 });
+    const result = await (await session.send("next", {
+      turnPolicy: "queue", signal: AbortSignal.timeout(3000),
+    })).result();
+    expect(result.message).toBe("accepted");
+    expect(session.state.streamIndex).toBe(4);
+    expect(result.events.every((event) => event.meta?.deliveryIds?.includes("accepted"))).toBe(true);
+    const stored = await repository.listEvents(chat.id);
+    expect(stored.map((event) => event.streamIndex)).toEqual([0, 1, 2, 3]);
+    expect(stored.map((event) => (event.payload as MessageStreamEvent).meta?.deliveryIds))
+      .toEqual([["earlier"], ["earlier"], ["accepted"], ["accepted"]]);
+    expect(JSON.stringify(stored)).not.toContain("private-capability");
+    expect(server.requests.filter((request) => request.method === "POST")).toHaveLength(1);
+    expect(server.requests.filter((request) => request.path.endsWith("/stream")).map((request) => request.query))
+      .toEqual(["", "?startIndex=2"]);
+  });
+
+  it.each(["0.49", "0.50", "0.51", "0.52.2"] as const)(
+    "reports an already accepted message on an old Eve %s deployment without retrying",
+    async (generation) => {
+      const server = await fakeServer({ generation });
+      const repository = createRepository(testDb.db);
+      const agent = await repository.createAgentConnection({
+        name: "Old deployment", baseUrl: server.baseUrl, authType: "none",
+        evelandProjectId: "project_support",
+      });
+      const chat = await repository.createChat({
+        agentConnectionId: agent.id, title: "Pinned old session", ...chatIdentity,
+        pendingUserMessage: "Do the work",
+      });
+      await repository.updateChatSessionState(chat.id, { sessionId: "ses_1", streamIndex: 4 });
+      const routes = await loadProxyRoutes();
+      const response = await routes.continueSession(new Request(
+        `http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1`, {
+          method: "POST", headers: callerHeaders({ "content-type": "application/json" }),
+          body: JSON.stringify({ message: "Do the work" }),
+        }), { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) });
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({
+        code: "unsupported_eve_version", accepted: true,
+        error: expect.stringContaining("do not resend"),
+      });
+      expect(server.requests).toHaveLength(1);
+      await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+        status: "active", pendingUserMessage: null,
+        sessionState: { sessionId: "ses_1", streamIndex: 4 },
+      });
+    },
+  );
 
   it.each(SUPPORTED_EVE_GENERATIONS)(
     "addresses an Eve %s follow-up by session id alone",
@@ -925,6 +1017,7 @@ describe("per-chat Eve protocol proxy", () => {
       );
 
       expect(response.status).toBe(202);
+      await expect(response.json()).resolves.toMatchObject({ deliveryId: "delivery_test" });
       expect(server.requests).toHaveLength(1);
       expect(server.requests[0].body).toEqual({ message: "Keep going" });
       await expect(repository.getChat(chat.id)).resolves.toMatchObject({
@@ -933,9 +1026,9 @@ describe("per-chat Eve protocol proxy", () => {
     },
   );
 
-  it("retries an Eve 0.49 message while its session becomes active", async () => {
+  it("retries an Eve message while its session becomes active", async () => {
     const server = await fakeServer({
-      generation: "0.49",
+      generation: "0.52.5",
       continueSessionNotActiveCount: 3,
     });
     const repository = createRepository(testDb.db);
@@ -979,9 +1072,9 @@ describe("per-chat Eve protocol proxy", () => {
     });
   });
 
-  it("stops retrying an Eve 0.49 message after three retries", async () => {
+  it("stops retrying an Eve message after three retries", async () => {
     const server = await fakeServer({
-      generation: "0.49",
+      generation: "0.52.5",
       continueSessionNotActiveCount: 4,
     });
     const repository = createRepository(testDb.db);
@@ -1019,9 +1112,9 @@ describe("per-chat Eve protocol proxy", () => {
     });
   });
 
-  it("does not retry HITL answers when an Eve 0.49 session is inactive", async () => {
+  it("does not retry HITL answers when an Eve session is inactive", async () => {
     const server = await fakeServer({
-      generation: "0.49",
+      generation: "0.52.5",
       continueSessionNotActiveCount: 1,
     });
     const repository = createRepository(testDb.db);
@@ -1059,7 +1152,7 @@ describe("per-chat Eve protocol proxy", () => {
   });
 
   it("records forwarded HITL answers so a replay can show what was picked", async () => {
-    const server = await fakeServer({ generation: "0.49" });
+    const server = await fakeServer({ generation: "0.52.5" });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
       name: "Answering Eve",
@@ -1135,7 +1228,7 @@ describe("per-chat Eve protocol proxy", () => {
   });
 
   it("stores no response event for a turn that only carries a message", async () => {
-    const server = await fakeServer({ generation: "0.49" });
+    const server = await fakeServer({ generation: "0.52.5" });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
       name: "Chatting Eve",
@@ -1165,7 +1258,7 @@ describe("per-chat Eve protocol proxy", () => {
   });
 
   it("continues an older chat by session id after its Agent upgrades", async () => {
-    const server = await fakeServer({ generation: "0.49" });
+    const server = await fakeServer({ generation: "0.52.5" });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
       name: "Current Eve",
@@ -1207,7 +1300,7 @@ describe("per-chat Eve protocol proxy", () => {
   });
 
   it("strips untrusted tokens from HITL responses and rejects another session id", async () => {
-    const server = await fakeServer({ generation: "0.49" });
+    const server = await fakeServer({ generation: "0.52.5" });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
       name: "Approval Eve",
@@ -1327,7 +1420,7 @@ describe("per-chat Eve protocol proxy", () => {
       },
       { type: "session.waiting", data: { wait: "next-user-message" } },
     ] as const;
-    const server = await fakeServer({ generation: "0.49", streamEvents });
+    const server = await fakeServer({ generation: "0.52.5", streamEvents });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
       name: "Parked Eve",
@@ -1444,7 +1537,7 @@ describe("per-chat Eve protocol proxy", () => {
       },
       { type: "session.waiting", data: { wait: "next-user-message" } },
     ] as const;
-    const server = await fakeServer({ generation: "0.49", streamEvents });
+    const server = await fakeServer({ generation: "0.52.5", streamEvents });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
       name: "Resolving Eve",
@@ -1479,7 +1572,7 @@ describe("per-chat Eve protocol proxy", () => {
   });
 
   it("keeps a required batch open across partial answers and dedupes repeats", async () => {
-    const server = await fakeServer({ generation: "0.49" });
+    const server = await fakeServer({ generation: "0.52.5" });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
       name: "Deferred Eve",
@@ -1532,7 +1625,7 @@ describe("per-chat Eve protocol proxy", () => {
   });
 
   it("leaves every park open for a message-only turn", async () => {
-    const server = await fakeServer({ generation: "0.49" });
+    const server = await fakeServer({ generation: "0.52.5" });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
       name: "Buffering Eve",
@@ -1589,7 +1682,7 @@ describe("per-chat Eve protocol proxy", () => {
       ],
     };
     const setUpChat = async (cancelStatus: "accepted" | "no_active_turn") => {
-      const server = await fakeServer({ generation: "0.49", cancelStatus });
+      const server = await fakeServer({ generation: "0.52.5", cancelStatus });
       const agent = await repository.createAgentConnection({
         name: `Cancel ${cancelStatus}`,
         baseUrl: server.baseUrl,
@@ -1654,7 +1747,7 @@ describe("per-chat Eve protocol proxy", () => {
       },
       { type: "session.completed", data: { reason: "done" } },
     ] as const;
-    const server = await fakeServer({ generation: "0.49", streamEvents });
+    const server = await fakeServer({ generation: "0.52.5", streamEvents });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
       name: "Finishing Eve",
@@ -1716,7 +1809,7 @@ describe("per-chat Eve protocol proxy", () => {
 
     const drain = async (cancelledTurnId: string): Promise<string> => {
       const server = await fakeServer({
-        generation: "0.49",
+        generation: "0.52.5",
         streamEvents: parkThenCancel(cancelledTurnId),
       });
       const agent = await repository.createAgentConnection({
@@ -1782,7 +1875,7 @@ describe("per-chat Eve protocol proxy", () => {
       ],
     };
     const setUpChat = async (title: string) => {
-      const server = await fakeServer({ generation: "0.49", cancelStatus: "accepted" });
+      const server = await fakeServer({ generation: "0.52.5", cancelStatus: "accepted" });
       const agent = await repository.createAgentConnection({
         name: `Cancel ${title}`,
         baseUrl: server.baseUrl,
@@ -1871,7 +1964,7 @@ describe("per-chat Eve protocol proxy", () => {
   });
 
   it("clears stale parks when a new session replaces the old one", async () => {
-    const server = await fakeServer({ generation: "0.49" });
+    const server = await fakeServer({ generation: "0.52.5" });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
       name: "Replaced Eve",
@@ -1916,7 +2009,7 @@ describe("per-chat Eve protocol proxy", () => {
 
   it("derives a legacy chat's parks from stored events on first read", async () => {
     const repository = createRepository(testDb.db);
-    const server = await fakeServer({ generation: "0.49" });
+    const server = await fakeServer({ generation: "0.52.5" });
     const agent = await repository.createAgentConnection({
       name: "Legacy Eve",
       baseUrl: server.baseUrl,
@@ -1994,7 +2087,7 @@ describe("per-chat Eve protocol proxy", () => {
   });
 
   it("serves the ledger to a Caller Token client", async () => {
-    const server = await fakeServer({ generation: "0.49" });
+    const server = await fakeServer({ generation: "0.52.5" });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
       name: "Challenged Eve",

@@ -30,9 +30,15 @@ function chat(
   };
 }
 
+// Default identity for single-delivery fixtures; cross-delivery tests supply their own.
+function wireEvent(event: unknown): unknown {
+  const value = event as { meta?: { deliveryIds?: readonly string[] } };
+  return { ...value, meta: { ...value.meta, deliveryIds: value.meta?.deliveryIds ?? ["delivery_test"] } };
+}
+
 function ndjson(events: readonly unknown[]): Response {
   return new Response(
-    `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
+    `${events.map((event) => JSON.stringify(wireEvent(event))).join("\n")}\n`,
     {
       status: 200,
       headers: {
@@ -94,7 +100,7 @@ function challengeFetchMock(seenAuthorization: Array<string | null>) {
         );
       }
       return Response.json(
-        { sessionId: "ses_authenticated" },
+        { sessionId: "ses_authenticated", deliveryId: "delivery_test" },
         { headers: { "x-eve-session-id": "ses_authenticated" } },
       );
     }

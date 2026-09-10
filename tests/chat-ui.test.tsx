@@ -53,8 +53,14 @@ const NDJSON_HEADERS = {
   "x-eve-stream-version": "25",
 } as const;
 
+// Default identity for single-delivery fixtures; cross-delivery tests supply their own.
+function wireEvent(event: unknown): unknown {
+  const value = event as { meta?: { deliveryIds?: readonly string[] } };
+  return { ...value, meta: { ...value.meta, deliveryIds: value.meta?.deliveryIds ?? ["delivery_test"] } };
+}
+
 function ndjson(events: readonly unknown[]): Response {
-  return new Response(`${events.map((event) => JSON.stringify(event)).join("\n")}\n`, {
+  return new Response(`${events.map((event) => JSON.stringify(wireEvent(event))).join("\n")}\n`, {
     status: 200,
     headers: NDJSON_HEADERS,
   });
@@ -90,6 +96,24 @@ describe("ChatThread with Eve and AI Elements", () => {
     vi.restoreAllMocks();
     onTurnFinished.mockReset();
     window.sessionStorage.clear();
+  });
+
+  it("shows the old-deployment guidance and blocks resending an accepted message", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (isPendingInputCall([input])) return pendingInputResponse();
+      if (init?.method === "POST") return Response.json({
+        code: "unsupported_eve_version", accepted: true,
+        error: "Upgrade this Agent to Eve 0.52.3 or newer, then start a new chat. This message was already accepted; do not resend it.",
+      }, { status: 409 });
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ChatThread chat={chat()} events={[]} pendingInput={EMPTY_PENDING} />);
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Run the job" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("do not resend"));
+    expect(screen.getByLabelText("Message")).toBeDisabled();
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
   });
 
   it("renders Eve text, files, reasoning, and completed tool calls from raw events", async () => {
@@ -295,7 +319,7 @@ describe("ChatThread with Eve and AI Elements", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
-        new Response(JSON.stringify({ sessionId: "ses_1" }), {
+        new Response(JSON.stringify({ sessionId: "ses_1", deliveryId: "delivery_test" }), {
           status: 200,
           headers: { "content-type": "application/json", "x-eve-session-id": "ses_1" },
         }),
@@ -387,7 +411,7 @@ describe("ChatThread with Eve and AI Elements", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
-        new Response(JSON.stringify({ sessionId: "ses_1" }), {
+        new Response(JSON.stringify({ sessionId: "ses_1", deliveryId: "delivery_test" }), {
           status: 200,
           headers: { "content-type": "application/json", "x-eve-session-id": "ses_1" },
         }),
@@ -869,7 +893,7 @@ describe("ChatThread with Eve and AI Elements", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
-        new Response(JSON.stringify({ sessionId: "ses_1" }), {
+        new Response(JSON.stringify({ sessionId: "ses_1", deliveryId: "delivery_test" }), {
           status: 200,
           headers: { "content-type": "application/json", "x-eve-session-id": "ses_1" },
         }),
@@ -924,7 +948,7 @@ describe("ChatThread with Eve and AI Elements", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
-        new Response(JSON.stringify({ sessionId: "ses_1" }), {
+        new Response(JSON.stringify({ sessionId: "ses_1", deliveryId: "delivery_test" }), {
           status: 200,
           headers: { "content-type": "application/json", "x-eve-session-id": "ses_1" },
         }),
@@ -1010,7 +1034,7 @@ describe("ChatThread with Eve and AI Elements", () => {
     expect(screen.getByRole("img", { name: "diagram.png" })).toBeInTheDocument();
 
     resolveSession(
-      new Response(JSON.stringify({ sessionId: "ses_1" }), {
+      new Response(JSON.stringify({ sessionId: "ses_1", deliveryId: "delivery_test" }), {
         status: 200,
         headers: { "content-type": "application/json", "x-eve-session-id": "ses_1" },
       }),
@@ -1030,7 +1054,7 @@ describe("ChatThread with Eve and AI Elements", () => {
         return new Response("hello", { headers: { "content-type": "text/plain" } });
       }
       if (init?.method === "POST") {
-        return new Response(JSON.stringify({ sessionId: "ses_1" }), {
+        return new Response(JSON.stringify({ sessionId: "ses_1", deliveryId: "delivery_test" }), {
           status: 200,
           headers: { "content-type": "application/json", "x-eve-session-id": "ses_1" },
         });
@@ -1095,7 +1119,7 @@ describe("ChatThread with Eve and AI Elements", () => {
         }
         if (init?.method === "POST") {
           return Response.json(
-            { sessionId: "ses_1" },
+            { sessionId: "ses_1", deliveryId: "delivery_test" },
             { headers: { "x-eve-session-id": "ses_1" } },
           );
         }
@@ -1113,7 +1137,7 @@ describe("ChatThread with Eve and AI Elements", () => {
                 },
               },
             ]) {
-              controller.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
+              controller.enqueue(new TextEncoder().encode(`${JSON.stringify(wireEvent(event))}\n`));
             }
             init?.signal?.addEventListener("abort", () => {
               controller.error(new DOMException("Aborted", "AbortError"));
@@ -1170,7 +1194,7 @@ describe("ChatThread with Eve and AI Elements", () => {
         if (url.endsWith("/cancel")) return Response.json({ ok: true, status: "accepted" });
         if (!url.includes("/stream")) {
           return Response.json(
-            { sessionId: "ses_1" },
+            { sessionId: "ses_1", deliveryId: "delivery_test" },
             { headers: { "x-eve-session-id": "ses_1" } },
           );
         }
@@ -1180,7 +1204,7 @@ describe("ChatThread with Eve and AI Elements", () => {
             // is running, and only its parks may go with it.
             controller.enqueue(
               new TextEncoder().encode(
-                `${JSON.stringify({ type: "turn.started", data: { sequence: 1, turnId: "turn_7" } })}\n`,
+                `${JSON.stringify(wireEvent({ type: "turn.started", data: { sequence: 1, turnId: "turn_7" } }))}\n`,
               ),
             );
             init?.signal?.addEventListener("abort", () => {
@@ -1254,7 +1278,7 @@ describe("ChatThread with Eve and AI Elements", () => {
             );
           }
           return Response.json(
-            { sessionId: "ses_authenticated" },
+            { sessionId: "ses_authenticated", deliveryId: "delivery_test" },
             { headers: { "x-eve-session-id": "ses_authenticated" } },
           );
         }
@@ -1429,7 +1453,7 @@ describe("ChatThread with Eve and AI Elements", () => {
         if (isPendingInputCall([input])) return pendingInputResponse();
         if (init?.method === "POST") {
           return Response.json(
-            { sessionId: "ses_stream_failed" },
+            { sessionId: "ses_stream_failed", deliveryId: "delivery_test" },
             {
               status: 202,
               headers: { "x-eve-session-id": "ses_stream_failed" },
@@ -1528,7 +1552,7 @@ describe("ChatThread with Eve and AI Elements", () => {
         );
       }
       if (init?.method === "POST") {
-        return new Response(JSON.stringify({ sessionId: "ses_1" }), {
+        return new Response(JSON.stringify({ sessionId: "ses_1", deliveryId: "delivery_test" }), {
           status: 200,
           headers: { "content-type": "application/json", "x-eve-session-id": "ses_1" },
         });
@@ -1672,7 +1696,7 @@ describe("ChatThread with Eve and AI Elements", () => {
 
   it("asks for the queue turn policy for an ordinary turn", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ sessionId: "ses_1" }), {
+      new Response(JSON.stringify({ sessionId: "ses_1", deliveryId: "delivery_test" }), {
         status: 200,
         headers: { "content-type": "application/json", "x-eve-session-id": "ses_1" },
       }),
@@ -1709,7 +1733,7 @@ describe("ChatThread with Eve and AI Elements", () => {
         if (url.includes("/pending-input")) return pendingInputResponse();
         if (init?.method === "POST") {
           return Response.json(
-            { sessionId: "ses_1" },
+            { sessionId: "ses_1", deliveryId: "delivery_test" },
             { headers: { "x-eve-session-id": "ses_1" } },
           );
         }
@@ -1736,7 +1760,7 @@ describe("ChatThread with Eve and AI Elements", () => {
                 },
               },
             ]) {
-              controller.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
+              controller.enqueue(new TextEncoder().encode(`${JSON.stringify(wireEvent(event))}\n`));
             }
           },
         });
@@ -1793,7 +1817,7 @@ describe("ChatThread with Eve and AI Elements", () => {
         if (url.includes("/pending-input")) return pendingInputResponse();
         if (init?.method === "POST") {
           return Response.json(
-            { sessionId: "ses_1" },
+            { sessionId: "ses_1", deliveryId: "delivery_test" },
             { headers: { "x-eve-session-id": "ses_1" } },
           );
         }
@@ -1807,7 +1831,7 @@ describe("ChatThread with Eve and AI Elements", () => {
               },
               { type: "turn.started", data: { sequence: 2, turnId: "turn_1" } },
             ]) {
-              controller.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
+              controller.enqueue(new TextEncoder().encode(`${JSON.stringify(wireEvent(event))}\n`));
             }
           },
         });
@@ -1864,7 +1888,7 @@ describe("ChatThread with Eve and AI Elements", () => {
       { type: "turn.completed", data: { sequence: 6, turnId: "turn_2" } },
       { type: "session.waiting", data: { wait: "next-user-message" } },
     ]) {
-      streamController.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
+      streamController.enqueue(new TextEncoder().encode(`${JSON.stringify(wireEvent(event))}\n`));
     }
     streamController.close();
   });
@@ -1895,7 +1919,7 @@ describe("ChatThread with Eve and AI Elements", () => {
             );
           }
           return Response.json(
-            { sessionId: "ses_1" },
+            { sessionId: "ses_1", deliveryId: "delivery_test" },
             { headers: { "x-eve-session-id": "ses_1" } },
           );
         }
@@ -1909,7 +1933,7 @@ describe("ChatThread with Eve and AI Elements", () => {
                 },
                 { type: "turn.started", data: { sequence: 2, turnId: "turn_1" } },
               ]) {
-                controller.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
+                controller.enqueue(new TextEncoder().encode(`${JSON.stringify(wireEvent(event))}\n`));
               }
               init?.signal?.addEventListener("abort", () => {
                 controller.error(new DOMException("Aborted", "AbortError"));
@@ -1988,7 +2012,7 @@ describe("ChatThread with Eve and AI Elements", () => {
         if (url.includes("/pending-input")) return pendingInputResponse();
         if (init?.method === "POST") {
           return Response.json(
-            { sessionId: "ses_1" },
+            { sessionId: "ses_1", deliveryId: "delivery_test" },
             { headers: { "x-eve-session-id": "ses_1" } },
           );
         }
@@ -2004,7 +2028,7 @@ describe("ChatThread with Eve and AI Elements", () => {
                 },
                 { type: "turn.started", data: { sequence: 2, turnId: "turn_1" } },
               ]) {
-                controller.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
+                controller.enqueue(new TextEncoder().encode(`${JSON.stringify(wireEvent(event))}\n`));
               }
             },
           });
@@ -2054,7 +2078,7 @@ describe("ChatThread with Eve and AI Elements", () => {
       { type: "turn.completed", data: { sequence: 3, turnId: "turn_1" } },
       { type: "session.waiting", data: { wait: "next-user-message" } },
     ]) {
-      firstStreamController.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
+      firstStreamController.enqueue(new TextEncoder().encode(`${JSON.stringify(wireEvent(event))}\n`));
     }
     firstStreamController.close();
 
@@ -2079,7 +2103,7 @@ describe("ChatThread with Eve and AI Elements", () => {
         if (url.includes("/pending-input")) return pendingInputResponse();
         if (init?.method === "POST") {
           return Response.json(
-            { sessionId: "ses_1" },
+            { sessionId: "ses_1", deliveryId: "delivery_test" },
             { headers: { "x-eve-session-id": "ses_1" } },
           );
         }
@@ -2096,7 +2120,7 @@ describe("ChatThread with Eve and AI Elements", () => {
                 { type: "turn.started", data: { sequence: 2, turnId: "turn_1" } },
               ]) {
                 controller.enqueue(
-                  new TextEncoder().encode(`${JSON.stringify(event)}\n`),
+                  new TextEncoder().encode(`${JSON.stringify(wireEvent(event))}\n`),
                 );
               }
             },
@@ -2147,7 +2171,7 @@ describe("ChatThread with Eve and AI Elements", () => {
           { type: "session.waiting", data: { wait: "next-user-message" } },
         ]) {
           firstStreamController.enqueue(
-            new TextEncoder().encode(`${JSON.stringify(event)}\n`),
+            new TextEncoder().encode(`${JSON.stringify(wireEvent(event))}\n`),
           );
         }
         firstStreamController.close();
@@ -2182,7 +2206,7 @@ describe("ChatThread with Eve and AI Elements", () => {
             );
           }
           return Response.json(
-            { sessionId: "ses_1" },
+            { sessionId: "ses_1", deliveryId: "delivery_test" },
             { headers: { "x-eve-session-id": "ses_1" } },
           );
         }
@@ -2198,7 +2222,7 @@ describe("ChatThread with Eve and AI Elements", () => {
                 },
                 { type: "turn.started", data: { sequence: 2, turnId: "turn_1" } },
               ]) {
-                controller.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
+                controller.enqueue(new TextEncoder().encode(`${JSON.stringify(wireEvent(event))}\n`));
               }
             },
           });
@@ -2239,7 +2263,7 @@ describe("ChatThread with Eve and AI Elements", () => {
       { type: "turn.completed", data: { sequence: 3, turnId: "turn_1" } },
       { type: "session.waiting", data: { wait: "next-user-message" } },
     ]) {
-      firstStreamController.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
+      firstStreamController.enqueue(new TextEncoder().encode(`${JSON.stringify(wireEvent(event))}\n`));
     }
     firstStreamController.close();
 
@@ -2275,7 +2299,7 @@ describe("ChatThread with Eve and AI Elements", () => {
       ]),
     );
     const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ sessionId: "ses_1" }), {
+      new Response(JSON.stringify({ sessionId: "ses_1", deliveryId: "delivery_test" }), {
         status: 200,
         headers: { "content-type": "application/json", "x-eve-session-id": "ses_1" },
       }),
@@ -2337,7 +2361,7 @@ describe("ChatThread with Eve and AI Elements", () => {
         return pendingInputResponse();
       }
       if (init?.method === "POST") {
-        return new Response(JSON.stringify({ sessionId: "ses_1" }), {
+        return new Response(JSON.stringify({ sessionId: "ses_1", deliveryId: "delivery_test" }), {
           status: 200,
           headers: { "content-type": "application/json", "x-eve-session-id": "ses_1" },
         });
@@ -2422,7 +2446,7 @@ describe("ChatThread with Eve and AI Elements", () => {
         return pendingInputResponse();
       }
       if (init?.method === "POST") {
-        return new Response(JSON.stringify({ sessionId: "ses_1" }), {
+        return new Response(JSON.stringify({ sessionId: "ses_1", deliveryId: "delivery_test" }), {
           status: 202,
           headers: {
             "content-type": "application/json",
@@ -2436,6 +2460,7 @@ describe("ChatThread with Eve and AI Elements", () => {
             controller.enqueue(
               encoder.encode(
                 `${JSON.stringify({
+                  meta: { deliveryIds: ["delivery_test"] },
                   type: "input.resolved",
                   data: {
                     resolutions: [
@@ -2531,7 +2556,7 @@ describe("ChatThread with Eve and AI Elements", () => {
         return ledgerReads === 1 ? staleResponse : pendingInputResponse(currentState);
       }
       if (init?.method === "POST") {
-        return new Response(JSON.stringify({ sessionId: "ses_1" }), {
+        return new Response(JSON.stringify({ sessionId: "ses_1", deliveryId: "delivery_test" }), {
           status: 200,
           headers: { "content-type": "application/json", "x-eve-session-id": "ses_1" },
         });
@@ -2645,7 +2670,7 @@ describe("ChatThread with Eve and AI Elements", () => {
         return pendingInputResponse();
       }
       if (init?.method === "POST") {
-        return new Response(JSON.stringify({ sessionId: "ses_1" }), {
+        return new Response(JSON.stringify({ sessionId: "ses_1", deliveryId: "delivery_test" }), {
           status: 200,
           headers: { "content-type": "application/json", "x-eve-session-id": "ses_1" },
         });

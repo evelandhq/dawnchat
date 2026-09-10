@@ -549,7 +549,11 @@ function ChatThreadSession({
     }
     return ids;
   }, [pendingBatches]);
-  const composerDisabled = readOnly || chat.status === "completed" || isResuming;
+  const incompatibleDeployment =
+    agent.error instanceof ClientError &&
+    agent.error.code === "unsupported_eve_version";
+  const composerDisabled =
+    readOnly || chat.status === "completed" || isResuming || incompatibleDeployment;
   const projectedMessages = queuedTurns.some(
     (turn) => turn.status === "sending" || turn.status === "failed",
   )

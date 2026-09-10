@@ -8,8 +8,8 @@ allowBuilds:
   sharp: true
 minimumReleaseAgeExclude:
   # The client library is pinned to the newest verified release while Dawn
-  # remains compatible with Eveland's Eve 0.49.x, 0.50.x, and 0.51.x agents.
-  - eve@0.51.1
+  # requires Eve 0.52.3+ deployments for delivery-correlated chat responses.
+  - eve@0.52.5
   - '@next/env@16.3.2'
   - '@next/swc-darwin-arm64@16.3.2'
   - '@next/swc-darwin-x64@16.3.2'

@@ -265,6 +265,19 @@ async function proxyTurnRequest(
   await context.repository.clearPendingUserMessage(context.chat.id);
   await recordInputResponses(context, body);
 
+  // The POST already succeeded. Preserve the session and accepted HITL answers
+  // before reporting incompatibility; never retry or invent a delivery identity.
+  if (sessionId && body.message !== undefined && !stringValue(payload.deliveryId)) {
+    return Response.json(
+      {
+        code: "unsupported_eve_version",
+        accepted: true,
+        error: "This Agent cannot reliably continue chats. Upgrade its deployment to Eve 0.52.3 or newer (0.52.5 recommended), then start a new chat. This message was already accepted and may still be running; do not resend it.",
+      },
+      { status: 409, headers: { "cache-control": "no-store" } },
+    );
+  }
+
   const headers = new Headers({ "content-type": "application/json; charset=utf-8" });
   headers.set("x-eve-session-id", resolvedSessionId);
   return new Response(JSON.stringify(withoutContinuationToken(payload)), {
