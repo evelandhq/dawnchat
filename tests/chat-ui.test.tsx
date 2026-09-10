@@ -1568,6 +1568,112 @@ describe("ChatThread with Eve and AI Elements", () => {
     });
   });
 
+  it("adopts persisted history and pending approvals with a concurrent session", async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new Error("Adopting a stored snapshot must not send a turn");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const before = chat({
+      sessionState: null,
+      sessionCreateInProgress: true,
+      sessionCreateUnconfirmed: true,
+    });
+    const { rerender } = render(
+      <ChatThread chat={before} events={[]} pendingInput={EMPTY_PENDING}
+        pendingUserMessage="First message" />,
+    );
+    const history = stampEvents([
+      {
+        type: "message.completed",
+        data: { message: "Persisted winner response", finishReason: "stop", sequence: 1, stepIndex: 0, turnId: "turn_1" },
+      },
+      {
+        type: "input.requested",
+        data: {
+          requests: [{
+            requestId: "req_winner", kind: "tool-approval", prompt: "Delete record 7?",
+            display: "confirmation", options: [{ id: "approve", label: "Allow" }],
+            action: { kind: "tool-call", callId: "call_1", toolName: "delete_record", input: { id: 7 } },
+          }],
+          sequence: 2, stepIndex: 0, turnId: "turn_1",
+        },
+      },
+      { type: "session.waiting", data: { wait: "next-user-message", continuationToken: "ses_winner" } },
+    ]);
+    rerender(
+      <ChatThread
+        chat={{ ...before, sessionState: { sessionId: "ses_winner", streamIndex: 3 },
+          sessionCreateInProgress: false, sessionCreateUnconfirmed: false }}
+        events={history}
+        pendingInput={pendingBatches({ requests: [{ requestId: "req_winner", kind: "tool-approval" }] })}
+        pendingUserMessage={null}
+      />,
+    );
+
+    expect(screen.getByText("Persisted winner response")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Allow" })).toBeEnabled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("discards the challenged create when adopting its winner but retains Caller authentication", async () => {
+    const before = chat({ id: "chat_auth_race", sessionState: null });
+    const posts: Array<{ url: string; authorization: string | null; body: unknown }> = [];
+    const history = stampEvents([
+      {
+        type: "message.completed",
+        data: { message: "Winner already handled it", finishReason: "stop", sequence: 1, stepIndex: 0, turnId: "turn_winner" },
+      },
+      { type: "session.waiting", data: { wait: "next-user-message", continuationToken: "ses_winner" } },
+    ]);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (isPendingInputCall([input])) return pendingInputResponse();
+      if (init?.method === "POST") {
+        posts.push({ url: String(input), authorization: new Headers(init.headers).get("authorization"),
+          body: JSON.parse(String(init.body)) });
+        if (posts.length === 1) {
+          return Response.json({ code: "authentication_required", error: "Authenticate" }, {
+            status: 401, headers: { "www-authenticate": 'Bearer realm="eveland"' },
+          });
+        }
+        if (String(input).endsWith("/session")) {
+          return Response.json({ error: "A session create for this chat is already in progress" }, { status: 409 });
+        }
+        return Response.json({ sessionId: "ses_winner", deliveryId: "delivery_test" });
+      }
+      return ndjson([{ type: "session.waiting", data: { wait: "next-user-message", continuationToken: "ses_winner" } }]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    function Harness(): React.ReactElement {
+      const [snapshot, setSnapshot] = React.useState(before);
+      return (
+        <ChatThread
+          chat={snapshot} events={snapshot.sessionState ? history : []} pendingInput={EMPTY_PENDING}
+          pendingUserMessage={snapshot.sessionState ? null : "Run this once"}
+          getAccessToken={async () => "app-token"} getCallerToken={async () => "caller-token"}
+          respondToAuthenticationChallenge={async () => "caller-token"}
+          onChatStale={() => setSnapshot({ ...before, sessionState: { sessionId: "ses_winner", streamIndex: 2 } })}
+        />
+      );
+    }
+    render(<Harness />);
+    await waitFor(() => expect(screen.getByLabelText("Message")).toBeEnabled());
+    // Give the deferred authentication retry effect a chance to run after the
+    // session-key remount: it must not turn the old create into a continuation.
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 100)); });
+    expect(posts).toHaveLength(2);
+    expect(posts.every(({ url }) => url.endsWith("/session"))).toBe(true);
+    expect(screen.getByText("Winner already handled it")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Next message" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(posts).toHaveLength(3));
+    expect(posts[2]).toEqual({
+      url: "/api/chats/chat_auth_race/agent/eve/v1/session/ses_winner",
+      authorization: "Bearer caller-token",
+      body: { message: "Next message", turnPolicy: "queue" },
+    });
+  });
+
   it("adopts the session a create it lost commits after the first re-read", async () => {
     // The chat as the server holds it: another request owns the create claim
     // and has not persisted anything yet.

@@ -189,6 +189,7 @@ export function ChatThread({
   const [authentication, setAuthentication] = useState<{
     revision: number;
     mode: "app" | "caller";
+    sourceSessionId: string | null;
     events: ChatEvent[];
     pendingBatches: ClientPendingBatch[];
     session?: ClientSessionState;
@@ -197,6 +198,7 @@ export function ChatThread({
   }>({
     revision: 0,
     mode: "app",
+    sourceSessionId: chat.sessionState?.sessionId ?? null,
     events,
     pendingBatches: batchesFromState(pendingInput),
   });
@@ -229,6 +231,7 @@ export function ChatThread({
       setAuthentication((current) => ({
         revision: current.revision + 1,
         mode: "caller",
+        sourceSessionId: chat.sessionState?.sessionId ?? null,
         events: currentEvents,
         pendingBatches: currentPendingBatches,
         session: currentSession,
@@ -252,6 +255,14 @@ export function ChatThread({
     writeQueuedTurns(chat.id, queuedTurnState.turns);
   }, [chat.id, queuedTurnState]);
 
+  // The Caller Token survives adopting a session, but the captured events and
+  // retry belong to the store that received the challenge. A new server
+  // session snapshot must seed its own history and parks, and must not replay
+  // a challenged create as a continuation of the session another caller made.
+  const useAuthenticationSnapshot =
+    authentication.mode === "caller" &&
+    authentication.sourceSessionId === (chat.sessionState?.sessionId ?? null);
+
   return (
     <ChatThreadSession
       // The eve store reads its session once, at mount. A re-read that brings
@@ -259,10 +270,12 @@ export function ChatThread({
       // finally committed — has to reach the store as a fresh mount.
       key={`${authentication.revision}:${chat.sessionState?.sessionId ?? ""}`}
       chat={chat}
-      events={authentication.events}
+      events={useAuthenticationSnapshot ? authentication.events : events}
       pendingInput={pendingInput}
-      initialPendingBatches={authentication.pendingBatches}
-      initialSession={authentication.session}
+      initialPendingBatches={
+        useAuthenticationSnapshot ? authentication.pendingBatches : batchesFromState(pendingInput)
+      }
+      initialSession={useAuthenticationSnapshot ? authentication.session : undefined}
       pendingUserMessage={pendingUserMessage}
       pendingSentRef={pendingSentRef}
       getAccessToken={
@@ -274,8 +287,8 @@ export function ChatThread({
       onTurnFinished={onTurnFinished}
       queuedTurns={queuedTurns}
       readOnly={readOnly}
-      retryInput={authentication.retryInput}
-      retryQueuedTurnId={authentication.retryQueuedTurnId}
+      retryInput={useAuthenticationSnapshot ? authentication.retryInput : undefined}
+      retryQueuedTurnId={useAuthenticationSnapshot ? authentication.retryQueuedTurnId : undefined}
       updateQueuedTurns={updateQueuedTurns}
     />
   );

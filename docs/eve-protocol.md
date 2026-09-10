@@ -100,7 +100,11 @@ loser when. Whether a claim is still live is decided in the database on every
 read, never by comparing the stored deadline to an app server's clock, so a
 reader and a takeover cannot disagree about the same row. A re-read that
 brings back a session this view never had remounts the Eve store on it, since
-the store reads its session once, at mount.
+the store reads its session once, at mount. The new store seeds its history
+and pending input from that same server snapshot. A Caller Token acquired
+earlier stays usable, but the old authentication retry and its captured
+events belong to the previous snapshot: adopting the winner must not resend
+the initial message as a continuation.
 
 A chat that already holds a session creates no other, whatever its status: a
 turn that failed on the transport leaves the session it failed on running. Only
