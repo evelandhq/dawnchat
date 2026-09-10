@@ -9,9 +9,10 @@ export interface CapturedEveRequest {
   body: unknown;
 }
 
-/** Eve versions currently hosted by Eveland and supported by Dawn. */
-export const SUPPORTED_EVE_GENERATIONS = ["0.49", "0.50", "0.51"] as const;
-export type FakeEveGeneration = (typeof SUPPORTED_EVE_GENERATIONS)[number];
+/** Minimum supported chat release and newest verified release. */
+export const SUPPORTED_EVE_GENERATIONS = ["0.52.3", "0.52.5"] as const;
+// Legacy fixtures remain available for history and compatibility rejection tests.
+export type FakeEveGeneration = (typeof SUPPORTED_EVE_GENERATIONS)[number] | "0.49" | "0.50" | "0.51" | "0.52.2";
 
 export interface FakeEveServerOptions {
   readonly authenticationChallenge?: {
@@ -22,11 +23,14 @@ export interface FakeEveServerOptions {
   };
   /** Defaults to the newest verified generation. */
   readonly generation?: FakeEveGeneration;
+  readonly deliveryId?: string;
   readonly redirectHealthTo?: string;
   readonly failCreateSession?: boolean;
   /** Reject this many continuation attempts while Eve activates the session. */
   readonly continueSessionNotActiveCount?: number;
   readonly streamEvents?: readonly unknown[];
+  /** Legacy stream fixtures deliberately replay overlapping events. */
+  readonly respectStreamCursor?: boolean;
   /** Emit stream events without ending the response, like a live Agent. */
   readonly holdStreamOpen?: boolean;
   /** Eve answers `no_active_turn` when a cancel arrives between turns. */
@@ -75,8 +79,8 @@ function writeNdjson(
 }
 
 export async function startFakeEveServer(options: FakeEveServerOptions = {}): Promise<FakeEveServer> {
-  const generation = options.generation ?? "0.51";
-  if (!SUPPORTED_EVE_GENERATIONS.includes(generation)) {
+  const generation = options.generation ?? "0.52.5";
+  if (![...SUPPORTED_EVE_GENERATIONS, "0.49", "0.50", "0.51", "0.52.2"].includes(generation)) {
     throw new Error(`Unsupported fake Eve generation: ${generation}`);
   }
 
@@ -164,7 +168,11 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
           });
           return;
         }
-        writeJson(response, 202, { ok: true, sessionId, status: "accepted" });
+        writeJson(response, 202, {
+          ok: true, sessionId, status: "accepted",
+          ...(generation === "0.52.3" || generation === "0.52.5"
+            ? { deliveryId: options.deliveryId ?? "delivery_test" } : {}),
+        });
         return;
       }
 
@@ -172,7 +180,9 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
       if (request.method === "GET" && streamMatch) {
         writeNdjson(
           response,
-          options.streamEvents ?? defaultStreamEvents(generation),
+          (options.streamEvents ?? defaultStreamEvents(generation)).slice(
+            options.respectStreamCursor ? Number(url.searchParams.get("startIndex") ?? 0) : 0,
+          ),
           options.holdStreamOpen ?? false,
           generation === "0.49" ? 24 : 25,
         );

@@ -81,6 +81,6 @@ Catalog. Configure its base URL and, if required, bearer or custom-header
 authentication. Dawn normalizes external base URLs and permits only one
 active connection for each normalized URL.
 
-The Agent must implement the routes described in
+The Agent deployment must run Eve 0.52.3 or newer (0.52.5 recommended) and implement the routes described in
 [Eve protocol integration](eve-protocol.md). Health checks call the Agent
 server-side; secrets are encrypted at rest and never returned to the browser.
