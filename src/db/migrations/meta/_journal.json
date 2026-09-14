@@ -71,6 +71,13 @@
       "when": 1787211629599,
       "tag": "0009_messy_wiccan",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1789028343602,
+      "tag": "0010_session_create_claim",
+      "breakpoints": true
     }
   ]
 }

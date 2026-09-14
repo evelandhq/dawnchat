@@ -449,6 +449,24 @@ export function inputRespondedEvent(
  * Drops Eve's channel-local continuation capability before a payload leaves
  * the per-chat proxy for the browser.
  */
+/**
+ * Whether a failed session create leaves the Agent's side of it unknown. Only
+ * a refusal the Agent issued itself proves nothing was created; a 5xx or a
+ * request timeout can arrive after Eve has already persisted the workflow.
+ * The proxy decides what it records from this, and the browser decides what
+ * it shows from the same rule, so the two never disagree about a status.
+ */
+export function isAmbiguousSessionCreateStatus(status: number): boolean {
+  return status >= 500 || status === 408;
+}
+
+/**
+ * Error code on a create the proxy could not even attempt — its own record
+ * of the attempt failed before anything reached the Agent. The browser reads
+ * it as a refusal rather than the ambiguity its 5xx status would suggest.
+ */
+export const SESSION_CREATE_NOT_ATTEMPTED_CODE = "session_create_not_attempted";
+
 export function withoutContinuationToken<T extends Record<string, unknown>>(
   payload: T,
 ): Omit<T, "continuationToken"> {

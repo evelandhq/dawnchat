@@ -9,9 +9,10 @@ export interface CapturedEveRequest {
   body: unknown;
 }
 
-/** Eve versions currently hosted by Eveland and supported by Dawn. */
-export const SUPPORTED_EVE_GENERATIONS = ["0.49", "0.50", "0.51"] as const;
-export type FakeEveGeneration = (typeof SUPPORTED_EVE_GENERATIONS)[number];
+/** Minimum supported chat release and newest verified release. */
+export const SUPPORTED_EVE_GENERATIONS = ["0.52.3", "0.52.5"] as const;
+// Legacy fixtures remain available for history and compatibility rejection tests.
+export type FakeEveGeneration = (typeof SUPPORTED_EVE_GENERATIONS)[number] | "0.49" | "0.50" | "0.51" | "0.52.2";
 
 export interface FakeEveServerOptions {
   readonly authenticationChallenge?: {
@@ -22,13 +23,37 @@ export interface FakeEveServerOptions {
   };
   /** Defaults to the newest verified generation. */
   readonly generation?: FakeEveGeneration;
+  readonly deliveryId?: string;
   readonly redirectHealthTo?: string;
   readonly failCreateSession?: boolean;
   /** Reject this many continuation attempts while Eve activates the session. */
   readonly continueSessionNotActiveCount?: number;
   /** Answer continuations like Eveland's gateway once a SessionBinding's idle TTL has passed. */
   readonly continueSessionExpired?: boolean;
+  /** Status for `failCreateSession`; defaults to an ambiguous 500. */
+  readonly failCreateSessionStatus?: number;
+  /** Body for `failCreateSession`, for refusals Dawn has to tell apart. */
+  readonly failCreateSessionBody?: unknown;
+  /** Answer a continuation with a 500, the way a turn fails after creation. */
+  readonly failContinueSession?: boolean;
+  /**
+   * Force the anonymous principal an Agent whose Eve channel configures no
+   * authenticator resolves for every caller, credential or not. Defaults to
+   * "anonymous unless the request carries an authenticating header".
+   */
+  readonly anonymousPrincipal?: boolean;
+  /**
+   * Header name an Agent's own auth function authenticates, the way a custom
+   * `AuthFn` resolves `X-Agent-Key` into a named principal.
+   */
+  readonly authenticatedHeader?: string;
+  /** Hold a create open, so a concurrent one meets it in flight. */
+  readonly createSessionDelayMs?: number;
+  /** Commit one operation-owned session, then make its first create response ambiguous. */
+  readonly failFirstCreateResponseAfterCommit?: boolean;
   readonly streamEvents?: readonly unknown[];
+  /** Legacy stream fixtures deliberately replay overlapping events. */
+  readonly respectStreamCursor?: boolean;
   /** Emit stream events without ending the response, like a live Agent. */
   readonly holdStreamOpen?: boolean;
   /** Eve answers `no_active_turn` when a cancel arrives between turns. */
@@ -77,14 +102,16 @@ function writeNdjson(
 }
 
 export async function startFakeEveServer(options: FakeEveServerOptions = {}): Promise<FakeEveServer> {
-  const generation = options.generation ?? "0.51";
-  if (!SUPPORTED_EVE_GENERATIONS.includes(generation)) {
+  const generation = options.generation ?? "0.52.5";
+  if (![...SUPPORTED_EVE_GENERATIONS, "0.49", "0.50", "0.51", "0.52.2"].includes(generation)) {
     throw new Error(`Unsupported fake Eve generation: ${generation}`);
   }
 
   const requests: CapturedEveRequest[] = [];
   let nextSessionId = 1;
   let remainingSessionNotActiveResponses = options.continueSessionNotActiveCount ?? 0;
+  const sessionsByOperationId = new Map<string, string>();
+  const failedCreateResponses = new Set<string>();
 
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
@@ -114,6 +141,9 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
       }
 
       if (request.method === "POST" && url.pathname === "/eve/v1/session") {
+        if (options.createSessionDelayMs) {
+          await delay(options.createSessionDelayMs);
+        }
         if (
           options.authenticationChallenge &&
           request.headers.authorization !==
@@ -129,18 +159,61 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
           return;
         }
         if (options.failCreateSession) {
+          writeJson(
+            response,
+            options.failCreateSessionStatus ?? 500,
+            options.failCreateSessionBody ?? {
+              error: "Failed to create fake session",
+              errorId: "err_fake_session_create",
+              ok: false,
+            },
+          );
+          return;
+        }
+
+        const requestedOperationId = (body as { operationId?: unknown } | null)?.operationId;
+        const authenticated =
+          request.headers.authorization !== undefined ||
+          (options.authenticatedHeader !== undefined &&
+            request.headers[options.authenticatedHeader.toLowerCase()] !== undefined);
+        // Eve derives an operation's replay-stable identity from the
+        // authenticated principal, and refuses the field without one.
+        if (
+          requestedOperationId !== undefined &&
+          (options.anonymousPrincipal ?? !authenticated)
+        ) {
+          writeJson(response, 400, {
+            error: "operationId requires an authenticated principal.",
+            ok: false,
+          });
+          return;
+        }
+        const operationId =
+          typeof requestedOperationId === "string" ? requestedOperationId : undefined;
+        const existingSessionId = operationId
+          ? sessionsByOperationId.get(operationId)
+          : undefined;
+        const sessionId = existingSessionId ?? `ses_${nextSessionId++}`;
+        if (operationId && !existingSessionId) {
+          sessionsByOperationId.set(operationId, sessionId);
+        }
+        if (
+          options.failFirstCreateResponseAfterCommit &&
+          operationId &&
+          !failedCreateResponses.has(operationId)
+        ) {
+          failedCreateResponses.add(operationId);
           writeJson(response, 500, {
-            error: "Failed to create fake session",
-            errorId: "err_fake_session_create",
+            error: "Failed to create the session.",
+            errorId: "err_ambiguous_session_create",
             ok: false,
           });
           return;
         }
 
-        const id = nextSessionId++;
         writeJson(response, 202, {
           ok: true,
-          sessionId: `ses_${id}`,
+          sessionId,
           status: "accepted",
         });
         return;
@@ -149,6 +222,14 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
       const continueMatch = url.pathname.match(/^\/eve\/v1\/session\/(ses_\d+)$/);
       if (request.method === "POST" && continueMatch) {
         const sessionId = continueMatch[1];
+        if (options.failContinueSession) {
+          writeJson(response, 500, {
+            error: "Failed to continue fake session",
+            errorId: "err_fake_session_continue",
+            ok: false,
+          });
+          return;
+        }
         const suppliedToken = (body as { continuationToken?: unknown } | null)?.continuationToken;
         if (suppliedToken !== undefined) {
           writeJson(response, 400, {
@@ -174,7 +255,11 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
           });
           return;
         }
-        writeJson(response, 202, { ok: true, sessionId, status: "accepted" });
+        writeJson(response, 202, {
+          ok: true, sessionId, status: "accepted",
+          ...(generation === "0.52.3" || generation === "0.52.5"
+            ? { deliveryId: options.deliveryId ?? "delivery_test" } : {}),
+        });
         return;
       }
 
@@ -182,7 +267,9 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
       if (request.method === "GET" && streamMatch) {
         writeNdjson(
           response,
-          options.streamEvents ?? defaultStreamEvents(generation),
+          (options.streamEvents ?? defaultStreamEvents(generation)).slice(
+            options.respectStreamCursor ? Number(url.searchParams.get("startIndex") ?? 0) : 0,
+          ),
           options.holdStreamOpen ?? false,
           generation === "0.49" ? 24 : 25,
         );
@@ -246,6 +333,10 @@ function defaultStreamEvents(generation: FakeEveGeneration): readonly unknown[] 
     },
     { type: "session.waiting", data: { wait: "next-user-message" } },
   ];
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function closeServer(server: Server): Promise<void> {

@@ -30,9 +30,15 @@ function chat(
   };
 }
 
+// Default identity for single-delivery fixtures; cross-delivery tests supply their own.
+function wireEvent(event: unknown): unknown {
+  const value = event as { meta?: { deliveryIds?: readonly string[] } };
+  return { ...value, meta: { ...value.meta, deliveryIds: value.meta?.deliveryIds ?? ["delivery_test"] } };
+}
+
 function ndjson(events: readonly unknown[]): Response {
   return new Response(
-    `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
+    `${events.map((event) => JSON.stringify(wireEvent(event))).join("\n")}\n`,
     {
       status: 200,
       headers: {
@@ -94,7 +100,7 @@ function challengeFetchMock(seenAuthorization: Array<string | null>) {
         );
       }
       return Response.json(
-        { sessionId: "ses_authenticated" },
+        { sessionId: "ses_authenticated", deliveryId: "delivery_test" },
         { headers: { "x-eve-session-id": "ses_authenticated" } },
       );
     }
@@ -135,6 +141,55 @@ describe("ChatThread challenge retry under StrictMode (next dev parity)", () => 
       "Bearer app-token",
       "Bearer caller-token",
     ]);
+  });
+
+  // A create marked before the request that never came back leaves the chat
+  // active and unconfirmed, which is the shape that used to resend on sight.
+  it("never resends an unconfirmed first message on mount or remount", async () => {
+    const seenAuthorization: Array<string | null> = [];
+    const fetchMock = challengeFetchMock(seenAuthorization);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { unmount } = render(
+      <StrictMode>
+        <ChatThread
+          chat={chat({ sessionCreateUnconfirmed: true, sessionState: null })}
+          events={[]}
+          pendingInput={EMPTY_PENDING}
+          pendingUserMessage="Run this once"
+          getAccessToken={async () => "app-token"}
+          getCallerToken={async () => "caller-token"}
+          respondToAuthenticationChallenge={async () => "caller-token"}
+        />
+      </StrictMode>,
+    );
+
+    // Long enough for both StrictMode passes and the deferred mount send that
+    // a confirmed-pending chat would have made by now.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(seenAuthorization).toEqual([]);
+    expect(screen.getByLabelText("Message")).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Retry message" }),
+    ).toBeEnabled();
+
+    unmount();
+    render(
+      <StrictMode>
+        <ChatThread
+          chat={chat({ sessionCreateUnconfirmed: true, sessionState: null })}
+          events={[]}
+          pendingInput={EMPTY_PENDING}
+          pendingUserMessage="Run this once"
+          getAccessToken={async () => "app-token"}
+          getCallerToken={async () => "caller-token"}
+          respondToAuthenticationChallenge={async () => "caller-token"}
+        />
+      </StrictMode>,
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(seenAuthorization).toEqual([]);
   });
 
   it("retries a challenged composer message under StrictMode", async () => {
