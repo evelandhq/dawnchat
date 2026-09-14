@@ -28,6 +28,8 @@ export interface FakeEveServerOptions {
   readonly failCreateSession?: boolean;
   /** Reject this many continuation attempts while Eve activates the session. */
   readonly continueSessionNotActiveCount?: number;
+  /** Answer continuations like Eveland's gateway once a SessionBinding's idle TTL has passed. */
+  readonly continueSessionExpired?: boolean;
   /** Status for `failCreateSession`; defaults to an ambiguous 500. */
   readonly failCreateSessionStatus?: number;
   /** Body for `failCreateSession`, for refusals Dawn has to tell apart. */
@@ -233,6 +235,14 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
           writeJson(response, 400, {
             ok: false,
             error: "Session-ID routes do not accept 'continuationToken'.",
+          });
+          return;
+        }
+        if (options.continueSessionExpired) {
+          writeJson(response, 410, {
+            ok: false,
+            code: "session_expired",
+            error: "Session expired",
           });
           return;
         }

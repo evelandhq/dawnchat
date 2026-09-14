@@ -31,6 +31,12 @@ export type SessionState = z.infer<typeof sessionStateSchema>;
 const sessionStateSchema = z.object({
   sessionId: z.string().min(1),
   streamIndex: z.number().int().nonnegative().optional(),
+  /**
+   * How many replacement sessions preceded this one (absent = the chat's
+   * first). Turn ids in this session's events carry `g<generation>:` so they
+   * never collide with an earlier session's (see eve/turn-namespace).
+   */
+  generation: z.number().int().positive().optional(),
 });
 
 export type AgentConnection = typeof agentConnections.$inferSelect;

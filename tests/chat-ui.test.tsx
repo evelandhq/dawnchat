@@ -1317,6 +1317,59 @@ describe("ChatThread with Eve and AI Elements", () => {
     expect(getCallerToken).toHaveBeenCalled();
   });
 
+  it("asks for a re-read when Eveland says the session expired, keeping the draft", async () => {
+    const onChatStale = vi.fn();
+    const posted: string[] = [];
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        if (isPendingInputCall([input])) return pendingInputResponse();
+        if (init?.method === "POST") {
+          posted.push(String(input));
+          return Response.json(
+            { code: "session_expired", error: "Session expired", ok: false },
+            { status: 410, headers: { "cache-control": "no-store" } },
+          );
+        }
+        return ndjson([
+          { type: "session.waiting", data: { wait: "next-user-message" } },
+        ]);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({
+          id: "chat_expired",
+          sessionState: { sessionId: "ses_old", streamIndex: 2 },
+        })}
+        events={stampEvents([
+          {
+            type: "message.received",
+            data: { message: "My dog is Biscuit", sequence: 0, turnId: "turn_0" },
+          },
+        ])}
+        pendingInput={EMPTY_PENDING}
+        onChatStale={onChatStale}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "What is my dog called?" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    // The proxy recorded ses_old as over; the re-read hands this thread a
+    // store without it, whose next send creates a replacement session that
+    // the proxy seeds with the earlier conversation.
+    await waitFor(() => expect(onChatStale).toHaveBeenCalled(), { timeout: 5_000 });
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatch(/\/api\/chats\/chat_expired\/agent\/eve\/v1\/session\/ses_old$/);
+    expect(screen.getByRole("alert")).toHaveTextContent("Session expired");
+    expect(screen.getByLabelText("Message")).toHaveValue("What is my dog called?");
+    expect(screen.getByText("My dog is Biscuit")).toBeInTheDocument();
+  });
+
   it("does not repeat the Eveland authentication flow when the Caller Token is rejected", async () => {
     const challenge =
       'Bearer realm="eveland", authorization_uri="https://identity.example.com/api/identity/login", project_id="project_support", display_name="Eveland"';

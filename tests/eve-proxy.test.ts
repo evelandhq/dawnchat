@@ -3072,6 +3072,296 @@ describe("per-chat Eve protocol proxy", () => {
     expect(response.status).toBe(404);
     expect(server.requests).toEqual([]);
   });
+  it("records an Eveland-expired session as ended and forwards the 410 session_expired", async () => {
+    const server = await fakeServer({ continueSessionExpired: true });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Expiring Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Idle for a week",
+      ...chatIdentity,
+    });
+    await repository.updateChatSessionState(chat.id, { sessionId: "ses_1", streamIndex: 4 });
+    const consoleInfo = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const routes = await loadProxyRoutes();
+
+    const response = await routes.continueSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ message: "Still there?" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+
+    expect(response.status).toBe(410);
+    await expect(response.json()).resolves.toMatchObject({ code: "session_expired" });
+    // Eveland's word on ses_1 is recorded the way Eve's own would be: the
+    // session stays stored (the replacing create names it) and reads as over.
+    const stored = await repository.getChat(chat.id);
+    expect(stored?.sessionEndedAt).toBeInstanceOf(Date);
+    expect(stored?.sessionState).toMatchObject({ sessionId: "ses_1", streamIndex: 4 });
+    expect(consoleInfo).toHaveBeenCalledWith(
+      "Eve session expired; the chat will continue in a replacement session",
+      { chatId: chat.id, sessionId: "ses_1" },
+    );
+  });
+
+  it("starts a replacement session for an expired chat with the earlier conversation carried over", async () => {
+    const server = await fakeServer();
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Replacing Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Long-lived chat",
+      ...chatIdentity,
+    });
+    await repository.updateChatSessionState(chat.id, { sessionId: "ses_old", streamIndex: 2 });
+    await repository.markSessionEnded(chat.id, "ses_old");
+    await repository.appendEvent({
+      chatId: chat.id,
+      sessionId: "ses_old",
+      streamIndex: 0,
+      type: "message.received",
+      payload: {
+        type: "message.received",
+        data: { message: "My dog is Biscuit", sequence: 0, turnId: "turn_0" },
+      },
+    });
+    await repository.appendEvent({
+      chatId: chat.id,
+      sessionId: "ses_old",
+      streamIndex: 1,
+      type: "message.completed",
+      payload: {
+        type: "message.completed",
+        data: { message: "Noted: Biscuit.", finishReason: "stop", sequence: 1, stepIndex: 0, turnId: "turn_0" },
+      },
+    });
+    vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const routes = await loadProxyRoutes();
+
+    const response = await routes.createSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ message: "What is my dog called?" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id }) },
+    );
+
+    expect(response.status).toBe(202);
+    expect(response.headers.get("x-eve-session-id")).toBe("ses_1");
+    const sent = server.requests[0]!.body as { message: unknown };
+    expect(Array.isArray(sent.message)).toBe(true);
+    const [handoff, question] = sent.message as Array<{ type: string; text: string }>;
+    expect(handoff).toMatchObject({ type: "text" });
+    expect(handoff.text).toContain("[dawn:handoff]");
+    expect(handoff.text).toContain("User: My dog is Biscuit\nAssistant: Noted: Biscuit.");
+    expect(handoff.text.trimEnd().endsWith("[/dawn:handoff]")).toBe(true);
+    expect(question).toEqual({ type: "text", text: "What is my dog called?" });
+    await expect(repository.getChat(chat.id)).resolves.toMatchObject({
+      status: "active",
+      sessionState: { sessionId: "ses_1", streamIndex: 0, generation: 1 },
+    });
+    const stored = await repository.getChat(chat.id);
+    expect(stored?.sessionEndedAt).toBeNull();
+  });
+
+  it("namespaces a replacement session's turn ids so its turns never collide with the earlier session's", async () => {
+    const server = await fakeServer({
+      streamEvents: [
+        {
+          type: "message.received",
+          data: { message: "again", sequence: 0, turnId: "turn_0" },
+        },
+        {
+          type: "message.completed",
+          data: { message: "Hello", finishReason: "stop", sequence: 1, stepIndex: 0, turnId: "turn_0" },
+        },
+        { type: "session.waiting", data: { wait: "next-user-message" } },
+      ],
+    });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Generational Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Second generation",
+      ...chatIdentity,
+    });
+    await repository.updateChatSessionState(chat.id, { sessionId: "ses_old", streamIndex: 3 });
+    await repository.markSessionEnded(chat.id, "ses_old");
+    await repository.appendEvent({
+      chatId: chat.id,
+      sessionId: "ses_old",
+      streamIndex: 0,
+      type: "message.received",
+      payload: { type: "message.received", data: { message: "first", sequence: 0, turnId: "turn_0" } },
+    });
+    vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const routes = await loadProxyRoutes();
+    const created = await routes.createSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ message: "again" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id }) },
+    );
+    expect(created.status).toBe(202);
+
+    const streamed = await routes.streamSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1/stream`, {
+        headers: callerHeaders(),
+      }),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+    const lines = (await streamed.text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { type: string; data: Record<string, unknown> });
+    expect(lines.map((line) => line.data.turnId)).toEqual(["g1:turn_0", "g1:turn_0", undefined]);
+    const storedTurns = (await repository.listEvents(chat.id))
+      .filter((event) => event.type === "message.received")
+      .map((event) => (event.payload as { data: { turnId: string } }).data.turnId);
+    expect(storedTurns).toEqual(["turn_0", "g1:turn_0"]);
+
+    // Cancelling names the turn the way the browser saw it; Eve gets its own id.
+    const cancelled = await routes.cancelSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1/cancel`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ turnId: "g1:turn_0" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+    expect(cancelled.status).toBe(200);
+    const cancelRequest = server.requests.find((request) => request.path.endsWith("/cancel"));
+    expect(cancelRequest?.body).toEqual({ turnId: "turn_0" });
+  });
+
+  it("refuses to replace a session that has not ended, and starts plainly when nothing was said", async () => {
+    const server = await fakeServer();
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Careful Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const routes = await loadProxyRoutes();
+    const create = (chatId: string) =>
+      routes.createSession(
+        new Request(`http://localhost/api/chats/${chatId}/agent/eve/v1/session`, {
+          method: "POST",
+          headers: callerHeaders({ "content-type": "application/json" }),
+          body: JSON.stringify({ message: "Hello again" }),
+        }),
+        { params: Promise.resolve({ chatId }) },
+      );
+
+    const live = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Live",
+      ...chatIdentity,
+    });
+    await repository.updateChatSessionState(live.id, { sessionId: "ses_live", streamIndex: 1 });
+    expect((await create(live.id)).status).toBe(409);
+
+    const silent = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Silent",
+      ...chatIdentity,
+    });
+    await repository.updateChatSessionState(silent.id, { sessionId: "ses_silent", streamIndex: 0 });
+    await repository.markSessionEnded(silent.id, "ses_silent");
+    expect((await create(silent.id)).status).toBe(202);
+    // Nothing to carry over, so the message goes as typed (the create-once
+    // operation id is main's business, not the handoff's).
+    const sent = server.requests.at(-1)!.body as { message: unknown };
+    expect(sent.message).toBe("Hello again");
+  });
+
+  it("strips the conversation handoff from the echoed user message before it is stored or forwarded", async () => {
+    const handoff = "[dawn:handoff]\nUser: earlier\nAssistant: reply\n[/dawn:handoff]";
+    const server = await fakeServer({
+      streamEvents: [
+        {
+          type: "message.received",
+          data: {
+            message: `${handoff}\n\nWhat is my dog called?`,
+            parts: [
+              { type: "text", text: handoff },
+              { type: "text", text: "What is my dog called?" },
+            ],
+            sequence: 0,
+            turnId: "turn_0",
+          },
+        },
+        { type: "session.waiting", data: { wait: "next-user-message" } },
+      ],
+    });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Echoing Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Echo",
+      pendingUserMessage: "What is my dog called?",
+      ...chatIdentity,
+    });
+    const routes = await loadProxyRoutes();
+    const created = await routes.createSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ message: "What is my dog called?" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id }) },
+    );
+    expect(created.status).toBe(202);
+
+    const streamed = await routes.streamSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1/stream`, {
+        headers: callerHeaders(),
+      }),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+    expect(streamed.status).toBe(200);
+    const lines = (await streamed.text()).trim().split("\n").map((line) => JSON.parse(line) as { type: string; data: Record<string, unknown> });
+    const received = lines.find((line) => line.type === "message.received")!;
+    expect(received.data.message).toBe("What is my dog called?");
+    expect(received.data.parts).toEqual([{ type: "text", text: "What is my dog called?" }]);
+    const storedReceived = (await repository.listEvents(chat.id)).find(
+      (event) => event.type === "message.received",
+    );
+    expect(JSON.stringify(storedReceived?.payload)).not.toContain("[dawn:handoff]");
+  });
 });
 
 const chatIdentity = {

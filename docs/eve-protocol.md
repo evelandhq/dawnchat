@@ -39,6 +39,33 @@ stored `sessionId` and `streamIndex`; obsolete stored tokens are ignored. If the
 remote durable session is deleted, locally persisted display events do not
 reconstruct its model context.
 
+### Expired sessions and replacement
+
+An Eve session on Eveland is pinned to the Deployment that created it, and
+Eveland stops routing to it once its idle TTL passes (24 hours for the
+Playground, 7 days for API callers such as Dawn): a follow-up then answers
+`410 session_expired`. The proxy records the session as ended, exactly as it
+does for Eve's own `session_not_active`, and forwards the 410; the thread
+asks for a re-read, which hands it a store without a session, and the next
+send creates one in its place. Because that create replaces an ended session,
+the proxy carries the earlier conversation into its first message as a
+leading text part fenced by `[dawn:handoff]` / `[/dawn:handoff]` (newest 20
+turns within 12,000 characters; see `src/eve/session-handoff.ts`). Eve keeps
+that part in the session's durable history, so later turns still see it; the
+proxy strips it from the echoed `message.received` before persisting or
+forwarding, so the transcript shows only what the user typed. `clientContext`
+is not used for this because it is one-turn context and never enters durable
+history.
+
+Eve numbers turns per session and its client reducer keys rendered messages
+by turn id alone, so a replacement session's `turn_0` would otherwise render
+over the first session's. The stored session state carries the session's
+`generation` (1 for the first replacement, and so on), and the proxy prefixes
+every `turnId` in that session's events with `g<generation>:` before
+persisting or forwarding them (see `src/eve/turn-namespace.ts`). Cancellation
+is the one route where the browser hands a turn id back; the proxy strips the
+prefix there.
+
 Eve can briefly reject a normal follow-up with
 `session_not_active` while the session becomes ready. Dawn retries that message
 three times with the same 250/500/1000 ms backoff as Eve's client. HITL

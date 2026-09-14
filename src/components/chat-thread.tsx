@@ -541,10 +541,14 @@ function ChatThreadSession({
       // re-read hands this thread a store with no session, whose next send
       // creates one in its place.
       const retry = latestInputRef.current;
+      // Eveland refusing to route to the session any more (its idle TTL
+      // passed: 410 `session_expired`) is the same news from the other side;
+      // the proxy recorded the session as over in the same way.
       if (
         error instanceof ClientError &&
-        error.status === 409 &&
-        (!current?.session || error.code === "session_not_active")
+        ((error.status === 409 &&
+          (!current?.session || error.code === "session_not_active")) ||
+          (error.status === 410 && error.code === "session_expired"))
       ) {
         // The remount that re-read brings takes the store's failed delivery
         // with it, so the message goes back to the composer, which outlives

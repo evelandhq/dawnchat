@@ -32,6 +32,12 @@ import {
   type PendingInputRequest,
 } from "@/eve/proxy-contract";
 import {
+  buildSessionHandoff,
+  stripSessionHandoff,
+  withSessionHandoff,
+} from "@/eve/session-handoff";
+import { namespaceTurnIds, rawTurnId } from "@/eve/turn-namespace";
+import {
   CallerTokenError,
   callerTokenErrorResponse,
   getCallerTokenVerifier,
@@ -162,11 +168,14 @@ export async function proxyCancelEveTurn(
     return input;
   }
   const turnId = stringValue(input.turnId);
+  // The browser names turns as it saw them, generation prefix included; Eve
+  // knows only its own id.
+  const eveTurnId = turnId === undefined ? undefined : rawTurnId(turnId);
 
   try {
     const result = await resolved.client.sessions
       .attach(sessionId, { streamIndex: session.streamIndex ?? 0 })
-      .cancel(turnId ? { turnId } : undefined);
+      .cancel(eveTurnId ? { turnId: eveTurnId } : undefined);
     // Only `accepted` proves Eve tore anything down. A `no_active_turn` cancel
     // (the session was parked between turns) leaves Eve's batch alive, and
     // clearing the ledger for it would hide the controls while every later
@@ -288,6 +297,21 @@ async function proxyTurnRequest(
   delete body.operationId;
   if (sessionId !== undefined) {
     return forwardTurn(request, context, sessionId, body);
+  }
+
+  // A replacement session starts from the chat's stored conversation: Eve
+  // cannot seed durable history from outside, so it rides in the first
+  // message and the stream tap strips it from the echo (see session-handoff).
+  if (replaceSessionId !== undefined && body.message !== undefined) {
+    const handoff = buildSessionHandoff(await context.repository.listEvents(context.chat.id));
+    if (handoff) {
+      body.message = withSessionHandoff(body.message as never, handoff);
+      console.info("Starting a replacement Eve session with a conversation handoff", {
+        chatId: context.chat.id,
+        previousSessionId: replaceSessionId,
+        handoffChars: handoff.length,
+      });
+    }
   }
 
   if (context.sessionCreateOperationId) {
@@ -431,16 +455,27 @@ async function forwardTurn(
     } else if (remote.status !== 401) {
       await recordFailure({ refused });
     }
-    if (!isCreate && (await isSessionNotActiveResponse(remote))) {
+    if (
+      !isCreate &&
+      ((await isSessionNotActiveResponse(remote)) || (await isSessionExpiredResponse(remote)))
+    ) {
       // Eve's own word that the session it was asked to continue is gone —
-      // past the activation retries `postTurn` already spent on it. Recording
-      // that is what lets a create replace the session instead of leaving
-      // the chat stuck behind one nothing can reach.
+      // past the activation retries `postTurn` already spent on it — or
+      // Eveland's, once the session's idle TTL passed and its gateway answers
+      // 410 `session_expired` without reaching the Agent. Recording that is
+      // what lets a create replace the session instead of leaving the chat
+      // stuck behind one nothing can reach.
       await context.repository
         .markSessionEnded(context.chat.id, sessionId)
         .catch((error: unknown) => {
           console.error(`Failed to record the ended session for ${context.chat.id}:`, error);
         });
+      if (remote.status === 410) {
+        console.info("Eve session expired; the chat will continue in a replacement session", {
+          chatId: context.chat.id,
+          sessionId,
+        });
+      }
     }
     return forwardErrorResponse(remote, context.chat.id);
   }
@@ -461,9 +496,17 @@ async function forwardTurn(
   }
 
   const isContinuing = currentSession?.sessionId === resolvedSessionId;
+  // A replacement session is one generation on from the session it replaces;
+  // its turn ids are namespaced by that (see eve/turn-namespace).
+  const generation = isContinuing
+    ? currentSession?.generation
+    : currentSession
+      ? (currentSession.generation ?? 0) + 1
+      : undefined;
   const nextSession: SessionState = {
     sessionId: resolvedSessionId,
     streamIndex: isContinuing ? (currentSession?.streamIndex ?? 0) : 0,
+    ...(generation ? { generation } : {}),
   };
   if (claim) {
     // Nothing about this chat is this request's to write once its claim has
@@ -585,6 +628,23 @@ async function postTurn(
       return response;
     }
     await waitForSessionRetry(retryDelay, signal);
+  }
+}
+
+async function isSessionExpiredResponse(response: Response): Promise<boolean> {
+  if (response.status !== 410) {
+    return false;
+  }
+  try {
+    const body = (await response.clone().json()) as unknown;
+    return (
+      typeof body === "object" &&
+      body !== null &&
+      !Array.isArray(body) &&
+      (body as { code?: unknown }).code === "session_expired"
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -828,7 +888,10 @@ function createPersistedEventStream(input: {
   const persistEvent = async (
     event: MessageStreamEvent,
   ): Promise<{ event: MessageStreamEvent; terminal: boolean }> => {
-    const browserEvent = redactWaitingContinuationToken(event, input.sessionId);
+    const browserEvent = namespaceTurnIds(
+      stripSessionHandoff(redactWaitingContinuationToken(event, input.sessionId)),
+      input.session.generation,
+    );
     const eventStreamIndex = nextStreamIndex;
     nextStreamIndex += 1;
     latestCursor = Math.max(latestCursor, nextStreamIndex);
