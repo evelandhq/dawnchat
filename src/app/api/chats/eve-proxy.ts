@@ -31,6 +31,7 @@ import {
   stripSessionHandoff,
   withSessionHandoff,
 } from "@/eve/session-handoff";
+import { namespaceTurnIds, rawTurnId } from "@/eve/turn-namespace";
 import {
   CallerTokenError,
   callerTokenErrorResponse,
@@ -117,11 +118,14 @@ export async function proxyCancelEveTurn(
     return input;
   }
   const turnId = stringValue(input.turnId);
+  // The browser names turns as it saw them, generation prefix included; Eve
+  // knows only its own id.
+  const eveTurnId = turnId === undefined ? undefined : rawTurnId(turnId);
 
   try {
     const result = await resolved.client.sessions
       .attach(sessionId, { streamIndex: session.streamIndex ?? 0 })
-      .cancel(turnId ? { turnId } : undefined);
+      .cancel(eveTurnId ? { turnId: eveTurnId } : undefined);
     // Only `accepted` proves Eve tore anything down. A `no_active_turn` cancel
     // (the session was parked between turns) leaves Eve's batch alive, and
     // clearing the ledger for it would hide the controls while every later
@@ -293,9 +297,17 @@ async function proxyTurnRequest(
   }
 
   const isContinuing = currentSession?.sessionId === resolvedSessionId;
+  // A replacement session is one generation on from the session it replaces;
+  // its turn ids are namespaced by that (see eve/turn-namespace).
+  const generation = isContinuing
+    ? currentSession?.generation
+    : currentSession
+      ? (currentSession.generation ?? 0) + 1
+      : undefined;
   const nextSession: SessionState = {
     sessionId: resolvedSessionId,
     streamIndex: isContinuing ? (currentSession?.streamIndex ?? 0) : 0,
+    ...(generation ? { generation } : {}),
   };
   if (!isContinuing) {
     // Batches belong to a session; none survive its replacement.
@@ -600,8 +612,9 @@ function createPersistedEventStream(input: {
   const persistEvent = async (
     event: MessageStreamEvent,
   ): Promise<{ event: MessageStreamEvent; terminal: boolean }> => {
-    const browserEvent = stripSessionHandoff(
-      redactWaitingContinuationToken(event, input.sessionId),
+    const browserEvent = namespaceTurnIds(
+      stripSessionHandoff(redactWaitingContinuationToken(event, input.sessionId)),
+      input.session.generation,
     );
     const eventStreamIndex = nextStreamIndex;
     nextStreamIndex += 1;

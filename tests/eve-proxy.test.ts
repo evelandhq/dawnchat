@@ -2182,10 +2182,91 @@ describe("per-chat Eve protocol proxy", () => {
     expect(question).toEqual({ type: "text", text: "What is my dog called?" });
     await expect(repository.getChat(chat.id)).resolves.toMatchObject({
       status: "active",
-      sessionState: { sessionId: "ses_1", streamIndex: 0 },
+      sessionState: { sessionId: "ses_1", streamIndex: 0, generation: 1 },
     });
     const stored = await repository.getChat(chat.id);
     expect(stored?.sessionState?.expiredAt).toBeUndefined();
+  });
+
+  it("namespaces a replacement session's turn ids so its turns never collide with the earlier session's", async () => {
+    const server = await fakeServer({
+      streamEvents: [
+        {
+          type: "message.received",
+          data: { message: "again", sequence: 0, turnId: "turn_0" },
+        },
+        {
+          type: "message.completed",
+          data: { message: "Hello", finishReason: "stop", sequence: 1, stepIndex: 0, turnId: "turn_0" },
+        },
+        { type: "session.waiting", data: { wait: "next-user-message" } },
+      ],
+    });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Generational Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Second generation",
+      ...chatIdentity,
+    });
+    await repository.updateChatSessionState(chat.id, {
+      sessionId: "ses_old",
+      streamIndex: 3,
+      expiredAt: Date.now(),
+    });
+    await repository.appendEvent({
+      chatId: chat.id,
+      sessionId: "ses_old",
+      streamIndex: 0,
+      type: "message.received",
+      payload: { type: "message.received", data: { message: "first", sequence: 0, turnId: "turn_0" } },
+    });
+    vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const routes = await loadProxyRoutes();
+    const created = await routes.createSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ message: "again" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id }) },
+    );
+    expect(created.status).toBe(202);
+
+    const streamed = await routes.streamSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1/stream`, {
+        headers: callerHeaders(),
+      }),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+    const lines = (await streamed.text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { type: string; data: Record<string, unknown> });
+    expect(lines.map((line) => line.data.turnId)).toEqual(["g1:turn_0", "g1:turn_0", undefined]);
+    const storedTurns = (await repository.listEvents(chat.id))
+      .filter((event) => event.type === "message.received")
+      .map((event) => (event.payload as { data: { turnId: string } }).data.turnId);
+    expect(storedTurns).toEqual(["turn_0", "g1:turn_0"]);
+
+    // Cancelling names the turn the way the browser saw it; Eve gets its own id.
+    const cancelled = await routes.cancelSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1/cancel`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ turnId: "g1:turn_0" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+    expect(cancelled.status).toBe(200);
+    const cancelRequest = server.requests.find((request) => request.path.endsWith("/cancel"));
+    expect(cancelRequest?.body).toEqual({ turnId: "turn_0" });
   });
 
   it("refuses to replace a session that has not expired, and starts plainly when nothing was said", async () => {

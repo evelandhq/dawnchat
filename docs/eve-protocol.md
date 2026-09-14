@@ -51,6 +51,15 @@ history, so later turns still see it; the proxy strips it from the echoed
 only what the user typed. `clientContext` is not used for this because it is
 one-turn context and never enters durable history.
 
+Eve numbers turns per session and its client reducer keys rendered messages
+by turn id alone, so a replacement session's `turn_0` would otherwise render
+over the first session's. The stored session state carries the session's
+`generation` (1 for the first replacement, and so on), and the proxy prefixes
+every `turnId` in that session's events with `g<generation>:` before
+persisting or forwarding them (see `src/eve/turn-namespace.ts`). Cancellation
+is the one route where the browser hands a turn id back; the proxy strips the
+prefix there.
+
 A `409 session_not_active` that outlives the retries below is still treated as
 a failure: it can also mean a session that is merely slow to activate, and a
 duplicate session would silently lose the conversation.
