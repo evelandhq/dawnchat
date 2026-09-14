@@ -1290,6 +1290,71 @@ describe("ChatThread with Eve and AI Elements", () => {
     expect(getCallerToken).toHaveBeenCalled();
   });
 
+  it("starts a replacement Eve session for the same chat when the proxy reports session_expired", async () => {
+    const posted: Array<{ url: string; body: unknown }> = [];
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (init?.method === "POST") {
+          posted.push({ url, body: JSON.parse(String(init.body)) });
+          if (url.endsWith("/eve/v1/session/ses_old")) {
+            return Response.json(
+              { code: "session_expired", error: "Session expired", ok: false },
+              { status: 410, headers: { "cache-control": "no-store" } },
+            );
+          }
+          return Response.json(
+            { sessionId: "ses_new" },
+            { headers: { "x-eve-session-id": "ses_new" } },
+          );
+        }
+        return ndjson([
+          { type: "session.waiting", data: { wait: "next-user-message" } },
+        ]);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({
+          id: "chat_expired",
+          sessionState: { sessionId: "ses_old", streamIndex: 2 },
+        })}
+        events={stampEvents([
+          {
+            type: "message.received",
+            data: { message: "My dog is Biscuit", sequence: 0, turnId: "turn_0" },
+          },
+          {
+            type: "message.completed",
+            data: {
+              message: "Noted.",
+              finishReason: "stop",
+              sequence: 1,
+              stepIndex: 0,
+              turnId: "turn_0",
+            },
+          },
+        ])}
+        pendingInput={EMPTY_PENDING}
+        pendingUserMessage="What is my dog called?"
+        getAccessToken={vi.fn(async () => "app-token")}
+        onTurnFinished={onTurnFinished}
+      />,
+    );
+
+    await waitFor(() => expect(posted).toHaveLength(2));
+    expect(posted[0]!.url).toMatch(/\/api\/chats\/chat_expired\/agent\/eve\/v1\/session\/ses_old$/);
+    // The retry creates a session: the proxy, not the browser, carries the
+    // earlier conversation into it, so the body is the user's message alone.
+    expect(posted[1]!.url).toMatch(/\/api\/chats\/chat_expired\/agent\/eve\/v1\/session$/);
+    expect(posted[1]!.body).toEqual({ message: "What is my dog called?" });
+    // The transcript survived the remount.
+    expect(screen.getByText("My dog is Biscuit")).toBeInTheDocument();
+    expect(screen.queryByText(/Session expired/)).not.toBeInTheDocument();
+  });
+
   it("does not repeat the Eveland authentication flow when the Caller Token is rejected", async () => {
     const challenge =
       'Bearer realm="eveland", authorization_uri="https://identity.example.com/api/identity/login", project_id="project_support", display_name="Eveland"';

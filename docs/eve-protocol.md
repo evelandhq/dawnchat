@@ -33,6 +33,28 @@ stored `sessionId` and `streamIndex`; obsolete stored tokens are ignored. If the
 remote durable session is deleted, locally persisted display events do not
 reconstruct its model context.
 
+### Expired sessions and replacement
+
+An Eve session on Eveland is pinned to the Deployment that created it, and
+Eveland stops routing to it once its idle TTL passes (24 hours for the
+Playground, 7 days for API callers such as Dawn): a follow-up then answers
+`410 session_expired`. Dawn does not fail the chat. The proxy records
+`expiredAt` on the stored session state and forwards the 410; the browser
+remounts the thread without a session and retries the message, which reaches
+the create route. Because the chat now holds an expired session, the proxy
+starts a replacement Eve session and carries the earlier conversation into its
+first message as a leading text part fenced by `[dawn:handoff]` /
+`[/dawn:handoff]` (newest 20 turns within 12,000 characters; see
+`src/eve/session-handoff.ts`). Eve keeps that part in the session's durable
+history, so later turns still see it; the proxy strips it from the echoed
+`message.received` before persisting or forwarding, so the transcript shows
+only what the user typed. `clientContext` is not used for this because it is
+one-turn context and never enters durable history.
+
+A `409 session_not_active` that outlives the retries below is still treated as
+a failure: it can also mean a session that is merely slow to activate, and a
+duplicate session would silently lose the conversation.
+
 Supported Eve generations can briefly reject a normal follow-up with
 `session_not_active` while the session becomes ready. Dawn retries that message
 three times with the same 250/500/1000 ms backoff as Eve's client. HITL

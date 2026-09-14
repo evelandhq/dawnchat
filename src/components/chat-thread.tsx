@@ -159,7 +159,8 @@ export function ChatThread({
     mode: "app" | "caller";
     events: ChatEvent[];
     pendingBatches: ClientPendingBatch[];
-    session?: ClientSessionState;
+    /** `null`: start a replacement Eve session instead of resuming the chat's. */
+    session?: ClientSessionState | null;
     retryInput?: TurnPayload;
     retryQueuedTurnId?: string;
   }>({
@@ -169,6 +170,7 @@ export function ChatThread({
     pendingBatches: batchesFromState(pendingInput),
   });
 
+  const sessionReplacedRef = useRef(false);
   const handleAuthenticationError = async (
     error: ClientError,
     retryInput: TurnPayload,
@@ -177,6 +179,27 @@ export function ChatThread({
     currentPendingBatches: ClientPendingBatch[],
     queuedTurnId?: string,
   ): Promise<void> => {
+    // Eveland stopped routing to the chat's Eve session (its idle TTL passed;
+    // the proxy recorded `expiredAt`). The transcript stays; a remount without
+    // a session makes the store create a replacement one on the retry, and
+    // the proxy carries the earlier conversation into it. Once per mount: a
+    // replacement that expires again is not something a retry can fix.
+    if (error.status === 410 && error.code === "session_expired") {
+      if (sessionReplacedRef.current) return;
+      sessionReplacedRef.current = true;
+      pendingSentRef.current = true;
+      setAuthentication((current) => ({
+        revision: current.revision + 1,
+        mode: current.mode,
+        events: currentEvents,
+        // Batches belong to the expired session; none survive its replacement.
+        pendingBatches: [],
+        session: null,
+        retryInput,
+        retryQueuedTurnId: queuedTurnId,
+      }));
+      return;
+    }
     if (
       error.status !== 401 ||
       !respondToAuthenticationChallenge ||
@@ -263,7 +286,8 @@ function ChatThreadSession({
   updateQueuedTurns,
 }: ChatThreadProps & {
   initialPendingBatches: ClientPendingBatch[];
-  initialSession?: ClientSessionState;
+  /** `null` starts a replacement Eve session; `undefined` falls back to the chat's. */
+  initialSession?: ClientSessionState | null;
   pendingSentRef: React.MutableRefObject<boolean>;
   onAuthenticationError(
     error: ClientError,
@@ -443,7 +467,8 @@ function ChatThreadSession({
     // through the reducer, which is how a stored `client.input.responded`
     // reaches the message parts it answers.
     initialEvents: events as MessageStreamEvent[],
-    initialSession: initialSession ?? chat.sessionState ?? undefined,
+    initialSession:
+      initialSession === null ? undefined : (initialSession ?? chat.sessionState ?? undefined),
     prepareSend(input) {
       latestInputRef.current = input;
       return input;

@@ -31,6 +31,12 @@ export type SessionState = z.infer<typeof sessionStateSchema>;
 const sessionStateSchema = z.object({
   sessionId: z.string().min(1),
   streamIndex: z.number().int().nonnegative().optional(),
+  /**
+   * Set when Eveland answered this session with 410 `session_expired`: the
+   * chat keeps its transcript, and the next message starts a replacement Eve
+   * session that carries the earlier conversation (see eve/session-handoff).
+   */
+  expiredAt: z.number().int().nonnegative().optional(),
 });
 
 export type AgentConnection = typeof agentConnections.$inferSelect;

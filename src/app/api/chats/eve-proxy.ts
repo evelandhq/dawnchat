@@ -27,6 +27,11 @@ import {
   type PendingInputRequest,
 } from "@/eve/proxy-contract";
 import {
+  buildSessionHandoff,
+  stripSessionHandoff,
+  withSessionHandoff,
+} from "@/eve/session-handoff";
+import {
   CallerTokenError,
   callerTokenErrorResponse,
   getCallerTokenVerifier,
@@ -60,11 +65,16 @@ export async function proxyCreateEveSession(request: Request, chatId: string): P
   if (resolved.chat.status === "completed") {
     return errorResponse("Chat is completed", 409);
   }
-  if (resolved.chat.status === "active" && resolved.chat.sessionState?.sessionId) {
+  const expiredSession = resolved.chat.sessionState?.expiredAt !== undefined;
+  if (
+    resolved.chat.status === "active" &&
+    resolved.chat.sessionState?.sessionId &&
+    !expiredSession
+  ) {
     return errorResponse("Chat already has an Eve session", 409);
   }
 
-  return proxyTurnRequest(request, resolved);
+  return proxyTurnRequest(request, resolved, undefined, { replaceExpiredSession: expiredSession });
 }
 
 export async function proxyContinueEveSession(
@@ -211,6 +221,7 @@ async function proxyTurnRequest(
   request: Request,
   context: ProxyContext,
   sessionId?: string,
+  options: { replaceExpiredSession?: boolean } = {},
 ): Promise<Response> {
   const input = await readObjectBody(request);
   if (input instanceof Response) {
@@ -219,6 +230,21 @@ async function proxyTurnRequest(
 
   const body = withoutContinuationToken({ ...input });
   const currentSession = context.chat.sessionState;
+
+  // A replacement session starts from the chat's stored conversation: Eve
+  // cannot seed durable history from outside, so it rides in the first
+  // message and the stream tap strips it from the echo (see session-handoff).
+  if (options.replaceExpiredSession && body.message !== undefined) {
+    const handoff = buildSessionHandoff(await context.repository.listEvents(context.chat.id));
+    if (handoff) {
+      body.message = withSessionHandoff(body.message as never, handoff);
+      console.info("Starting a replacement Eve session with a conversation handoff", {
+        chatId: context.chat.id,
+        previousSessionId: currentSession?.sessionId,
+        handoffChars: handoff.length,
+      });
+    }
+  }
 
   let remote: Response;
   try {
@@ -229,6 +255,24 @@ async function proxyTurnRequest(
   }
 
   if (!remote.ok) {
+    if (sessionId !== undefined && currentSession && (await isSessionExpiredResponse(remote))) {
+      // Eveland no longer routes to this session (its SessionBinding idle
+      // TTL passed). The chat is not failed: the browser starts a replacement
+      // session for it, and the create route carries the conversation over.
+      await context.repository.updateChatSessionState(
+        context.chat.id,
+        { ...currentSession, expiredAt: Date.now() },
+        "active",
+      );
+      console.info("Eve session expired; the chat will continue in a replacement session", {
+        chatId: context.chat.id,
+        sessionId,
+      });
+      return Response.json(
+        { error: "Session expired", code: "session_expired", ok: false },
+        { status: 410, headers: { "cache-control": "no-store" } },
+      );
+    }
     if (remote.status !== 401) {
       await context.repository.updateChatStatus(context.chat.id, "failed");
     }
@@ -342,6 +386,23 @@ async function postTurn(
       return response;
     }
     await waitForSessionRetry(retryDelay, signal);
+  }
+}
+
+async function isSessionExpiredResponse(response: Response): Promise<boolean> {
+  if (response.status !== 410) {
+    return false;
+  }
+  try {
+    const body = (await response.clone().json()) as unknown;
+    return (
+      typeof body === "object" &&
+      body !== null &&
+      !Array.isArray(body) &&
+      (body as { code?: unknown }).code === "session_expired"
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -539,7 +600,9 @@ function createPersistedEventStream(input: {
   const persistEvent = async (
     event: MessageStreamEvent,
   ): Promise<{ event: MessageStreamEvent; terminal: boolean }> => {
-    const browserEvent = redactWaitingContinuationToken(event, input.sessionId);
+    const browserEvent = stripSessionHandoff(
+      redactWaitingContinuationToken(event, input.sessionId),
+    );
     const eventStreamIndex = nextStreamIndex;
     nextStreamIndex += 1;
     latestCursor = Math.max(latestCursor, nextStreamIndex);
