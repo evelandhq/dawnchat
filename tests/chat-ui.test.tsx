@@ -1385,6 +1385,62 @@ describe("ChatThread with Eve and AI Elements", () => {
     expect(screen.getByText("My dog is Biscuit")).toBeInTheDocument();
   });
 
+  it("asks for a re-read when Eve says the session is stranded, keeping the draft", async () => {
+    const onChatStale = vi.fn();
+    const posted: string[] = [];
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        if (isPendingInputCall([input])) return pendingInputResponse();
+        if (init?.method === "POST") {
+          posted.push(String(input));
+          return Response.json(
+            {
+              code: "session_stranded",
+              error: "This session is no longer available.",
+              eveVersion: "0.52.2",
+              ok: false,
+            },
+            { status: 409, headers: { "cache-control": "no-store" } },
+          );
+        }
+        return ndjson([
+          { type: "session.waiting", data: { wait: "next-user-message" } },
+        ]);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread
+        chat={chat({
+          id: "chat_stranded",
+          sessionState: { sessionId: "ses_old", streamIndex: 2 },
+        })}
+        events={stampEvents([
+          {
+            type: "message.received",
+            data: { message: "My dog is Biscuit", sequence: 0, turnId: "turn_0" },
+          },
+        ])}
+        pendingInput={EMPTY_PENDING}
+        onChatStale={onChatStale}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "What is my dog called?" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    // The Agent was rebuilt on another eve version after ses_old started; the
+    // proxy recorded it as over, so the re-read drops it and the next send
+    // creates a replacement session.
+    await waitFor(() => expect(onChatStale).toHaveBeenCalled(), { timeout: 5_000 });
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatch(/\/api\/chats\/chat_stranded\/agent\/eve\/v1\/session\/ses_old$/);
+    expect(screen.getByLabelText("Message")).toHaveValue("What is my dog called?");
+  });
+
   it("does not repeat the Eveland authentication flow when the Caller Token is rejected", async () => {
     const challenge =
       'Bearer realm="eveland", authorization_uri="https://identity.example.com/api/identity/login", project_id="project_support", display_name="Eveland"';

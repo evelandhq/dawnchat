@@ -461,6 +461,21 @@ export function isAmbiguousSessionCreateStatus(status: number): boolean {
 }
 
 /**
+ * Whether a refusal is Eve's — or Eveland's — word that the session it names
+ * can never answer again: `session_not_active` past the activation retries,
+ * `session_stranded` once another eve version built the session's owner, and
+ * `session_expired` once Eveland's idle TTL or Eve's history retention has
+ * passed. The proxy records the session as ended on any of these, and the
+ * browser asks for the re-read that drops it, from this one rule.
+ */
+export function isSessionEndedRefusal(status: number, code: string | undefined): boolean {
+  return (
+    (status === 409 && (code === "session_not_active" || code === "session_stranded")) ||
+    (status === 410 && code === "session_expired")
+  );
+}
+
+/**
  * Error code on a create the proxy could not even attempt — its own record
  * of the attempt failed before anything reached the Agent. The browser reads
  * it as a refusal rather than the ambiguity its 5xx status would suggest.

@@ -59,6 +59,17 @@ forwarding, so the transcript shows only what the user typed. `clientContext`
 is not used for this because it is one-turn context and never enters durable
 history.
 
+A session can also be stranded. Eve 0.76.1 and later refuse a session whose
+owning workflow run another eve version built, which on Eveland is every
+session started before its Agent was rebuilt on a new eve version: a
+follow-up, an input response, or the live stream answers
+`409 session_stranded`, and the session can never run again. Eve's
+`410 session_expired` on the stream route means the session's history passed
+its retention. The proxy treats both like the expired continuation above: it
+records the session as ended, forwards the refusal unchanged rather than as a
+502, and the browser's re-read leads to a replacement session carrying the
+handoff. A stranded session gets none of the activation retries below.
+
 Eve numbers turns per session and its client reducer keys rendered messages
 by turn id alone, so a replacement session's `turn_0` would otherwise render
 over the first session's. The stored session state carries the session's
@@ -151,7 +162,9 @@ turn that failed on the transport leaves the session it failed on running. Only
 a session Eve itself has said is over may be replaced: one whose stream
 reported `session.failed` or `session.completed`, one Eve answered a
 continuation for with `session_not_active` past the activation retries above,
-or one whose stream Eve no longer finds. Each is recorded against the stored
+one Eve or Eveland refused as `session_stranded` or `session_expired`, or one
+whose stream Eve no longer finds. The proxy and the browser read those
+refusals from one shared rule (`isSessionEndedRefusal`). Each is recorded against the stored
 session it is about, so a late answer about a session the chat has already
 replaced records nothing. The create that replaces an ended session must name
 exactly that session, so a racing request cannot replace a session neither of

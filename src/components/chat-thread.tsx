@@ -51,6 +51,7 @@ import {
 import {
   isAmbiguousSessionCreateStatus,
   isRequiredKind,
+  isSessionEndedRefusal,
   pendingRequestsFromEvent,
   resolvedInputRequestIds,
   SESSION_CREATE_NOT_ATTEMPTED_CODE,
@@ -544,13 +545,14 @@ function ChatThreadSession({
       // creates one in its place.
       const retry = latestInputRef.current;
       // Eveland refusing to route to the session any more (its idle TTL
-      // passed: 410 `session_expired`) is the same news from the other side;
-      // the proxy recorded the session as over in the same way.
+      // passed: 410 `session_expired`) is the same news from the other side,
+      // and so is Eve refusing a session another eve version built
+      // (`session_stranded`); the proxy recorded the session as over in the
+      // same way.
       if (
         error instanceof ClientError &&
-        ((error.status === 409 &&
-          (!current?.session || error.code === "session_not_active")) ||
-          (error.status === 410 && error.code === "session_expired"))
+        ((error.status === 409 && !current?.session) ||
+          isSessionEndedRefusal(error.status, error.code))
       ) {
         // The remount that re-read brings takes the store's failed delivery
         // with it, so the message goes back to the composer, which outlives
