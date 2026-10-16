@@ -32,6 +32,7 @@ function renderPart(part: EveMessagePart): void {
         canRespond: false,
         drafts: new Map<string, InputResponse>(),
         pending: new Set<string>(),
+        responses: new Map<string, InputResponse>(),
         respond: vi.fn(),
       },
       isStreaming: false,
@@ -54,6 +55,28 @@ describe("EveMessageView skill loads", () => {
   it("suppresses the body for a part that carries no eve metadata", () => {
     renderPart(loadSkillPart({ toolMetadata: undefined }));
 
+    expect(document.body.textContent).not.toContain("Internal step 1");
+  });
+
+  it("names a skill Eve 0.76+ loads through eve__skill", () => {
+    renderPart(
+      loadSkillPart({
+        input: { name: "deploy" },
+        toolMetadata: { eve: { kind: "load-skill", name: "deploy" } },
+        toolName: "eve__skill",
+      }),
+    );
+
+    expect(screen.getByText(/Loaded skill · deploy/u)).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("Internal step 1");
+  });
+
+  it("suppresses an eve__skill body that carries no eve metadata", () => {
+    renderPart(
+      loadSkillPart({ input: { name: "deploy" }, toolMetadata: undefined, toolName: "eve__skill" }),
+    );
+
+    expect(screen.getByText(/Loaded skill · deploy/u)).toBeInTheDocument();
     expect(document.body.textContent).not.toContain("Internal step 1");
   });
 
@@ -166,6 +189,7 @@ describe("EveMessageView skill loads", () => {
         canRespond: true,
         drafts: new Map<string, InputResponse>(),
         pending,
+        responses: new Map<string, InputResponse>(),
         respond: vi.fn(),
       },
       isStreaming: false,

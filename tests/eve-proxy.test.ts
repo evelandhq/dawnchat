@@ -1528,7 +1528,10 @@ describe("per-chat Eve protocol proxy", () => {
       },
       { type: "turn.completed", data: { sequence: 10, turnId: "turn_1" } },
       { type: "session.waiting", data: { wait: "next-user-message" } },
-    ] as const;
+    ].map((event, index) => ({
+      ...event,
+      meta: { at: "2026-07-14T00:00:00.000Z", id: `evt_${index}` },
+    }));
     const server = await fakeServer({ generation: "0.49", streamEvents });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
@@ -1578,14 +1581,25 @@ describe("per-chat Eve protocol proxy", () => {
       "turn.completed",
       "session.waiting",
     ]);
-    // The stored stream projects to exactly what the full stream projects to.
+    // The stored stream projects to what the full stream projects to. Eve
+    // 0.70+ names a message and its text parts after the first event that adds
+    // to them, so dropping deltas renames them; the ids are only render keys.
     const project = (events: readonly unknown[]) => {
       const reducer = defaultMessageReducer();
       let data = reducer.initial();
       for (const event of events) {
         data = reducer.reduce(data, event as MessageStreamEvent);
       }
-      return data;
+      return {
+        ...data,
+        messages: data.messages.map(({ id: _id, ...message }) => ({
+          ...message,
+          parts: message.parts.map((part) => {
+            const { id: _partId, ...rest } = part as { id?: string };
+            return rest;
+          }),
+        })),
+      };
     };
     expect(project(stored.map((event) => event.payload))).toEqual(project(forwarded));
     // Deltas still count toward the cursor: the next stored event carried it.
@@ -1833,7 +1847,7 @@ describe("per-chat Eve protocol proxy", () => {
     expect(JSON.stringify(stored)).not.toContain("private-capability");
     expect(server.requests.filter((request) => request.method === "POST")).toHaveLength(1);
     expect(server.requests.filter((request) => request.path.endsWith("/stream")).map((request) => request.query))
-      .toEqual(["", "?startIndex=2"]);
+      .toEqual(["?streamControlVersion=1", "?streamControlVersion=1&startIndex=2"]);
   });
 
   it.each(["0.49", "0.50", "0.51", "0.52.2"] as const)(

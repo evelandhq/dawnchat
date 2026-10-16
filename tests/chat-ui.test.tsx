@@ -94,6 +94,25 @@ function pendingInputResponse(state: PendingInputState = EMPTY_PENDING): Respons
 const isPendingInputCall = (call: readonly unknown[]): boolean =>
   String(call[0]).includes("/pending-input");
 
+const isPostCall = (call: readonly unknown[]): boolean =>
+  (call[1] as RequestInit | undefined)?.method === "POST";
+
+const isStreamCall = (call: readonly unknown[]): boolean =>
+  String(call[0]).includes("/stream");
+
+/**
+ * Answers the turn POST and the session stream by request, not call order:
+ * Eve 0.70+ opens the stream before it posts the turn.
+ */
+function turnFetch(post: () => Response, stream: () => Response) {
+  return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (isPendingInputCall([input])) return pendingInputResponse();
+    if (init?.method === "POST") return post();
+    if (isStreamCall([input])) return stream();
+    throw new Error(`Unexpected request: ${String(input)}`);
+  });
+}
+
 describe("ChatThread with Eve and AI Elements", () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -319,15 +338,14 @@ describe("ChatThread with Eve and AI Elements", () => {
         data: { wait: "next-user-message", continuationToken: "ses_1" },
       },
     ];
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(
+    const fetchMock = turnFetch(
+      () =>
         new Response(JSON.stringify({ sessionId: "ses_1", deliveryId: "delivery_test" }), {
           status: 200,
           headers: { "content-type": "application/json", "x-eve-session-id": "ses_1" },
         }),
-      )
-      .mockResolvedValueOnce(ndjson(resumedEvents));
+      () => ndjson(resumedEvents),
+    );
     vi.stubGlobal("fetch", fetchMock);
 
     render(
@@ -346,12 +364,13 @@ describe("ChatThread with Eve and AI Elements", () => {
     const turnCalls = () =>
       fetchMock.mock.calls.filter((call) => !isPendingInputCall(call));
     await waitFor(() => expect(turnCalls()).toHaveLength(2));
-    expect(turnCalls()[0]?.[0]).toBe("/api/chats/chat_rich/agent/eve/v1/session/ses_1");
-    expect(JSON.parse(String(turnCalls()[0]?.[1]?.body))).toEqual({
+    const post = turnCalls().find(isPostCall);
+    expect(post?.[0]).toBe("/api/chats/chat_rich/agent/eve/v1/session/ses_1");
+    expect(JSON.parse(String(post?.[1]?.body))).toEqual({
       inputResponses: [{ requestId: "req_1", optionId: "approve" }],
     });
-    expect(turnCalls()[1]?.[0]).toBe(
-      "/api/chats/chat_rich/agent/eve/v1/session/ses_1/stream?startIndex=4",
+    expect(turnCalls().find(isStreamCall)?.[0]).toBe(
+      "/api/chats/chat_rich/agent/eve/v1/session/ses_1/stream?streamControlVersion=1&startIndex=4",
     );
   });
 
@@ -411,17 +430,14 @@ describe("ChatThread with Eve and AI Elements", () => {
         data: { wait: "next-user-message", continuationToken: "ses_1" },
       },
     ]);
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(
+    const fetchMock = turnFetch(
+      () =>
         new Response(JSON.stringify({ sessionId: "ses_1", deliveryId: "delivery_test" }), {
           status: 200,
           headers: { "content-type": "application/json", "x-eve-session-id": "ses_1" },
         }),
-      )
-      .mockResolvedValueOnce(
-        ndjson([{ type: "session.waiting", data: { wait: "next-user-message" } }]),
-      );
+      () => ndjson([{ type: "session.waiting", data: { wait: "next-user-message" } }]),
+    );
     vi.stubGlobal("fetch", fetchMock);
 
     render(
@@ -458,7 +474,7 @@ describe("ChatThread with Eve and AI Elements", () => {
     const turnCalls = () =>
       fetchMock.mock.calls.filter((call) => !isPendingInputCall(call));
     await waitFor(() => expect(turnCalls()).toHaveLength(2));
-    expect(JSON.parse(String(turnCalls()[0]?.[1]?.body))).toEqual({
+    expect(JSON.parse(String(turnCalls().find(isPostCall)?.[1]?.body))).toEqual({
       inputResponses: [
         { requestId: "call_metric", optionId: "gmv_payors" },
         { requestId: "call_baseline", optionId: "same_period" },
@@ -820,17 +836,16 @@ describe("ChatThread with Eve and AI Elements", () => {
         data: { wait: "next-user-message", continuationToken: "ses_1" },
       },
     ]);
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(
+    const fetchMock = turnFetch(
+      () =>
         new Response(
           JSON.stringify({
             sessionId: "ses_1",
           }),
           { status: 200, headers: { "content-type": "application/json" } },
         ),
-      )
-      .mockResolvedValueOnce(ndjson([{ type: "session.waiting", data: { wait: "next-user-message" } }]));
+      () => ndjson([{ type: "session.waiting", data: { wait: "next-user-message" } }]),
+    );
     vi.stubGlobal("fetch", fetchMock);
 
     render(
@@ -853,7 +868,7 @@ describe("ChatThread with Eve and AI Elements", () => {
     const turnCalls = () =>
       fetchMock.mock.calls.filter((call) => !isPendingInputCall(call));
     await waitFor(() => expect(turnCalls()).toHaveLength(2));
-    expect(JSON.parse(String(turnCalls()[0]?.[1]?.body))).toEqual({
+    expect(JSON.parse(String(turnCalls().find(isPostCall)?.[1]?.body))).toEqual({
       inputResponses: [{ requestId: "req_text", text: "Proceed carefully" }],
     });
   });
@@ -2192,9 +2207,9 @@ describe("ChatThread with Eve and AI Elements", () => {
 
     const turnCalls = () =>
       fetchMock.mock.calls.filter((call) => !isPendingInputCall(call));
-    await waitFor(() => expect(turnCalls().length).toBeGreaterThan(0));
+    await waitFor(() => expect(turnCalls().some(isPostCall)).toBe(true));
     // The default steer policy would otherwise replace the running turn.
-    expect(JSON.parse(String(turnCalls()[0]?.[1]?.body))).toMatchObject({
+    expect(JSON.parse(String(turnCalls().find(isPostCall)?.[1]?.body))).toMatchObject({
       turnPolicy: "queue",
     });
   });
@@ -2281,6 +2296,116 @@ describe("ChatThread with Eve and AI Elements", () => {
     expect(turnCalls()).toHaveLength(1);
 
     streamController.close();
+  });
+
+  it("answers a question a held turn asked without waiting for the turn to end", async () => {
+    let postNumber = 0;
+    let answered!: () => void;
+    const answer = new Promise<void>((resolve) => {
+      answered = resolve;
+    });
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        // The proxy's ledger records the question as open until it is answered.
+        if (isPendingInputCall([input])) {
+          return pendingInputResponse(
+            postNumber < 2
+              ? pendingBatches({ requests: [{ requestId: "call_metric", kind: "question" }] })
+              : EMPTY_PENDING,
+          );
+        }
+        if (init?.method === "POST") {
+          postNumber += 1;
+          if (postNumber === 2) answered();
+          return Response.json(
+            { sessionId: "ses_1", deliveryId: "delivery_test" },
+            { headers: { "x-eve-session-id": "ses_1" } },
+          );
+        }
+        if (String(input).includes("startIndex=")) {
+          // Eve holds the resumed stream open until the answer lets the turn go on.
+          const resumed = [
+            {
+              type: "input.resolved",
+              data: {
+                resolutions: [
+                  { requestId: "call_metric", response: { requestId: "call_metric", optionId: "gmv_payors" } },
+                ],
+                sequence: 7,
+                turnId: "turn_1",
+              },
+            },
+            { type: "turn.completed", data: { sequence: 8, turnId: "turn_1" } },
+            { type: "session.waiting", data: { wait: "next-user-message" } },
+          ];
+          const body = new ReadableStream<Uint8Array>({
+            async start(controller) {
+              await answer;
+              for (const event of resumed) {
+                controller.enqueue(new TextEncoder().encode(`${JSON.stringify(wireEvent(event))}\n`));
+              }
+              controller.close();
+            },
+          });
+          return new Response(body, { headers: NDJSON_HEADERS });
+        }
+        return ndjson([
+          { type: "message.received", data: { message: "Report paid users", sequence: 1, turnId: "turn_1" } },
+          { type: "turn.started", data: { sequence: 2, turnId: "turn_1" } },
+          { type: "step.started", data: { modelId: "fake/model", sequence: 3, stepIndex: 0, turnId: "turn_1" } },
+          {
+            type: "actions.requested",
+            data: {
+              actions: [{ kind: "tool-call", callId: "call_metric", toolName: "ask_question", input: {} }],
+              sequence: 4,
+              stepIndex: 0,
+              turnId: "turn_1",
+            },
+          },
+          {
+            type: "input.requested",
+            data: {
+              requests: [
+                {
+                  requestId: "call_metric",
+                  kind: "question",
+                  prompt: "Which paid-user metric?",
+                  display: "select",
+                  options: [
+                    { id: "subscription", label: "Subscribers" },
+                    { id: "gmv_payors", label: "Payors" },
+                  ],
+                  action: { kind: "tool-call", callId: "call_metric", toolName: "ask_question", input: {} },
+                },
+              ],
+              sequence: 5,
+              stepIndex: 0,
+              turnId: "turn_1",
+            },
+          },
+          { type: "turn.waiting", data: { on: "input", sequence: 6, turnId: "turn_1" } },
+        ]);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatThread chat={chat({ id: "chat_held_turn" })} events={[]} pendingInput={EMPTY_PENDING} />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Report paid users" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    const payors = await screen.findByRole("button", { name: "Payors" });
+    await waitFor(() => expect(payors).toBeEnabled());
+    fireEvent.click(payors);
+
+    await waitFor(() => expect(postNumber).toBe(2));
+    const answerCall = fetchMock.mock.calls.filter(isPostCall)[1];
+    expect(JSON.parse(String(answerCall?.[1]?.body))).toMatchObject({
+      inputResponses: [{ requestId: "call_metric", optionId: "gmv_payors" }],
+    });
+    expect(await screen.findByText(/Responded: Payors/)).toBeInTheDocument();
   });
 
   it("steers a queued message into the running turn immediately", async () => {
@@ -2397,7 +2522,9 @@ describe("ChatThread with Eve and AI Elements", () => {
             { headers: { "x-eve-session-id": "ses_1" } },
           );
         }
-        if (postNumber < 3) {
+        // Eve opens each stream just before its POST, so the retry's stream
+        // arrives after the challenged second POST.
+        if (postNumber < 2) {
           const body = new ReadableStream<Uint8Array>({
             start(controller) {
               for (const event of [

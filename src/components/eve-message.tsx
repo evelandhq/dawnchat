@@ -66,6 +66,12 @@ export type InputRequestBatch = {
   drafts: ReadonlyMap<string, InputResponse>;
   /** Request IDs Eve is waiting on right now. */
   pending: ReadonlySet<string>;
+  /**
+   * Answers the conversation recorded, by request ID. Eve 0.70+ folds a
+   * `client.input.responded` event into conversation inputs only, not into the
+   * tool part, so a replayed answer is read from here.
+   */
+  responses: ReadonlyMap<string, InputResponse>;
   respond: (response: InputResponse) => void | Promise<void>;
 };
 
@@ -193,7 +199,11 @@ function DynamicToolPartView({
  * part whose projection carried no eve metadata.
  */
 function isLoadSkillPart(part: EveDynamicToolPart): boolean {
-  return part.toolMetadata?.eve?.kind === "load-skill" || part.toolName === "load_skill";
+  return (
+    part.toolMetadata?.eve?.kind === "load-skill" ||
+    part.toolName === "load_skill" ||
+    part.toolName === "eve__skill"
+  );
 }
 
 /**
@@ -236,7 +246,9 @@ function skillNameFromInput(input: unknown): string | undefined {
   if (typeof input !== "object" || input === null) {
     return undefined;
   }
-  const skill = (input as { skill?: unknown }).skill;
+  // Eve 0.76+ loads a skill with `{ name }`; earlier agents sent `{ skill }`.
+  const { name, skill: legacy } = input as { name?: unknown; skill?: unknown };
+  const skill = name ?? legacy;
   return typeof skill === "string" && skill.trim().length > 0 ? skill.trim() : undefined;
 }
 
@@ -314,7 +326,10 @@ function InputRequestPart({
   const draft = inputRequests.drafts.get(inputRequest.requestId);
   // While the thread is still waiting on a request, any projected response is
   // optimistic: the draft is the answer, and it has not reached Eve yet.
-  const submitted = pending ? undefined : part.toolMetadata?.eve?.inputResponse;
+  const submitted = pending
+    ? undefined
+    : part.toolMetadata?.eve?.inputResponse ??
+      inputRequests.responses.get(inputRequest.requestId);
   const inputResponse = submitted ?? draft;
   const selectedOption = inputRequest.options?.find(
     (option) => option.id === inputResponse?.optionId,

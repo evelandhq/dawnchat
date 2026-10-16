@@ -333,6 +333,7 @@ describe("Chat API", () => {
         payload: {
           type: "message.received",
           data: { message: `Question ${turn}`, turnId: `turn_${turn}` },
+          meta: { at: "2026-07-14T00:00:00.000Z", id: `evt_${turn}_received` },
         },
       });
       await repository.appendEvent({
@@ -342,6 +343,7 @@ describe("Chat API", () => {
         payload: {
           type: "step.started",
           data: { stepIndex: 0, turnId: `turn_${turn}` },
+          meta: { at: "2026-07-14T00:00:00.000Z", id: `evt_${turn}_step` },
         },
       });
       await repository.appendEvent({
@@ -356,6 +358,7 @@ describe("Chat API", () => {
             stepIndex: 0,
             turnId: `turn_${turn}`,
           },
+          meta: { at: "2026-07-14T00:00:00.000Z", id: `evt_${turn}_completed` },
         },
       });
     }

@@ -1,8 +1,10 @@
 # Eve protocol integration
 
-Dawn uses Eve's **0.52.5** client and requires Agent deployments running
+Dawn uses Eve's **0.80.0** client and requires Agent deployments running
 **Eve 0.52.3 or newer**, with protocol regression fixtures covering 0.52.3
-and 0.52.5. Both use stream version 25 and durable sessions addressed by ID.
+and 0.52.5. Deployments up to 0.68 send stream version 25; 0.69 and later send
+version 26, which the 0.52.5 client rejected. Both use durable sessions
+addressed by ID.
 Older stored transcripts,
 including version 24 snapshots, remain readable; that does not make an older
 live deployment compatible with the current client.
@@ -179,7 +181,9 @@ redacted before browser delivery. The UI uses Eve's `defaultMessageReducer`
 projection to render text, reasoning, tools, files, and input requests.
 
 The client normalizes historical version 24 streams to the version 25 event
-shape. Dawn's same-origin proxy declares stream version 25 to browser clients.
+shape; version 26 deltas have the same shape as version 25. Dawn's same-origin
+proxy declares stream version 25 to browser clients, which both current and
+pre-upgrade browser bundles accept.
 Historical version 24 cumulative text and reasoning snapshots are converted to
 equivalent version 25 deltas while read; native version 25 deltas remain additive.
 Workflow-backed tools continue to project through the dynamic-tool UI.
