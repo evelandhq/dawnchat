@@ -17,10 +17,11 @@ let nextId = 0;
 
 function row(payload: { type: string; data: Record<string, unknown> }): SeededRow {
   nextId += 1;
+  const id = `evt_${String(nextId).padStart(4, "0")}`;
   return {
-    id: `evt_${String(nextId).padStart(4, "0")}`,
+    id,
     type: payload.type,
-    payload_json: JSON.stringify(payload),
+    payload_json: JSON.stringify({ ...payload, meta: { at: "2026-07-14T00:00:00.000Z", id } }),
   };
 }
 
@@ -34,7 +35,18 @@ function project(rows: readonly SeededRow[]) {
   for (const event of collapseStreamedDeltas(events)) {
     data = reducer.reduce(data, event.payload as MessageStreamEvent);
   }
-  return data;
+  // Eve 0.70+ names a message and its text parts after the first event that
+  // adds to them, so dropping deltas renames them; the ids are only render keys.
+  return {
+    ...data,
+    messages: data.messages.map(({ id: _id, ...message }) => ({
+      ...message,
+      parts: message.parts.map((part) => {
+        const { id: _partId, ...rest } = part as { id?: string };
+        return rest;
+      }),
+    })),
+  };
 }
 
 function textRun(turnId: string, stepIndex: number, final: string, complete = true): SeededRow[] {

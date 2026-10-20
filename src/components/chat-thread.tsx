@@ -5,6 +5,7 @@ import type { UserContent } from "ai";
 import {
   ClientError,
   type ClientSessionState,
+  type ConversationState,
   type InputResponse,
   type MessageStreamEvent,
   type PrepareSend,
@@ -50,6 +51,7 @@ import {
 import {
   isAmbiguousSessionCreateStatus,
   isRequiredKind,
+  isSessionEndedRefusal,
   pendingRequestsFromEvent,
   resolvedInputRequestIds,
   SESSION_CREATE_NOT_ATTEMPTED_CODE,
@@ -517,6 +519,7 @@ function ChatThreadSession({
     // reaches the message parts it answers.
     initialEvents: events as MessageStreamEvent[],
     initialSession: initialSession ?? chat.sessionState ?? undefined,
+    followIdle: false,
     prepareSend(input) {
       latestInputRef.current = input;
       return input;
@@ -542,13 +545,14 @@ function ChatThreadSession({
       // creates one in its place.
       const retry = latestInputRef.current;
       // Eveland refusing to route to the session any more (its idle TTL
-      // passed: 410 `session_expired`) is the same news from the other side;
-      // the proxy recorded the session as over in the same way.
+      // passed: 410 `session_expired`) is the same news from the other side,
+      // and so is Eve refusing a session another eve version built
+      // (`session_stranded`); the proxy recorded the session as over in the
+      // same way.
       if (
         error instanceof ClientError &&
-        ((error.status === 409 &&
-          (!current?.session || error.code === "session_not_active")) ||
-          (error.status === 410 && error.code === "session_expired"))
+        ((error.status === 409 && !current?.session) ||
+          isSessionEndedRefusal(error.status, error.code))
       ) {
         // The remount that re-read brings takes the store's failed delivery
         // with it, so the message goes back to the composer, which outlives
@@ -986,10 +990,16 @@ function ChatThreadSession({
     }
   };
 
+  // Eve 0.69+ holds a turn open on a question one of its calls asked
+  // (`turn.waiting`), and the store takes the answer mid-turn.
+  const activeTurn = agent.data.activeTurnId
+    ? agent.data.turns[agent.data.activeTurnId]
+    : undefined;
   const inputRequests: InputRequestBatch = {
-    canRespond: !composerDisabled && !isBusy,
+    canRespond: !composerDisabled && (!isBusy || activeTurn?.waiting === true),
     drafts: draftResponses,
     pending: pendingRequestIds,
+    responses: recordedResponses(agent.data.inputs),
     respond: handleInputResponse,
   };
 
@@ -1380,6 +1390,16 @@ function initialCreateFromFailure(
   if (error.code === SESSION_CREATE_NOT_ATTEMPTED_CODE) return "rejected";
   if (error.status === 401 || error.status === 409) return null;
   return isAmbiguousSessionCreateStatus(error.status) ? "unconfirmed" : "rejected";
+}
+
+function recordedResponses(
+  inputs: ConversationState["inputs"],
+): ReadonlyMap<string, InputResponse> {
+  const responses = new Map<string, InputResponse>();
+  for (const [requestId, input] of Object.entries(inputs)) {
+    if (input.response) responses.set(requestId, input.response);
+  }
+  return responses;
 }
 
 function composerPlaceholder(status: ChatThreadSummary["status"]): string {

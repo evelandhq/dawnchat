@@ -8,16 +8,39 @@ import { collapseStreamedDeltas } from "@/eve/stream-projection";
 
 type StoredEvent = { type: string; payload: unknown };
 
+let nextId = 0;
+
 function stored(payload: { type: string; data: Record<string, unknown> }): StoredEvent {
-  return { type: payload.type, payload };
+  nextId += 1;
+  const meta = { at: "2026-07-14T00:00:00.000Z", id: `evt_${String(nextId).padStart(4, "0")}` };
+  return { type: payload.type, payload: { ...payload, meta } };
+}
+
+/**
+ * Eve 0.70+ names a message and its text parts after the first event that adds
+ * to them, so dropping deltas renames them; the ids are only render keys here.
+ */
+function withoutMessageIds<
+  T extends { messages: readonly { id: string; parts: readonly object[] }[] },
+>(data: T) {
+  return {
+    ...data,
+    messages: data.messages.map(({ id: _id, ...message }) => ({
+      ...message,
+      parts: message.parts.map((part) => {
+        const { id: _partId, ...rest } = part as { id?: string };
+        return rest;
+      }),
+    })),
+  };
 }
 
 function project(events: readonly StoredEvent[]) {
   const reducer = defaultMessageReducer();
-  return events.reduce(
+  return withoutMessageIds(events.reduce(
     (data, event) => reducer.reduce(data, event.payload as MessageStreamEvent),
     reducer.initial(),
-  );
+  ));
 }
 
 /** The delta run Eve emits while streaming one step's text. */
@@ -107,16 +130,18 @@ describe("collapseStreamedDeltas", () => {
     const deltas = collapsed.filter((event) => event.type === "message.appended");
 
     expect(deltas).toHaveLength(1);
-    expect(deltas[0]).toEqual(
-      stored({
+    expect(deltas[0]).toEqual({
+      type: "message.appended",
+      payload: {
         type: "message.appended",
         data: {
           messageDelta: "Partial answer",
           stepIndex: 0,
           turnId: "turn_1",
         },
-      }),
-    );
+        meta: (events.at(-1)?.payload as { meta: unknown }).meta,
+      },
+    });
     expect(project(collapsed)).toEqual(project(events));
   });
 

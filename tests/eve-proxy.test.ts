@@ -8,7 +8,9 @@ import { chats } from "@/db/schema";
 import { Client, defaultMessageReducer, type MessageStreamEvent } from "eve/client";
 
 import {
+  EXPIRED_SESSION_HISTORY_BODY,
   startFakeEveServer,
+  STRANDED_SESSION_BODY,
   SUPPORTED_EVE_GENERATIONS,
   type FakeEveServer,
 } from "@/eve/fake-eve-server.test-helper";
@@ -1528,7 +1530,10 @@ describe("per-chat Eve protocol proxy", () => {
       },
       { type: "turn.completed", data: { sequence: 10, turnId: "turn_1" } },
       { type: "session.waiting", data: { wait: "next-user-message" } },
-    ] as const;
+    ].map((event, index) => ({
+      ...event,
+      meta: { at: "2026-07-14T00:00:00.000Z", id: `evt_${index}` },
+    }));
     const server = await fakeServer({ generation: "0.49", streamEvents });
     const repository = createRepository(testDb.db);
     const agent = await repository.createAgentConnection({
@@ -1578,14 +1583,25 @@ describe("per-chat Eve protocol proxy", () => {
       "turn.completed",
       "session.waiting",
     ]);
-    // The stored stream projects to exactly what the full stream projects to.
+    // The stored stream projects to what the full stream projects to. Eve
+    // 0.70+ names a message and its text parts after the first event that adds
+    // to them, so dropping deltas renames them; the ids are only render keys.
     const project = (events: readonly unknown[]) => {
       const reducer = defaultMessageReducer();
       let data = reducer.initial();
       for (const event of events) {
         data = reducer.reduce(data, event as MessageStreamEvent);
       }
-      return data;
+      return {
+        ...data,
+        messages: data.messages.map(({ id: _id, ...message }) => ({
+          ...message,
+          parts: message.parts.map((part) => {
+            const { id: _partId, ...rest } = part as { id?: string };
+            return rest;
+          }),
+        })),
+      };
     };
     expect(project(stored.map((event) => event.payload))).toEqual(project(forwarded));
     // Deltas still count toward the cursor: the next stored event carried it.
@@ -1833,7 +1849,7 @@ describe("per-chat Eve protocol proxy", () => {
     expect(JSON.stringify(stored)).not.toContain("private-capability");
     expect(server.requests.filter((request) => request.method === "POST")).toHaveLength(1);
     expect(server.requests.filter((request) => request.path.endsWith("/stream")).map((request) => request.query))
-      .toEqual(["", "?startIndex=2"]);
+      .toEqual(["?streamControlVersion=1", "?streamControlVersion=1&startIndex=2"]);
   });
 
   it.each(["0.49", "0.50", "0.51", "0.52.2"] as const)(
@@ -3112,6 +3128,215 @@ describe("per-chat Eve protocol proxy", () => {
       "Eve session expired; the chat will continue in a replacement session",
       { chatId: chat.id, sessionId: "ses_1" },
     );
+  });
+
+  it("records a stranded session as ended without retrying it and forwards the 409 session_stranded", async () => {
+    const server = await fakeServer({ continueSessionStranded: true });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Upgraded Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Started before the upgrade",
+      ...chatIdentity,
+    });
+    await repository.updateChatSessionState(chat.id, { sessionId: "ses_1", streamIndex: 4 });
+    const consoleInfo = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const routes = await loadProxyRoutes();
+
+    const response = await routes.continueSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ message: "Still there?" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({ code: "session_stranded" });
+    // A stranded session can never become active, so it gets none of the
+    // activation retries `session_not_active` does.
+    expect(server.requests.filter((request) => request.method === "POST")).toHaveLength(1);
+    const stored = await repository.getChat(chat.id);
+    expect(stored?.sessionEndedAt).toBeInstanceOf(Date);
+    expect(stored?.sessionState).toMatchObject({ sessionId: "ses_1", streamIndex: 4 });
+    expect(consoleInfo).toHaveBeenCalledWith(
+      "Eve session was built by another eve version; the chat will continue in a replacement session",
+      { chatId: chat.id, sessionId: "ses_1" },
+    );
+  });
+
+  it.each([
+    { code: "session_stranded", status: 409, body: STRANDED_SESSION_BODY },
+    { code: "session_expired", status: 410, body: EXPIRED_SESSION_HISTORY_BODY },
+  ])(
+    "records a session whose stream Eve refuses with $code as ended and forwards the refusal",
+    async ({ code, status, body }) => {
+      const server = await fakeServer({ streamFailure: { status, body } });
+      const repository = createRepository(testDb.db);
+      const agent = await repository.createAgentConnection({
+        name: "Refusing Eve",
+        baseUrl: server.baseUrl,
+        authType: "none",
+        evelandProjectId: "project_support",
+      });
+      await repository.updateAgentHealth(agent.id, { status: "healthy" });
+      const chat = await repository.createChat({
+        agentConnectionId: agent.id,
+        title: "Gone session",
+        ...chatIdentity,
+      });
+      await repository.updateChatSessionState(chat.id, { sessionId: "ses_1", streamIndex: 2 });
+      vi.spyOn(console, "error").mockImplementation(() => undefined);
+      const routes = await loadProxyRoutes();
+
+      const response = await routes.streamSession(
+        new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1/stream?startIndex=2`, {
+          headers: callerHeaders(),
+        }),
+        { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+      );
+
+      // Forwarded rather than flattened into a 502, so the browser's client
+      // reads the same code and asks for the re-read that drops the session.
+      expect(response.status).toBe(status);
+      await expect(response.json()).resolves.toMatchObject({ code });
+      // Neither refusal is retried.
+      expect(server.requests.filter((request) => request.path.endsWith("/stream"))).toHaveLength(1);
+      const stored = await repository.getChat(chat.id);
+      expect(stored?.sessionEndedAt).toBeInstanceOf(Date);
+    },
+  );
+
+  it("records a session as ended when a live stream's reconnect is refused as stranded", async () => {
+    const server = await fakeServer({
+      streamEvents: [
+        {
+          type: "message.completed",
+          meta: { id: "evt_done", at: "2026-10-16T00:00:00Z" },
+          data: { message: "Working", finishReason: "tool-calls", sequence: 1, stepIndex: 0, turnId: "turn_1" },
+        },
+      ],
+      streamFailure: { status: 409, body: STRANDED_SESSION_BODY, afterResponses: 1 },
+    });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Rebuilt mid-turn",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Redeployed under a live turn",
+      ...chatIdentity,
+    });
+    await repository.updateChatSessionState(chat.id, { sessionId: "ses_1", streamIndex: 0 });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const routes = await loadProxyRoutes();
+
+    const response = await routes.streamSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1/stream`, {
+        headers: callerHeaders(),
+      }),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+
+    // The first stream opened and served its event; the client's reconnect
+    // after it ended met the refusal inside the already-open response.
+    expect(response.status).toBe(200);
+    await expect(response.text()).rejects.toThrow();
+    expect(server.requests.filter((request) => request.path.endsWith("/stream"))).toHaveLength(2);
+    expect((await repository.getChat(chat.id))?.sessionEndedAt).toBeInstanceOf(Date);
+    expect(consoleError).toHaveBeenCalledWith("The Eve session stream failed", {
+      chatId: chat.id,
+      sessionId: "ses_1",
+      status: 409,
+      code: "session_stranded",
+    });
+  });
+
+  it("logs why a session stream could not be opened", async () => {
+    const server = await fakeServer({ streamVersion: 99 });
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Future Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Unreadable stream",
+      ...chatIdentity,
+    });
+    await repository.updateChatSessionState(chat.id, { sessionId: "ses_1", streamIndex: 0 });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const routes = await loadProxyRoutes();
+
+    const response = await routes.streamSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1/stream`, {
+        headers: callerHeaders(),
+      }),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toEqual({ error: "Unable to reach Eve agent" });
+    expect(consoleError).toHaveBeenCalledWith("Unable to open the Eve session stream", {
+      chatId: chat.id,
+      sessionId: "ses_1",
+      error: "Unsupported message stream version: 99.",
+    });
+    // An unreadable stream says nothing about whether the session is over.
+    expect((await repository.getChat(chat.id))?.sessionEndedAt).toBeNull();
+  });
+
+  it("logs the cause when the Agent cannot be reached for a continuation", async () => {
+    const server = await fakeServer();
+    const repository = createRepository(testDb.db);
+    const agent = await repository.createAgentConnection({
+      name: "Vanished Eve",
+      baseUrl: server.baseUrl,
+      authType: "none",
+      evelandProjectId: "project_support",
+    });
+    await repository.updateAgentHealth(agent.id, { status: "healthy" });
+    const chat = await repository.createChat({
+      agentConnectionId: agent.id,
+      title: "Agent went away",
+      ...chatIdentity,
+    });
+    await repository.updateChatSessionState(chat.id, { sessionId: "ses_1", streamIndex: 0 });
+    await server.close();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const routes = await loadProxyRoutes();
+
+    const response = await routes.continueSession(
+      new Request(`http://localhost/api/chats/${chat.id}/agent/eve/v1/session/ses_1`, {
+        method: "POST",
+        headers: callerHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ message: "Hello?" }),
+      }),
+      { params: Promise.resolve({ chatId: chat.id, sessionId: "ses_1" }) },
+    );
+
+    expect(response.status).toBe(502);
+    expect(consoleError).toHaveBeenCalledWith("Unable to reach the Eve agent", {
+      chatId: chat.id,
+      sessionId: "ses_1",
+      error: "fetch failed",
+      cause: expect.stringContaining("ECONNREFUSED"),
+    });
   });
 
   it("starts a replacement session for an expired chat with the earlier conversation carried over", async () => {

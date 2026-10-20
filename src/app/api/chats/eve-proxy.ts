@@ -22,6 +22,7 @@ import {
   EMPTY_PENDING_INPUT,
   inputRespondedEvent,
   isAmbiguousSessionCreateStatus,
+  isSessionEndedRefusal,
   pendingRequestsFromEvent,
   readInputResponses,
   resolvedInputRequestIds,
@@ -248,15 +249,26 @@ export async function proxyEveSessionStream(
   try {
     first = await iterator.next();
   } catch (error) {
-    if (error instanceof ClientError && error.status === 404) {
-      // Eve does not know the session any more, and its client already spent
-      // its reconnect attempts asking. Recorded so a create may replace it.
+    if (streamFailureEndsSession(error)) {
       await resolved.repository
         .markSessionEnded(resolved.chat.id, sessionId)
         .catch((markError: unknown) => {
           console.error(`Failed to record the ended session for ${chatId}:`, markError);
         });
     }
+    if (error instanceof ClientError && isSessionEndedRefusal(error.status, error.code)) {
+      // Forwarded as Eve gave it, so the browser's client reads the same code
+      // and asks for the re-read that drops the session.
+      return forwardErrorResponse(
+        new Response(error.body, { status: error.status, headers: error.headers }),
+        chatId,
+      );
+    }
+    console.error("Unable to open the Eve session stream", {
+      chatId,
+      sessionId,
+      ...eveFailureDetails(error),
+    });
     return errorResponse("Unable to reach Eve agent", 502);
   }
 
@@ -418,10 +430,19 @@ async function forwardTurn(
     await context.repository.updateChatStatus(context.chat.id, "failed");
   };
 
+  const logUnreachable = (error: unknown): void => {
+    console.error("Unable to reach the Eve agent", {
+      chatId: context.chat.id,
+      ...(sessionId ? { sessionId } : {}),
+      ...eveFailureDetails(error),
+    });
+  };
+
   let remote: Response;
   try {
     remote = await postTurn(context, sessionId, body, signal);
-  } catch {
+  } catch (error) {
+    logUnreachable(error);
     await recordFailure();
     return errorResponse("Unable to reach Eve agent", 502);
   }
@@ -436,7 +457,8 @@ async function forwardTurn(
     delete body.operationId;
     try {
       remote = await postTurn(context, sessionId, body, signal);
-    } catch {
+    } catch (error) {
+      logUnreachable(error);
       await recordFailure();
       return errorResponse("Unable to reach Eve agent", 502);
     }
@@ -455,12 +477,11 @@ async function forwardTurn(
     } else if (remote.status !== 401) {
       await recordFailure({ refused });
     }
-    if (
-      !isCreate &&
-      ((await isSessionNotActiveResponse(remote)) || (await isSessionExpiredResponse(remote)))
-    ) {
+    const errorCode = isCreate ? undefined : await readErrorCode(remote);
+    if (!isCreate && isSessionEndedRefusal(remote.status, errorCode)) {
       // Eve's own word that the session it was asked to continue is gone —
-      // past the activation retries `postTurn` already spent on it — or
+      // past the activation retries `postTurn` already spent on it, or
+      // stranded because another eve version built its owner — or
       // Eveland's, once the session's idle TTL passed and its gateway answers
       // 410 `session_expired` without reaching the Agent. Recording that is
       // what lets a create replace the session instead of leaving the chat
@@ -475,6 +496,11 @@ async function forwardTurn(
           chatId: context.chat.id,
           sessionId,
         });
+      } else if (errorCode === "session_stranded") {
+        console.info(
+          "Eve session was built by another eve version; the chat will continue in a replacement session",
+          { chatId: context.chat.id, sessionId },
+        );
       }
     }
     return forwardErrorResponse(remote, context.chat.id);
@@ -631,38 +657,52 @@ async function postTurn(
   }
 }
 
-async function isSessionExpiredResponse(response: Response): Promise<boolean> {
-  if (response.status !== 410) {
-    return false;
-  }
+async function isSessionNotActiveResponse(response: Response): Promise<boolean> {
+  return response.status === 409 && (await readErrorCode(response)) === "session_not_active";
+}
+
+/** The stable `code` an Eve error body carries, read without consuming it. */
+async function readErrorCode(response: Response): Promise<string | undefined> {
   try {
     const body = (await response.clone().json()) as unknown;
-    return (
-      typeof body === "object" &&
-      body !== null &&
-      !Array.isArray(body) &&
-      (body as { code?: unknown }).code === "session_expired"
-    );
+    const code =
+      typeof body === "object" && body !== null && !Array.isArray(body)
+        ? (body as { code?: unknown }).code
+        : undefined;
+    return typeof code === "string" ? code : undefined;
   } catch {
-    return false;
+    return undefined;
   }
 }
 
-async function isSessionNotActiveResponse(response: Response): Promise<boolean> {
-  if (response.status !== 409) {
-    return false;
+/**
+ * Whether a stream failure is Eve's word that the session is over: it does
+ * not know the session any more, and its client already spent its reconnect
+ * attempts asking, or Eve or Eveland refused it outright as stranded or
+ * expired. Recorded so a create may replace the session.
+ */
+function streamFailureEndsSession(error: unknown): error is ClientError {
+  return (
+    error instanceof ClientError &&
+    (error.status === 404 || isSessionEndedRefusal(error.status, error.code))
+  );
+}
+
+/**
+ * What a failed Eve call is logged with. An Agent's answer is logged by its
+ * status and code only, like `forwardErrorResponse`, never its message; any
+ * other failure by its message and cause, since a refused connection surfaces
+ * only as the cause of fetch's "fetch failed".
+ */
+function eveFailureDetails(error: unknown): Record<string, unknown> {
+  if (error instanceof ClientError) {
+    return { status: error.status, ...(error.code ? { code: error.code } : {}) };
   }
-  try {
-    const body = (await response.clone().json()) as unknown;
-    return (
-      typeof body === "object" &&
-      body !== null &&
-      !Array.isArray(body) &&
-      (body as { code?: unknown }).code === "session_not_active"
-    );
-  } catch {
-    return false;
+  if (!(error instanceof Error)) {
+    return { error: String(error) };
   }
+  const cause = error.cause instanceof Error ? error.cause.message : undefined;
+  return { error: error.message, ...(cause ? { cause } : {}) };
 }
 
 function waitForSessionRetry(delayMs: number, signal: AbortSignal): Promise<void> {
@@ -953,9 +993,24 @@ function createPersistedEventStream(input: {
       } catch (error) {
         if (input.abort.signal.aborted) {
           controller.close();
-        } else {
-          controller.error(error);
+          return;
         }
+        // A reconnect inside an open stream can meet the same refusal an
+        // open can — an Agent rebuilt mid-turn answers `session_stranded` —
+        // and it is recorded the same way.
+        if (streamFailureEndsSession(error)) {
+          await input.repository
+            .markSessionEnded(input.chat.id, input.sessionId)
+            .catch((markError: unknown) => {
+              console.error(`Failed to record the ended session for ${input.chat.id}:`, markError);
+            });
+        }
+        console.error("The Eve session stream failed", {
+          chatId: input.chat.id,
+          sessionId: input.sessionId,
+          ...eveFailureDetails(error),
+        });
+        controller.error(error);
       }
     },
     cancel() {

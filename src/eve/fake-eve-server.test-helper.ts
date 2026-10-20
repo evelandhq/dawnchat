@@ -30,6 +30,20 @@ export interface FakeEveServerOptions {
   readonly continueSessionNotActiveCount?: number;
   /** Answer continuations like Eveland's gateway once a SessionBinding's idle TTL has passed. */
   readonly continueSessionExpired?: boolean;
+  /** Answer continuations like Eve 0.76.1+ for a session another eve version built. */
+  readonly continueSessionStranded?: boolean;
+  /**
+   * Refuse the session stream with this response, as Eve does a stranded or
+   * expired session — after `afterResponses` streams were served, for a
+   * refusal a live stream meets when it reconnects.
+   */
+  readonly streamFailure?: {
+    readonly status: number;
+    readonly body: unknown;
+    readonly afterResponses?: number;
+  };
+  /** Declare this stream version instead of the generation's own. */
+  readonly streamVersion?: number;
   /** Status for `failCreateSession`; defaults to an ambiguous 500. */
   readonly failCreateSessionStatus?: number;
   /** Body for `failCreateSession`, for refusals Dawn has to tell apart. */
@@ -59,6 +73,21 @@ export interface FakeEveServerOptions {
   /** Eve answers `no_active_turn` when a cancel arrives between turns. */
   readonly cancelStatus?: "accepted" | "no_active_turn";
 }
+
+/** Eve's refusal of a session another eve version built, as its HTTP channel sends it. */
+export const STRANDED_SESSION_BODY = {
+  code: "session_stranded",
+  error: "This session is no longer available.",
+  eveVersion: "0.52.2",
+  ok: false,
+} as const;
+
+/** Eve's refusal to stream a session whose history passed retention. */
+export const EXPIRED_SESSION_HISTORY_BODY = {
+  code: "session_expired",
+  error: "Session history is no longer available.",
+  ok: false,
+} as const;
 
 export interface FakeEveServer {
   readonly baseUrl: string;
@@ -110,6 +139,7 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
   const requests: CapturedEveRequest[] = [];
   let nextSessionId = 1;
   let remainingSessionNotActiveResponses = options.continueSessionNotActiveCount ?? 0;
+  let streamResponses = 0;
   const sessionsByOperationId = new Map<string, string>();
   const failedCreateResponses = new Set<string>();
 
@@ -246,6 +276,10 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
           });
           return;
         }
+        if (options.continueSessionStranded) {
+          writeJson(response, 409, STRANDED_SESSION_BODY);
+          return;
+        }
         if (remainingSessionNotActiveResponses > 0) {
           remainingSessionNotActiveResponses -= 1;
           writeJson(response, 409, {
@@ -265,13 +299,21 @@ export async function startFakeEveServer(options: FakeEveServerOptions = {}): Pr
 
       const streamMatch = url.pathname.match(/^\/eve\/v1\/session\/(ses_\d+)\/stream$/);
       if (request.method === "GET" && streamMatch) {
+        streamResponses += 1;
+        if (
+          options.streamFailure &&
+          streamResponses > (options.streamFailure.afterResponses ?? 0)
+        ) {
+          writeJson(response, options.streamFailure.status, options.streamFailure.body);
+          return;
+        }
         writeNdjson(
           response,
           (options.streamEvents ?? defaultStreamEvents(generation)).slice(
             options.respectStreamCursor ? Number(url.searchParams.get("startIndex") ?? 0) : 0,
           ),
           options.holdStreamOpen ?? false,
-          generation === "0.49" ? 24 : 25,
+          options.streamVersion ?? (generation === "0.49" ? 24 : 25),
         );
         return;
       }

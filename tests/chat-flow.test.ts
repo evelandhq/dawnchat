@@ -101,9 +101,9 @@ describe.each(SUPPORTED_EVE_GENERATIONS)("Eve %s chat flow smoke", (generation) 
       "GET /eve/v1/health",
       "GET /eve/v1/info",
       "POST /eve/v1/session",
-      "GET /eve/v1/session/ses_1/stream",
+      "GET /eve/v1/session/ses_1/stream?streamControlVersion=1",
       "POST /eve/v1/session/ses_1",
-      "GET /eve/v1/session/ses_1/stream?startIndex=3",
+      "GET /eve/v1/session/ses_1/stream?streamControlVersion=1&startIndex=3",
     ]);
     expect(server.requests[4].body).toEqual({ message: "Can you continue?" });
     for (const request of server.requests.slice(2)) {
